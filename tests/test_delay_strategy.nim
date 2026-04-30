@@ -4,8 +4,8 @@
 {.used.}
 
 import std/[math, sets]
-import ../../../libp2p/protocols/mix/delay_strategy
-import ../../tools/[unittest, crypto]
+import libp2p_mix/delay_strategy
+import ./tools/[unittest, crypto]
 
 const
   NumIterations = 100

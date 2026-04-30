@@ -4,18 +4,12 @@
 {.used.}
 
 import algorithm, chronos, results, stew/byteutils, sequtils, tables
-import
-  ../../../../libp2p/[
-    protocols/mix,
-    protocols/mix/mix_protocol,
-    protocols/mix/delay_strategy,
-    protocols/ping,
-    peerid,
-    switch,
-    builders,
-  ]
+import libp2p/[protocols/ping, peerid, switch, builders]
+import libp2p_mix
+import libp2p_mix/mix_protocol
+import libp2p_mix/delay_strategy
 
-import ../../../tools/[lifecycle, unittest]
+import ../tools/[lifecycle, unittest]
 import ../utils
 
 suite "Mix Protocol - Message Delivery":

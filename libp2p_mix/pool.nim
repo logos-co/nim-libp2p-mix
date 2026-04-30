@@ -9,11 +9,11 @@
 
 import std/[sequtils, tables]
 import results
-import ../../peerstore
-import ../../peerid
-import ../../multiaddress
-import ../../crypto/crypto
-import ../../crypto/curve25519
+import libp2p/peerstore
+import libp2p/peerid
+import libp2p/multiaddress
+import libp2p/crypto/crypto
+import libp2p/crypto/curve25519
 import ./mix_node
 import ./multiaddr as mix_multiaddr
 

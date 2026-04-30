@@ -4,7 +4,7 @@
 import results, sugar, sequtils, strutils
 import ./serialization
 import stew/endians2
-import ../../[multicodec, multiaddress, peerid]
+import libp2p/[multicodec, multiaddress, peerid]
 
 const
   PeerIdByteLen = 39 # ed25519 and secp256k1 multihash length

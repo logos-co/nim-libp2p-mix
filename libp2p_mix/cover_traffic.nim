@@ -11,8 +11,8 @@
 
 import std/deques
 import chronicles, chronos, results, metrics
-import ../../[multiaddress, peerid]
-import ../../utils/heartbeat
+import libp2p/[multiaddress, peerid]
+import libp2p/utils/heartbeat
 import ./mix_metrics, ./sphinx
 
 logScope:

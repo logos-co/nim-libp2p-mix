@@ -2,8 +2,8 @@
 # Copyright (c) Status Research & Development GmbH
 
 import strformat, sequtils
-import ../../crypto/[secp, crypto]
-import ../../[multiaddress, peerid]
+import libp2p/crypto/[secp, crypto]
+import libp2p/[multiaddress, peerid]
 import ./curve25519
 
 type MixNodeInfo* = object

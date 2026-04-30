@@ -3,8 +3,8 @@
 
 import chronicles, results
 import stew/[byteutils, leb128]
-import ../../protobuf/minprotobuf
-import ../../utils/sequninit
+import libp2p/protobuf/minprotobuf
+import libp2p/utils/sequninit
 
 type MixMessage* = object
   message*: seq[byte]

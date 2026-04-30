@@ -2,10 +2,10 @@
 # Copyright (c) Status Research & Development GmbH
 
 import chronicles, chronos, metrics, std/sequtils, std/tables
-import ../../builders
-import ../../stream/connection
-import ../../varint
-import ../../utils/sequninit
+import libp2p/builders
+import libp2p/stream/connection
+import libp2p/varint
+import libp2p/utils/sequninit
 import ./[mix_metrics, reply_connection, serialization, multiaddr]
 
 when defined(libp2p_mix_experimental_exit_is_dest):

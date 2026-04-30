@@ -4,16 +4,12 @@
 {.used.}
 
 import chronos, results, stew/byteutils
-import
-  ../../../../libp2p/[
-    protocols/mix,
-    protocols/mix/mix_protocol,
-    protocols/mix/serialization,
-    switch,
-    builders,
-  ]
+import libp2p/[switch, builders]
+import libp2p_mix
+import libp2p_mix/mix_protocol
+import libp2p_mix/serialization
 
-import ../../../tools/[lifecycle, unittest]
+import ../tools/[lifecycle, unittest]
 import ../utils
 import ../mock_mix
 

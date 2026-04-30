@@ -4,8 +4,8 @@
 {.used.}
 
 import results, std/sequtils
-import ../../../libp2p/protocols/mix/[serialization, delay]
-import ../../tools/[unittest]
+import libp2p_mix/[serialization, delay]
+import ./tools/[unittest]
 
 proc makeSurb(seed: byte): SURB =
   SURB(

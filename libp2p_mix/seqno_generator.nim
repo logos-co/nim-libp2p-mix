@@ -2,9 +2,9 @@
 # Copyright (c) Status Research & Development GmbH
 
 import std/endians, times
-import ../../peerid
+import libp2p/peerid
 import ./crypto
-import ../../utils/sequninit
+import libp2p/utils/sequninit
 
 type SeqNo* = uint32
 

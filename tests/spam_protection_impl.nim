@@ -2,7 +2,7 @@
 # Copyright (c) Status Research & Development GmbH
 
 import results
-import ../../../libp2p/protocols/mix/spam_protection
+import libp2p_mix/spam_protection
 
 # Custom spam protection implementations for testing integration scenarios
 

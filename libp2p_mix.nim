@@ -2,13 +2,13 @@
 # Copyright (c) Status Research & Development GmbH
 
 import
-  ./mix/[
+  ./libp2p_mix/[
     mix_protocol, mix_node, entry_connection, exit_layer, spam_protection,
     delay_strategy, pool,
   ]
-import ../stream/connection
+import libp2p/stream/connection
 import chronos
-import ../utils/sequninit
+import libp2p/utils/sequninit
 
 export toConnection
 export MixProtocolID

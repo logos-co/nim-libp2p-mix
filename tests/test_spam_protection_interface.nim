@@ -5,7 +5,7 @@
 
 import unittest2
 import results
-import ../../../libp2p/protocols/mix/spam_protection
+import libp2p_mix/spam_protection
 import ./spam_protection_impl
 
 const testPacketData = @[1.byte, 2, 3, 4, 5]

@@ -13,18 +13,11 @@
 import chronicles, chronos, results
 import std/[strformat, sequtils]
 import
-  ../libp2p/[
-    protocols/mix,
-    protocols/mix/mix_protocol,
-    protocols/mix/curve25519,
-    protocols/ping,
-    peerid,
-    multiaddress,
-    switch,
-    builders,
-    crypto/crypto,
-    crypto/secp,
-  ]
+  libp2p/
+    [protocols/ping, peerid, multiaddress, switch, builders, crypto/crypto, crypto/secp]
+import libp2p_mix
+import libp2p_mix/mix_protocol
+import libp2p_mix/curve25519
 
 const NumMixNodes = 10
 

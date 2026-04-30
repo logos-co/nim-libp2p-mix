@@ -4,24 +4,18 @@
 {.used.}
 
 import chronos, results
-import
-  ../../../../libp2p/[
-    protocols/mix,
-    protocols/mix/mix_protocol,
-    protocols/mix/cover_traffic,
-    protocols/mix/delay_strategy,
-    protocols/mix/serialization,
-    protocols/mix/mix_node,
-    protocols/mix/spam_protection,
-    peerid,
-    multiaddress,
-    switch,
-    builders,
-  ]
+import libp2p/[peerid, multiaddress, switch, builders]
+import libp2p_mix
+import libp2p_mix/mix_protocol
+import libp2p_mix/cover_traffic
+import libp2p_mix/delay_strategy
+import libp2p_mix/serialization
+import libp2p_mix/mix_node
+import libp2p_mix/spam_protection
 
 import metrics
-import ../../../../libp2p/protocols/mix/mix_metrics
-import ../../../tools/[lifecycle, unittest, crypto]
+import libp2p_mix/mix_metrics
+import ../tools/[lifecycle, unittest, crypto]
 import ../[utils, spam_protection_impl]
 
 suite "Cover Traffic - Integration":

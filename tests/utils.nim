@@ -5,21 +5,14 @@
 
 import chronos, results, strformat
 import
-  ../../../libp2p/[
-    protocols/mix,
-    protocols/mix/mix_protocol,
-    protocols/mix/curve25519,
-    protocols/mix/delay_strategy,
-    protocols/ping,
-    peerid,
-    multiaddress,
-    switch,
-    builders,
-    crypto/crypto,
-    crypto/secp,
-  ]
+  libp2p/
+    [protocols/ping, peerid, multiaddress, switch, builders, crypto/crypto, crypto/secp]
+import libp2p_mix
+import libp2p_mix/mix_protocol
+import libp2p_mix/curve25519
+import libp2p_mix/delay_strategy
 
-import ../../tools/[unittest, crypto]
+import ./tools/[unittest, crypto]
 import ./[mock_mix, spam_protection_impl]
 
 proc createSwitch*(

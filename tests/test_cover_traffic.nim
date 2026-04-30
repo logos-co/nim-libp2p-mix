@@ -5,10 +5,10 @@
 
 import chronos
 import results
-import ../../../libp2p/protocols/mix/[cover_traffic, serialization, spam_protection]
-import ../../../libp2p/[multiaddress, peerid]
-import ../../../libp2p/crypto/[crypto, secp]
-import ../../tools/[unittest, crypto]
+import libp2p_mix/[cover_traffic, serialization, spam_protection]
+import libp2p/[multiaddress, peerid]
+import libp2p/crypto/[crypto, secp]
+import ./tools/[unittest, crypto]
 
 proc makePeerInfo(): (PeerId, MultiAddress) =
   let kp = SkKeyPair.random(rng()[])

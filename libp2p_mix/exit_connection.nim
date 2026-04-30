@@ -2,7 +2,7 @@
 # Copyright (c) Status Research & Development GmbH
 
 import hashes, chronos, chronicles
-import ../../stream/connection
+import libp2p/stream/connection
 from fragmentation import DataSize
 
 type MixExitConnection* = ref object of Connection

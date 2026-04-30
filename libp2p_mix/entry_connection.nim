@@ -2,9 +2,9 @@
 # Copyright (c) Status Research & Development GmbH
 
 import hashes, chronos, results, chronicles
-import ../../stream/connection
-import ../../varint
-import ../../utils/sequninit
+import libp2p/stream/connection
+import libp2p/varint
+import libp2p/utils/sequninit
 import ./mix_protocol
 from fragmentation import DataSize
 

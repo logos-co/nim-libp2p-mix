@@ -4,9 +4,9 @@
 {.used.}
 
 import results, sequtils
-import ../../../libp2p/[crypto/crypto, crypto/secp, multiaddress, peerid, peerstore]
-import ../../../libp2p/protocols/mix/[mix_node, pool]
-import ../../tools/unittest
+import libp2p/[crypto/crypto, crypto/secp, multiaddress, peerid, peerstore]
+import libp2p_mix/[mix_node, pool]
+import ./tools/unittest
 import ./utils
 
 suite "MixNodePool Tests":

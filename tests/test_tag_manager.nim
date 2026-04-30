@@ -4,8 +4,8 @@
 {.used.}
 
 import chronos
-import ../../../libp2p/protocols/mix/tag_manager
-import ../../tools/unittest
+import libp2p_mix/tag_manager
+import ./tools/unittest
 
 proc makeTag(seed: byte): Tag =
   ## Helper to create a tag with a specific seed pattern

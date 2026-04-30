@@ -4,8 +4,9 @@
 {.used.}
 
 import results
-import ../../../libp2p/[crypto/curve25519, protocols/mix/curve25519]
-import ../../tools/[unittest]
+import libp2p/[crypto/curve25519]
+import libp2p_mix/curve25519
+import ./tools/[unittest]
 
 proc isNotZero(key: FieldElement): bool =
   for byte in key:

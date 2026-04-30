@@ -4,9 +4,11 @@
 {.used.}
 
 import chronos, results
-import ../../../../libp2p/[protocols/mix, protocols/mix/mix_protocol, switch, builders]
+import libp2p/[switch, builders]
+import libp2p_mix
+import libp2p_mix/mix_protocol
 
-import ../../../tools/[lifecycle, unittest]
+import ../tools/[lifecycle, unittest]
 import ../utils
 
 suite "Mix Protocol - Connection API":

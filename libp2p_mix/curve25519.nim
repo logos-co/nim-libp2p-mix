@@ -3,7 +3,7 @@
 
 import results
 import bearssl/rand
-import ../../crypto/curve25519
+import libp2p/crypto/curve25519
 
 const FieldElementSize* = Curve25519KeySize
 

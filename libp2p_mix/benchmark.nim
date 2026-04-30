@@ -2,7 +2,7 @@
 # Copyright (c) Status Research & Development GmbH
 
 import chronicles
-import ../../peerid
+import libp2p/peerid
 import times
 import stew/endians2
 

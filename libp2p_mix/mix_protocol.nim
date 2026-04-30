@@ -9,11 +9,11 @@ import
     tag_manager, mix_metrics, exit_layer, multiaddr, exit_connection, spam_protection,
     delay_strategy, pool, cover_traffic,
   ]
-import ../protocol
-import ../../utils/[sequninit]
-import ../../stream/[connection, lpstream]
-import ../../[switch, multicodec, peerinfo, varint]
-import ../../crypto/crypto
+import libp2p/protocols/protocol
+import libp2p/utils/[sequninit]
+import libp2p/stream/[connection, lpstream]
+import libp2p/[switch, multicodec, peerinfo, varint]
+import libp2p/crypto/crypto
 
 export pool
 

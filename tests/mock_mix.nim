@@ -4,17 +4,12 @@
 {.used.}
 
 import chronos, results, sets, sequtils
-import
-  ../../../libp2p/[
-    protocols/mix,
-    protocols/mix/mix_node,
-    protocols/mix/mix_protocol,
-    protocols/mix/pool,
-    protocols/mix/serialization,
-    peerid,
-    switch,
-    stream/lpstream,
-  ]
+import libp2p/[peerid, switch, stream/lpstream]
+import libp2p_mix
+import libp2p_mix/mix_node
+import libp2p_mix/mix_protocol
+import libp2p_mix/pool
+import libp2p_mix/serialization
 
 type MockMixProtocol* = ref object of MixProtocol
   surbCallIndex: int

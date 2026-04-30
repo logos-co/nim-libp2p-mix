@@ -4,10 +4,9 @@
 {.used.}
 
 import random, results, chronicles, bearssl/rand
-import ../../../libp2p/crypto/crypto
-import
-  ../../../libp2p/protocols/mix/[curve25519, serialization, sphinx, tag_manager, delay]
-import ../../tools/[unittest, crypto]
+import libp2p/crypto/crypto
+import libp2p_mix/[curve25519, serialization, sphinx, tag_manager, delay]
+import ./tools/[unittest, crypto]
 
 # Helper function to pad/truncate message
 proc addPadding(message: openArray[byte], size: int): seq[byte] =

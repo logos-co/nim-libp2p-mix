@@ -4,8 +4,9 @@
 {.used.}
 
 import sets, std/[os]
-import ../../../libp2p/[peerid, protocols/mix/seqno_generator]
-import ../../tools/[unittest]
+import libp2p/[peerid]
+import libp2p_mix/seqno_generator
+import ./tools/[unittest]
 
 const second = 1000
 

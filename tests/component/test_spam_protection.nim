@@ -4,8 +4,10 @@
 {.used.}
 
 import chronos, results, stew/byteutils
-import ../../../../libp2p/protocols/[protocol, ping, mix, mix/delay_strategy]
-import ../../../tools/[lifecycle, unittest]
+import libp2p/protocols/[protocol, ping]
+import libp2p_mix
+import libp2p_mix/delay_strategy
+import ../tools/[lifecycle, unittest]
 import ../utils
 
 suite "Mix Protocol - Spam Protection":

@@ -3,7 +3,7 @@
 
 import ./[serialization, seqno_generator]
 import results, stew/endians2
-import ../../peerid
+import libp2p/peerid
 
 const PaddingLengthSize* = 2
 const SeqNoSize* = 4

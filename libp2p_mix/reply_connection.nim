@@ -2,7 +2,7 @@
 # Copyright (c) Status Research & Development GmbH
 
 import hashes, chronos, chronicles
-import ../../stream/connection
+import libp2p/stream/connection
 import ./[serialization]
 from fragmentation import DataSize
 

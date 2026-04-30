@@ -7,8 +7,8 @@
 ## (important for replay protection where extending expiry on re-add would be a vulnerability).
 
 import chronicles, chronos
-import ../pubsub/timedcache
-import ../../utils/heartbeat
+import ./timedcache
+import libp2p/utils/heartbeat
 
 const
   DefaultTagTTL* = chronos.hours(1)

@@ -3,8 +3,8 @@
 
 import results, sequtils
 import ./[crypto, curve25519, delay, serialization, tag_manager]
-import ../../crypto/crypto
-import ../../utils/sequninit
+import libp2p/crypto/crypto
+import libp2p/utils/sequninit
 
 const PathLength* = 3 # Path length (L)
 const PaddingLength = (((t + 1) * (r - PathLength)) + 1) * k

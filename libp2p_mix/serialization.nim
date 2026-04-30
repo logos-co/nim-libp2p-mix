@@ -3,7 +3,7 @@
 
 import results
 import std/sequtils
-import ../../utility
+import libp2p/utility
 import ./delay
 
 const
