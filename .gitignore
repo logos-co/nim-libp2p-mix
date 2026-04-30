@@ -1,0 +1,15 @@
+# Nimble-generated, local-only
+nimble.develop
+nimble.paths
+nimbledeps/
+nimcache/
+
+# Build artefacts
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.o
+examples/mix_ping
