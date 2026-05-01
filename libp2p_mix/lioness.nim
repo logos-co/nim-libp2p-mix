@@ -16,7 +16,7 @@
 ## and reading 128 bytes (= 4 * 32) of output. The 12-byte ChaCha20 IV is
 ## supplied by the caller; ``sphinx.nim`` derives it per-hop from the shared
 ## secret with the same labeled-SHA-256 pattern it uses for the header
-## AES-CTR keys. See ``tests/libp2p/mix/test_lioness.nim`` for vectors.
+## AES-CTR keys. See ``tests/test_lioness.nim`` for vectors.
 ##
 ## LIONESS itself does not provide integrity. The Sphinx construction prepends
 ## ``k`` zero bytes to the plaintext before encryption and verifies them at the
