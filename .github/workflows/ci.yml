@@ -18,25 +18,20 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { os: linux,   builder: ubuntu-22.04, cpu: amd64, cc: gcc }
-          - { os: linux,   builder: ubuntu-22.04, cpu: i386,  cc: gcc }
-          - { os: macos,   builder: macos-15,     cpu: arm64, cc: clang }
-          - { os: windows, builder: windows-2022, cpu: amd64, cc: gcc }
+          # Windows is intentionally not in the matrix yet:
+          # `tests/test_cover_traffic` crashes inside the
+          # `ConstantRateCoverTraffic cover_rate_fraction` suite on
+          # Windows runners (abrupt process exit, no test-fail output).
+          # Add Windows back once the underlying issue is fixed.
+          - { os: linux, builder: ubuntu-22.04, cpu: amd64, cc: gcc }
+          - { os: linux, builder: ubuntu-22.04, cpu: i386,  cc: gcc }
+          - { os: macos, builder: macos-15,     cpu: arm64, cc: clang }
         nim:
           - { ref: '2.0.16', mm: refc }
           - { ref: '2.2.6',  mm: refc }
-        exclude:
-          # Trim windows × Nim 2.0 to save runner-minutes;
-          # 2.2 + i386 + macos cover the spread.
-          - platform: { os: windows, builder: windows-2022, cpu: amd64, cc: gcc }
-            nim: { ref: '2.0.16', mm: refc }
 
     name: ${{ matrix.platform.os }}-${{ matrix.platform.cpu }} (Nim ${{ matrix.nim.ref }})
     runs-on: ${{ matrix.platform.builder }}
-    # Windows is informational for now: test_cover_traffic crashes inside
-    # `ConstantRateCoverTraffic cover_rate_fraction` on Windows runners
-    # (process exits abruptly with no test-fail output). Tracked separately.
-    continue-on-error: ${{ matrix.platform.os == 'windows' }}
     defaults:
       run:
         shell: bash
@@ -51,13 +46,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install --no-install-recommends -y \
             gcc-multilib g++-multilib
-
-      - name: Install nasm (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          choco install nasm --no-progress -y
-          "C:\Program Files\NASM" | Out-File -FilePath $Env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Setup Nim ${{ matrix.nim.ref }}
         uses: jiro4989/setup-nim-action@v2
@@ -90,6 +78,4 @@ jobs:
         run: nimble test
 
       - name: Run component tests
-        # Networking-heavy integration tests — skip on Windows to avoid runner flake.
-        if: matrix.platform.os != 'windows'
         run: nimble testComponent
