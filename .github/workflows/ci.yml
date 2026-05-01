@@ -13,7 +13,10 @@ concurrency:
 
 jobs:
   test:
-    timeout-minutes: 30
+    # Each linux matrix job builds + runs 14 unit tests and 6 component tests
+    # with `-f` (force recompile) per test, which is ~25-35 min total — too
+    # close to a 30-min cap, so we go to 60 to absorb runner variance.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
