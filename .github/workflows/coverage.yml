@@ -42,13 +42,18 @@ jobs:
 
       - name: Run tests with coverage
         env:
-          NIMFLAGS: "--debugger:native --passC:--coverage --passL:--coverage"
+          # Pin nimcache to a known directory so lcov can scan the .gcda files
+          # produced by `--passC:--coverage`. The nimble runTest forwards
+          # NIMFLAGS into every test compilation.
+          NIMFLAGS: "--debugger:native --passC:--coverage --passL:--coverage --nimcache:./nimcache"
         run: nimble test
 
       - name: Generate coverage report
         run: |
-          lcov --capture --directory . --output-file coverage.info
+          lcov --capture --directory ./nimcache --output-file coverage.info \
+            --ignore-errors source,gcov,unused
           lcov --remove coverage.info '/usr/*' '*/.nimble/*' '*/tests/*' \
+            --ignore-errors unused \
             --output-file coverage.info
           lcov --list coverage.info
 
