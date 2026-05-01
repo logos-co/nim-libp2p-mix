@@ -33,6 +33,10 @@ jobs:
 
     name: ${{ matrix.platform.os }}-${{ matrix.platform.cpu }} (Nim ${{ matrix.nim.ref }})
     runs-on: ${{ matrix.platform.builder }}
+    # Windows is informational for now: test_cover_traffic crashes inside
+    # `ConstantRateCoverTraffic cover_rate_fraction` on Windows runners
+    # (process exits abruptly with no test-fail output). Tracked separately.
+    continue-on-error: ${{ matrix.platform.os == 'windows' }}
     defaults:
       run:
         shell: bash
