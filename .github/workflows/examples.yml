@@ -1,0 +1,41 @@
+name: Examples
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  example:
+    name: Build mix_ping example
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: '2.2.6'
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache nimble deps
+        uses: actions/cache@v5
+        with:
+          path: ~/.nimble
+          key: nimble-examples-${{ hashFiles('libp2p_mix.nimble') }}
+
+      - name: Install deps
+        run: nimble install -dy
+
+      - name: Set up project paths
+        run: nimble setup
+
+      - name: Build mix_ping
+        run: nimble example

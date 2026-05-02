@@ -1,0 +1,24 @@
+name: Linters
+
+on:
+  pull_request:
+  merge_group:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nph:
+    name: nph formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Check NPH formatting
+        uses: arnetheduck/nph-action@v1
+        with:
+          version: 0.7.0
+          options: "./. *.nim*"

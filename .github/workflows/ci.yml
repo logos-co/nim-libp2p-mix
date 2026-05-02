@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # Each linux matrix job builds + runs 14 unit tests and 6 component tests
+    # with `-f` (force recompile) per test, which is ~25-35 min total — too
+    # close to a 30-min cap, so we go to 60 to absorb runner variance.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          # Windows is intentionally not in the matrix yet:
+          # `tests/test_cover_traffic` crashes inside the
+          # `ConstantRateCoverTraffic cover_rate_fraction` suite on
+          # Windows runners (abrupt process exit, no test-fail output).
+          # Add Windows back once the underlying issue is fixed.
+          - { os: linux, builder: ubuntu-22.04, cpu: amd64, cc: gcc }
+          - { os: linux, builder: ubuntu-22.04, cpu: i386,  cc: gcc }
+          - { os: macos, builder: macos-15,     cpu: arm64, cc: clang }
+        nim:
+          - { ref: '2.0.16', mm: refc }
+          - { ref: '2.2.6',  mm: refc }
+
+    name: ${{ matrix.platform.os }}-${{ matrix.platform.cpu }} (Nim ${{ matrix.nim.ref }})
+    runs-on: ${{ matrix.platform.builder }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install i386 toolchain
+        if: matrix.platform.cpu == 'i386'
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y \
+            gcc-multilib g++-multilib
+
+      - name: Setup Nim ${{ matrix.nim.ref }}
+        uses: jiro4989/setup-nim-action@v2
+        with:
+          nim-version: ${{ matrix.nim.ref }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set NIMFLAGS for i386
+        if: matrix.platform.cpu == 'i386'
+        run: |
+          echo "NIMFLAGS=${NIMFLAGS} --cpu:i386 --passC:-m32 --passL:-m32" >> $GITHUB_ENV
+
+      - name: Cache nimble deps
+        id: nimble-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.nimble
+          key: nimble-${{ matrix.platform.os }}-${{ matrix.platform.cpu }}-${{ matrix.nim.ref }}-${{ hashFiles('libp2p_mix.nimble') }}
+
+      - name: Install deps
+        run: |
+          nim --version
+          nimble --version
+          nimble install -dy
+
+      - name: Set up project paths
+        run: nimble setup
+
+      - name: Run unit tests
+        run: nimble test
+
+      - name: Run component tests
+        run: nimble testComponent
