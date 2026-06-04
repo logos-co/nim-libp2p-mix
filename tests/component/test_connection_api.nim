@@ -32,8 +32,8 @@ suite "Mix Protocol - Connection API":
     expect LPStreamError:
       await conn.writeLp(@[1.byte, 2, 3])
 
-  asyncTest "toConnection rejects expectReply without destReadBehavior":
-    let nodes = await setupMixNodes(10) # no destReadBehavior registered
+  asyncTest "toConnection rejects forwarded expectReply without readSpec":
+    let nodes = await setupMixNodes(10)
     startAndDeferStop(nodes)
 
     # No destination protocol needed — toConnection should fail
@@ -50,7 +50,8 @@ suite "Mix Protocol - Connection API":
 
     check:
       conn.isErr
-      conn.error == "no destination read behavior for codec"
+      conn.error ==
+        "read spec is required when expecting replies from forwarded destinations"
 
   asyncTest "read from write-only connection raises error":
     let nodes = await setupMixNodes(10)

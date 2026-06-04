@@ -53,9 +53,7 @@ suite "Mix Protocol - Node Failures":
       except CatchableError as e:
         raiseAssert e.msg
 
-    let (nodes, mock) = await setupMixNodesWithMock(
-      10, destReadBehavior = Opt.some((codec: TestCodec, callback: readLp(ReadLen)))
-    )
+    let (nodes, mock) = await setupMixNodesWithMock(10)
 
     let (destNode, _) = await setupDestNode(destProto)
 
@@ -74,7 +72,11 @@ suite "Mix Protocol - Node Failures":
       .toConnection(
         destNode.toMixDestination(),
         TestCodec,
-        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(2))),
+        MixParameters(
+          expectReply: Opt.some(true),
+          numSurbs: Opt.some(byte(2)),
+          readSpec: Opt.some(MixReadSpec(readMethod: ReadLp, limit: ReadLen)),
+        ),
       )
       .expect("could not build connection")
 
@@ -101,9 +103,7 @@ suite "Mix Protocol - Node Failures":
     ## 2 SURBs, all paths healthy. Exit sends reply via ALL SURBs.
     ## Both replies arrive at the sender's mix layer,
     ## but only one is delivered to the application.
-    let (nodes, mock) = await setupMixNodesWithMock(
-      10, destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32)))
-    )
+    let (nodes, mock) = await setupMixNodesWithMock(10)
 
     let (destNode, pingProto) = await setupDestNode(Ping.new(rng = rng()))
 
@@ -116,7 +116,11 @@ suite "Mix Protocol - Node Failures":
       .toConnection(
         destNode.toMixDestination(),
         pingProto.codec,
-        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(2))),
+        MixParameters(
+          expectReply: Opt.some(true),
+          numSurbs: Opt.some(byte(2)),
+          readSpec: Opt.some(MixReadSpec(readMethod: ReadExactly, limit: 32)),
+        ),
       )
       .expect("could not build connection")
     defer:
@@ -136,10 +140,8 @@ suite "Mix Protocol - Node Failures":
 
   asyncTest "sender receives empty response when destination is unreachable":
     ## Exit node gets DialFailedError, sends empty reply via SURB,
-    ## sender receives an empty response from readLp().
-    let nodes = await setupMixNodes(
-      10, destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32)))
-    )
+    ## sender treats the empty cached reply as EOF.
+    let nodes = await setupMixNodes(10)
 
     let (destNode, pingProto) = await setupDestNode(Ping.new(rng = rng()))
     let destPeerId = destNode.peerInfo.peerId
@@ -152,7 +154,11 @@ suite "Mix Protocol - Node Failures":
       .toConnection(
         MixDestination.init(destPeerId, destAddr),
         pingProto.codec,
-        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
+        MixParameters(
+          expectReply: Opt.some(true),
+          numSurbs: Opt.some(byte(1)),
+          readSpec: Opt.some(MixReadSpec(readMethod: ReadExactly, limit: 32)),
+        ),
       )
       .expect("could not build connection")
     defer:
@@ -160,8 +166,8 @@ suite "Mix Protocol - Node Failures":
 
     await conn.write(@[1.byte, 2, 3, 4, 5])
 
-    let response = await conn.readLp(1024).wait(10.seconds)
-    check response.len == 0
+    expect LPStreamEOFError:
+      discard await conn.readLp(1024).wait(10.seconds)
 
   asyncTest "forward path node down - hop 2 or exit":
     ## With 4 mix nodes the sender (node 0) has a pool of exactly 3 nodes.

@@ -38,8 +38,10 @@
         in {
           default = pkgs.mkShell {
             nativeBuildInputs = [
+              pkgs.jq
               pkgs.nim-2_2
               pkgs.nimble
+              pkgs.nix-prefetch-git
               pkgs.makeWrapper
             ];
           };

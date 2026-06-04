@@ -85,19 +85,34 @@ suite "Cover Traffic - Integration":
 
     # First send succeeds (claims 1 of 2 slots)
     let res1 = await nodes[0].anonymizeLocalProtocolSend(
-      incoming, @[1.byte], "/test/1.0.0", destNode.toMixDestination(), 0
+      incoming,
+      @[1.byte],
+      "/test/1.0.0",
+      destNode.toMixDestination(),
+      0,
+      DefaultMixReadSpec,
     )
     check res1.isOk
 
     # Second send succeeds (claims 2 of 2 slots)
     let res2 = await nodes[0].anonymizeLocalProtocolSend(
-      incoming, @[2.byte], "/test/1.0.0", destNode.toMixDestination(), 0
+      incoming,
+      @[2.byte],
+      "/test/1.0.0",
+      destNode.toMixDestination(),
+      0,
+      DefaultMixReadSpec,
     )
     check res2.isOk
 
     # Third send fails — slots exhausted
     let res3 = await nodes[0].anonymizeLocalProtocolSend(
-      incoming, @[3.byte], "/test/1.0.0", destNode.toMixDestination(), 0
+      incoming,
+      @[3.byte],
+      "/test/1.0.0",
+      destNode.toMixDestination(),
+      0,
+      DefaultMixReadSpec,
     )
     check res3.isErr
     check res3.error == "No slots available in current epoch"
@@ -105,7 +120,12 @@ suite "Cover Traffic - Integration":
     # Epoch reset unblocks
     ct.onEpochChange(2)
     let res4 = await nodes[0].anonymizeLocalProtocolSend(
-      incoming, @[4.byte], "/test/1.0.0", destNode.toMixDestination(), 0
+      incoming,
+      @[4.byte],
+      "/test/1.0.0",
+      destNode.toMixDestination(),
+      0,
+      DefaultMixReadSpec,
     )
     check res4.isOk
 
@@ -148,7 +168,12 @@ suite "Cover Traffic - Integration":
 
     let incoming = newAsyncQueue[seq[byte]]()
     let sendRes = await nodes[0].anonymizeLocalProtocolSend(
-      incoming, @[1.byte, 2, 3], "/test/1.0.0", destNode.toMixDestination(), 0
+      incoming,
+      @[1.byte, 2, 3],
+      "/test/1.0.0",
+      destNode.toMixDestination(),
+      0,
+      DefaultMixReadSpec,
     )
     check sendRes.isOk
 

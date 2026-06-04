@@ -5,18 +5,19 @@ import hashes, chronos, results, chronicles
 import libp2p/stream/connection
 import libp2p/varint
 import libp2p/utils/sequninit
-import ./mix_protocol
+import ./[mix_message, mix_protocol]
 from fragmentation import DataSize
 
 const DefaultSurbs = uint8(4)
 
 type MixDialer* = proc(
-  msg: seq[byte], codec: string, destination: MixDestination
+  msg: sink seq[byte], codec: string, destination: MixDestination, readSpec: MixReadSpec
 ): Future[void] {.async: (raises: [CancelledError, LPStreamError]).}
 
 type MixParameters* = object
   expectReply*: Opt[bool]
   numSurbs*: Opt[uint8]
+  readSpec*: Opt[MixReadSpec]
 
 type MixEntryConnection* = ref object of Connection
   destination: MixDestination
@@ -68,11 +69,13 @@ method readOnce*(
   return toRead
 
 method write*(
-    self: MixEntryConnection, msg: seq[byte]
+    self: MixEntryConnection, msg: sink seq[byte]
 ): Future[void] {.async: (raises: [CancelledError, LPStreamError]).} =
   if msg.len() > DataSize:
     raise newException(LPStreamError, "exceeds max msg size of " & $DataSize & " bytes")
-  await self.mixDialer(msg, self.codec, self.destination)
+  await self.mixDialer(
+    move(msg), self.codec, self.destination, self.params.readSpec.get(DefaultMixReadSpec)
+  )
 
 proc shortLog*(self: MixEntryConnection): string {.raises: [].} =
   "[MixEntryConnection] Destination: " & $self.destination
@@ -101,6 +104,7 @@ proc new*(
   var instance = T()
   instance.destination = destination
   instance.codec = codec
+  instance.params = params
 
   if expectReply:
     instance.incoming = newAsyncQueue[seq[byte]]()
@@ -111,10 +115,10 @@ proc new*(
     instance.incomingFut = checkForIncoming()
 
   instance.mixDialer = proc(
-      msg: seq[byte], codec: string, dest: MixDestination
+      msg: sink seq[byte], codec: string, dest: MixDestination, readSpec: MixReadSpec
   ): Future[void] {.async: (raises: [CancelledError, LPStreamError]).} =
     let sendRes = await srcMix.anonymizeLocalProtocolSend(
-      instance.incoming, msg, codec, dest, numSurbs
+      instance.incoming, move(msg), codec, dest, numSurbs, readSpec
     )
     if sendRes.isErr:
       raise newException(LPStreamError, sendRes.error)
@@ -130,10 +134,9 @@ proc toConnection*(
   ## Create a stream to send and optionally receive responses.
   ## Under the hood it will wrap the message in a sphinx packet
   ## and send it via a random mix path.
-  if not srcMix.hasDestReadBehavior(codec):
-    if params.expectReply.get(false):
-      return err("no destination read behavior for codec")
-    else:
-      warn "no destination read behavior for codec", codec
+  if params.expectReply.get(false) and destination.isForwardAddr and
+      params.readSpec.isNone:
+    return
+      err("read spec is required when expecting replies from forwarded destinations")
 
   ok(MixEntryConnection.new(srcMix, destination, codec, params))

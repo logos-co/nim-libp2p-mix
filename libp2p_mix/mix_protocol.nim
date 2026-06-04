@@ -21,9 +21,6 @@ when defined(enable_mix_benchmarks):
   import ./benchmark
   from times import getTime, toUnixFloat, `-`, initTime, `$`, inMilliseconds, Time
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  {.warning: "experimental support for mix exit == destination is enabled!".}
-
 const MixProtocolID* = "/mix/1.0.0"
 
 const CoverTrafficCodec* = "/mix/cover/1.0.0"
@@ -58,7 +55,6 @@ type MixProtocol* = ref object of LPProtocol
   rng: Rng
   # TODO: verify if this requires cleanup for cases in which response never arrives (and connection is closed)
   connCreds: Table[SURBIdentifier, ConnCreds]
-  destReadBehavior: TableRef[string, DestReadBehavior]
   connPool: Table[PeerId, Connection]
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
@@ -66,14 +62,6 @@ type MixProtocol* = ref object of LPProtocol
   ongoingMixMessages: seq[Future[void]]
     ## Tracks all in-flight handleMixMessages futures so they can be
     ## cancelled on stop and waited for during teardown.
-
-proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
-  return mixProto.destReadBehavior.hasKey(codec)
-
-proc registerDestReadBehavior*(
-    mixProto: MixProtocol, codec: string, behavior: DestReadBehavior
-) =
-  mixProto.destReadBehavior[codec] = behavior
 
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
@@ -306,7 +294,7 @@ method handleMixMessages*(
         Opt.none(PeerId)
 
     await mixProto.exitLayer.onMessage(
-      deserialized.codec, message, processedSP.destination, surbs
+      deserialized.codec, deserialized.readSpec, message, processedSP.destination, surbs
     )
 
     mix_messages_forwarded.inc(labelValues = ["Exit"])
@@ -589,7 +577,7 @@ proc buildSurbs(
 proc prepareMsgWithSurbs(
     mixProto: MixProtocol,
     incoming: AsyncQueue[seq[byte]],
-    msg: seq[byte],
+    msg: sink seq[byte],
     numSurbs: uint8 = 0,
     destPeerId: PeerId,
     exitPeerId: PeerId,
@@ -653,10 +641,13 @@ proc sendPacket(
   return ok()
 
 proc buildMessage(
-    msg: seq[byte], codec: string, peerId: PeerId
+    msg: sink seq[byte],
+    codec: string,
+    peerId: PeerId,
+    readSpec: MixReadSpec = DefaultMixReadSpec,
 ): Result[Message, (string, string)] =
   let
-    mixMsg = MixMessage.init(msg, codec)
+    mixMsg = MixMessage.init(move(msg), codec, readSpec)
     serialized = mixMsg.serialize()
 
   if serialized.len > DataSize:
@@ -690,9 +681,11 @@ proc `$`*(d: MixDestination): string =
   of MixNode:
     return "MixDestination[MixNode](" & $d.peerId & ")"
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  proc exitNode*(T: typedesc[MixDestination], p: PeerId): T =
-    T(kind: DestinationType.MixNode, peerId: p)
+func isForwardAddr*(d: MixDestination): bool =
+  d.kind == ForwardAddr
+
+proc exitNode*(T: typedesc[MixDestination], p: PeerId): T =
+  T(kind: DestinationType.MixNode, peerId: p)
 
 proc forwardToAddr*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
   T(kind: DestinationType.ForwardAddr, peerId: p, address: address)
@@ -703,14 +696,12 @@ proc init*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
 proc anonymizeLocalProtocolSend*(
     mixProto: MixProtocol,
     incoming: AsyncQueue[seq[byte]],
-    msg: seq[byte],
+    msg: sink seq[byte],
     codec: string,
     destination: MixDestination,
     numSurbs: uint8,
+    readSpec: MixReadSpec,
 ): Future[Result[void, string]] {.async: (raises: [CancelledError, LPStreamError]).} =
-  when not defined(libp2p_mix_experimental_exit_is_dest):
-    doAssert destination.kind == ForwardAddr, "Only exit != destination is allowed"
-
   mix_messages_recvd.inc(labelValues = ["Entry"])
 
   # Claim a slot for local origination (Mix Cover Traffic spec §6.3)
@@ -843,12 +834,12 @@ proc anonymizeLocalProtocolSend*(
     else:
       Hop()
 
-  let msgWithSurbs = mixProto.prepareMsgWithSurbs(
-    incoming, msg, numSurbs, destination.peerId, exitPeerId
+  var msgWithSurbs = mixProto.prepareMsgWithSurbs(
+    incoming, move(msg), numSurbs, destination.peerId, exitPeerId
   ).valueOr:
     return err(fmt"Could not prepend SURBs: {error}")
 
-  let message = buildMessage(msgWithSurbs, codec, mixProto.mixNodeInfo.peerId).valueOr:
+  let message = buildMessage(move(msgWithSurbs), codec, mixProto.mixNodeInfo.peerId, readSpec).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", error[1]])
     return err(fmt"Error building message: {error[0]}")
 
@@ -1033,8 +1024,6 @@ proc init*(
   mixProto.rng = switch.rng
   mixProto.nodePool = MixNodePool.new(switch.peerStore)
   mixProto.tagManager = tagManager
-  mixProto.destReadBehavior = newTable[string, DestReadBehavior]()
-
   mixProto.spamProtection = spamProtection
   mixProto.delayStrategy = delayStrategy.valueOr:
     NoSamplingDelayStrategy.new(switch.rng)
@@ -1073,7 +1062,7 @@ proc init*(
   ) {.async: (raises: [CancelledError]).} =
     await mixProto.reply(surb, message)
 
-  mixProto.exitLayer = ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehavior)
+  mixProto.exitLayer = ExitLayer.init(switch, onReplyDialer)
 
   mixProto.codecs = @[MixProtocolID]
   mixProto.handler = proc(

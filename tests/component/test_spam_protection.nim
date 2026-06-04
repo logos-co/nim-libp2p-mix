@@ -23,9 +23,7 @@ suite "Mix Protocol - Spam Protection":
     # Each node gets its own spam protection instance with independent rate limit
     # This reflects real-world deployment where each node independently enforces limits
     let nodes = await setupMixNodes(
-      numMixNodes,
-      destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32))),
-      spamProtectionRateLimit = Opt.some(rateLimitPerNode),
+      numMixNodes, spamProtectionRateLimit = Opt.some(rateLimitPerNode)
     )
     startAndDeferStop(nodes)
 
@@ -39,7 +37,11 @@ suite "Mix Protocol - Spam Protection":
         .toConnection(
           destNode.toMixDestination(),
           pingProto.codec,
-          MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
+          MixParameters(
+            expectReply: Opt.some(true),
+            numSurbs: Opt.some(byte(1)),
+            readSpec: Opt.some(MixReadSpec(readMethod: ReadExactly, limit: 32)),
+          ),
         )
         .expect("could not build connection")
 

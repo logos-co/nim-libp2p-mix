@@ -6,7 +6,7 @@ import libp2p/stream/connection
 import ./[serialization]
 from fragmentation import DataSize
 
-type MixReplyDialer* = proc(surbs: seq[SURB], msg: seq[byte]): Future[void] {.
+type MixReplyDialer* = proc(surbs: seq[SURB], msg: sink seq[byte]): Future[void] {.
   async: (raises: [CancelledError, LPStreamError])
 .}
 
@@ -20,11 +20,11 @@ method readExactly*(
   raise newException(LPStreamError, "MixReplyConnection does not allow reading")
 
 method write*(
-    self: MixReplyConnection, msg: seq[byte]
+    self: MixReplyConnection, msg: sink seq[byte]
 ): Future[void] {.async: (raises: [CancelledError, LPStreamError]).} =
   if msg.len() > DataSize:
     raise newException(LPStreamError, "exceeds max msg size of " & $DataSize & " bytes")
-  await self.mixReplyDialer(self.surbs, msg)
+  await self.mixReplyDialer(self.surbs, move(msg))
 
 proc shortLog*(self: MixReplyConnection): string {.raises: [].} =
   "[MixReplyConnection]"

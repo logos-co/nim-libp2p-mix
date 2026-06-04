@@ -3,6 +3,7 @@ nimble.develop
 nimble.paths
 nimbledeps/
 nimcache/
+githubcom_*/
 
 # Build artefacts
 build/

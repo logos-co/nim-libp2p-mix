@@ -33,7 +33,7 @@ libp2p_mix/               Protocol implementation (23 modules)
   ├── mix_protocol.nim    Core mix protocol (mounts on a libp2p Switch)
   ├── sphinx.nim          Sphinx packet format with LIONESS payload encryption
   ├── cover_traffic.nim   Constant-rate cover-traffic generator
-  ├── exit_layer.nim      Exit-node behaviour & dest read framing
+  ├── exit_layer.nim      Exit-node behaviour, local handlers & dest read framing
   ├── entry_connection.nim/exit_connection.nim/reply_connection.nim
   ├── fragmentation.nim   Packet fragmentation
   ├── pool.nim            Mix node pool / route selection
@@ -48,7 +48,8 @@ tests/                    Unit tests
   └── tools/              Test helpers (vendored from nim-libp2p tests/tools/)
 
 examples/
-  └── mix_ping.nim        End-to-end demo: ping over a 10-node mix network
+  ├── mix_ping_forward.nim End-to-end demo: ping through a forwarded exit
+  └── mix_ping_mix_node.nim End-to-end demo: ping a mix node destination
 
 config.nims               Project-wide compiler config (--mm:refc, paths)
 tests/config.nims         Test-only defines (-d:metrics, libp2p subsystems)
@@ -82,11 +83,7 @@ let mixNodeInfo = initMixNodeInfo(
   peerId, multiAddr, mixPubKey, mixPrivKey, libp2pPubKey, libp2pPrivKey
 )
 
-let mix = MixProtocol.new(mixNodeInfo, switch).valueOr:
-  return err("mix init failed: " & error)
-
-# Optional: configure how the exit layer reads payloads for a given proto
-mix.registerDestReadBehavior("/your/proto/1.0.0", readLp(maxSize = -1))
+let mix = MixProtocol.new(mixNodeInfo, switch)
 
 # Optional: bootstrap the node pool
 for bootstrapNode in bootstrapNodes:
@@ -103,7 +100,11 @@ await mix.start()
 let conn = mix.toConnection(
   MixDestination.init(targetPeerId, targetMultiAddr),
   proto = "/your/proto/1.0.0",
-  MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1.byte)),
+  MixParameters(
+    expectReply: Opt.some(true),
+    numSurbs: Opt.some(1.byte),
+    readSpec: Opt.some(MixReadSpec(readMethod: ReadLp, limit: maxResponseBytes)),
+  )
 ).valueOr:
   return err(error)
 
@@ -113,7 +114,13 @@ await conn.writeLp(requestBytes)
 let response = await conn.readLp(maxBytes)
 ```
 
-For a complete worked example, see [`examples/mix_ping.nim`](examples/mix_ping.nim).
+`MixDestination` selects the delivery mode per request:
+
+- `MixDestination.forwardToAddr(peerId, multiAddr)` or `MixDestination.init(...)` sends to an external destination through a randomly selected exit node. If `expectReply` is true, provide `readSpec` so the exit knows how to read the external response.
+- `MixDestination.exitNode(peerId)` sends to a Mix node that is also the destination. The final node runs its mounted protocol handler directly, so `readSpec` is not required even when expecting replies.
+
+For complete worked examples, see [`examples/mix_ping_forward.nim`](examples/mix_ping_forward.nim)
+and [`examples/mix_ping_mix_node.nim`](examples/mix_ping_mix_node.nim).
 
 ### Pluggable spam protection
 
@@ -151,16 +158,17 @@ let mix = MixProtocol.new(
 
 ## Building & running
 
-The package depends on `nim-libp2p`. While we're not yet on a published
-release, point at a local clone with `nimble develop`:
+To setep the project run:
 
 ```bash
-git clone https://github.com/vacp2p/nim-libp2p.git
 git clone https://github.com/logos-co/nim-libp2p-mix.git
 cd nim-libp2p-mix
-nimble develop --add=../nim-libp2p   # registers libp2p as a develop dep
-nimble setup                          # generates nimble.paths
+nimble setup -l --solver:legacy       # generates nimble.paths using local deps
 ```
+
+The `-l` option keeps dependencies project-local under `nimbledeps/`.
+`--solver:legacy` is currently required because Nimble's default SAT solver
+cannot resolve the git-pinned (transitive) dependencies.
 
 ### Tests
 
@@ -176,12 +184,13 @@ The `tests/config.nims` enables `-d:metrics` and several
 ### Example
 
 ```bash
-nimble example
+nimble exampleForward
+nimble exampleMixNode
 ```
 
-This compiles `examples/mix_ping.nim`, which spins up 10 mix nodes locally,
-mounts the libp2p `Ping` protocol on a destination, sends a ping through the
-mix network, and waits for the reply via SURBs. Expected output:
+These compile the forwarded-destination and mix-node-destination ping examples.
+`nimble example` remains an alias for `nimble exampleForward`.
+Expected output:
 
 ```
 INF Ping response received through mix network rtt=41ms…
@@ -190,8 +199,8 @@ INF Ping response received through mix network rtt=41ms…
 To build the binary without auto-cleanup:
 
 ```bash
-nim c -d:libp2p_mix_experimental_exit_is_dest -d:metrics -o:mix_ping examples/mix_ping.nim
-./mix_ping
+nim c -d:metrics -o:mix_ping_forward examples/mix_ping_forward.nim
+./mix_ping_forward
 ```
 
 ### Nix
@@ -215,14 +224,14 @@ generator currently passes `--solver:legacy` to `nimble lock` because the
 default SAT solver can't resolve the transitive git pins libp2p brings in.
 
 > Note: `config.nims` adds `--noNimblePath`, so direct `nim c` invocations
-> rely on `nimble.paths` (generated by `nimble setup`). Run `nimble setup`
-> once after cloning if you build outside the `nimble` task framework.
+> rely on `nimble.paths` (generated by `nimble setup -l --solver:legacy`). Run
+> `nimble setup -l --solver:legacy` once after cloning if you build outside the
+> `nimble` task framework.
 
 ## Compile-time flags
 
 | Flag | Purpose |
 |---|---|
-| `-d:libp2p_mix_experimental_exit_is_dest` | Allow exit nodes to also be the message destination (waku/lightpush usage). Enabled by default in `libp2p_mix.nimble`. |
 | `-d:metrics` | Enable Prometheus-style metric counters (test-time default). |
 | `-d:enable_mix_benchmarks` | Compile in benchmark/timing helpers from `libp2p_mix/benchmark.nim`. |
 

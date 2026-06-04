@@ -6,12 +6,12 @@ author = "Status Research & Development GmbH"
 description =
   "Mix protocol for nim-libp2p — anonymous routing with the Sphinx packet format"
 license = "MIT"
+entryPoints = @["libp2p_mix.nim", "examples/mix_ping_forward.nim"]
 skipDirs = @["examples", "tests"]
 
 # Pin nim-libp2p master until a release is tagged.
-# CI uses `--solver:legacy` for `nimble setup` (libp2p's boringssl is git-pinned).
-requires "nim >= 2.0.0",
-  "https://github.com/vacp2p/nim-libp2p.git#d4cd68b91b82f34a0ede3766ab1ca8119d5015f8",
+requires "nim >= 2.2.4",
+  "https://github.com/vacp2p/nim-libp2p.git#c43199378f46d0aaf61be1cad1ee1d63e8f665d6",
   "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics", "nimcrypto >= 0.6.0",
   "stew >= 0.4.2", "results", "unittest2"
 
@@ -19,16 +19,15 @@ import os, strutils
 
 let nimc = getEnv("NIMC", "nim") # Which nim compiler to use
 let lang = getEnv("NIMLANG", "c") # Which backend (c/cpp/js)
-let flags = getEnv("NIMFLAGS", "") # Extra flags for the compiler
+let compilerFlags = getEnv("NIMFLAGS", "") # Extra flags for the compiler
 let verbose = getEnv("V", "") notin ["", "0"]
 
 let cfg =
   " --styleCheck:usages --styleCheck:error" & (if verbose: "" else: " --verbosity:0") &
-  " --skipUserCfg -f --threads:on --opt:speed" &
-  " -d:libp2p_mix_experimental_exit_is_dest"
+  " --skipUserCfg -f --threads:on --opt:speed"
 
 proc runTest(filename: string, moreoptions: string = "") =
-  var compileCmd = nimc & " " & lang & " " & cfg & " " & flags
+  var compileCmd = nimc & " " & lang & " " & cfg & " " & compilerFlags
   compileCmd &= " " & moreoptions
 
   exec compileCmd & " tests/" & filename
@@ -36,9 +35,10 @@ proc runTest(filename: string, moreoptions: string = "") =
   rmFile "tests/" & filename.toExe
 
 proc buildExample(filename: string) =
-  let cmd = nimc & " " & lang & " " & cfg & " " & flags & " --hints:off"
+  let cmd = nimc & " " & lang & " " & cfg & " " & compilerFlags & " --hints:off"
   exec cmd & " examples/" & filename
   let exeName = filename.changeFileExt("").toExe
+  exec "./examples/" & exeName
   rmFile "examples/" & exeName
 
 task test, "Run unit tests":
@@ -57,5 +57,11 @@ task testAll, "Run unit + component tests":
   exec "nimble test"
   exec "nimble testComponent"
 
-task example, "Build and run the mix_ping example":
-  buildExample("mix_ping.nim")
+task example, "Build and run the forwarded destination ping example":
+  buildExample("mix_ping_forward.nim")
+
+task exampleForward, "Build and run the forwarded destination ping example":
+  buildExample("mix_ping_forward.nim")
+
+task exampleMixNode, "Build and run the mix-node destination ping example":
+  buildExample("mix_ping_mix_node.nim")

@@ -17,9 +17,7 @@ suite "Mix Protocol - Message Delivery":
     checkTrackers()
 
   asyncTest "expect reply, exit != destination":
-    let nodes = await setupMixNodes(
-      10, destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32)))
-    )
+    let nodes = await setupMixNodes(10)
     startAndDeferStop(nodes)
 
     let (destNode, pingProto) = await setupDestNode(Ping.new(rng = rng()))
@@ -30,7 +28,11 @@ suite "Mix Protocol - Message Delivery":
       .toConnection(
         destNode.toMixDestination(),
         pingProto.codec,
-        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
+        MixParameters(
+          expectReply: Opt.some(true),
+          numSurbs: Opt.some(byte(1)),
+          readSpec: Opt.some(MixReadSpec(readMethod: ReadExactly, limit: 32)),
+        ),
       )
       .expect("could not build connection")
 
@@ -125,30 +127,27 @@ suite "Mix Protocol - Message Delivery":
       sender notin exitNodes
       destination notin exitNodes
 
-  when defined(libp2p_mix_experimental_exit_is_dest):
-    asyncTest "expect reply, exit == destination":
-      let nodes = await setupMixNodes(
-        10, destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32)))
+  asyncTest "expect reply, exit == destination":
+    let nodes = await setupMixNodes(10)
+
+    let destNode = nodes[^1]
+    let pingProto = Ping.new(rng = rng())
+    destNode.switch.mount(pingProto)
+
+    startAndDeferStop(nodes)
+
+    let conn = nodes[0]
+      .toConnection(
+        MixDestination.exitNode(destNode.switch.peerInfo.peerId),
+        pingProto.codec,
+        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
       )
+      .expect("could not build connection")
 
-      let destNode = nodes[^1]
-      let pingProto = Ping.new(rng = rng())
-      destNode.switch.mount(pingProto)
+    let response = await pingProto.ping(conn)
+    await conn.close()
 
-      startAndDeferStop(nodes)
-
-      let conn = nodes[0]
-        .toConnection(
-          MixDestination.exitNode(destNode.switch.peerInfo.peerId),
-          pingProto.codec,
-          MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
-        )
-        .expect("could not build connection")
-
-      let response = await pingProto.ping(conn)
-      await conn.close()
-
-      check response != 0.seconds
+    check response != 0.seconds
 
   asyncTest "length-prefixed protocol - verify readLp fix":
     ## This test verifies the fix for the length prefix bug where responses
@@ -157,11 +156,7 @@ suite "Mix Protocol - Message Delivery":
     let testPayload = "Privacy for everyone and transparency for people in power is one way to reduce corruption".toBytes()
     let echoProto = EchoProtocol.new()
 
-    let nodes = await setupMixNodes(
-      10,
-      destReadBehavior =
-        Opt.some((codec: echoProto.codec, callback: readLp(EchoMaxReadLen))),
-    )
+    let nodes = await setupMixNodes(10)
 
     let destNode = nodes[^1]
     destNode.switch.mount(echoProto)
@@ -172,7 +167,11 @@ suite "Mix Protocol - Message Delivery":
       .toConnection(
         destNode.toMixDestination(),
         echoProto.codec,
-        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
+        MixParameters(
+          expectReply: Opt.some(true),
+          numSurbs: Opt.some(byte(1)),
+          readSpec: Opt.some(MixReadSpec(readMethod: ReadLp, limit: EchoMaxReadLen)),
+        ),
       )
       .expect("could not build connection")
 
@@ -215,11 +214,7 @@ suite "Mix Protocol - Message Delivery":
   asyncTest "concurrent messages with SURB replies":
     let echoProto = EchoProtocol.new()
 
-    let nodes = await setupMixNodes(
-      10,
-      destReadBehavior =
-        Opt.some((codec: echoProto.codec, callback: readLp(EchoMaxReadLen))),
-    )
+    let nodes = await setupMixNodes(10)
     startAndDeferStop(nodes)
 
     let (destNode, _) = await setupDestNode(echoProto)
@@ -233,7 +228,11 @@ suite "Mix Protocol - Message Delivery":
         .toConnection(
           dest,
           echoProto.codec,
-          MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
+          MixParameters(
+            expectReply: Opt.some(true),
+            numSurbs: Opt.some(byte(1)),
+            readSpec: Opt.some(MixReadSpec(readMethod: ReadLp, limit: EchoMaxReadLen)),
+          ),
         )
         .expect("could not build connection")
       await conn.writeLp(data)

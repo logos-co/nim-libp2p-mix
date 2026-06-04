@@ -1,4 +1,6 @@
-.PHONY: all build deps clean
+.PHONY: all build deps format check-format clean
+
+FORMAT_PATHS := libp2p_mix libp2p_mix.nim tests examples config.nims libp2p_mix.nimble
 
 all: build
 
@@ -15,6 +17,12 @@ deps: nix/deps.nix
 
 build: deps
 	nix build
+
+format:
+	nph $(FORMAT_PATHS)
+
+check-format:
+	nph --check $(FORMAT_PATHS)
 
 clean:
 	$(RM) nimble.lock nix/deps.nix
