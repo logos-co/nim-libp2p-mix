@@ -29,8 +29,15 @@ let verbose = getEnv("V", "") notin ["", "0"]
 
 let cfg =
   " --styleCheck:usages --styleCheck:error" & (if verbose: "" else: " --verbosity:0") &
-  " --skipUserCfg -f --threads:on --opt:speed" &
+  " --skipUserCfg --threads:on --opt:speed" &
   " -d:libp2p_mix_experimental_exit_is_dest"
+  # `-f` (force recompile) was previously here. Dropped so test binaries
+  # share the nimcache: each subsequent test in `nimble test` /
+  # `nimble testComponent` reuses compiled libp2p / chronos / stew object
+  # files from the first test, cutting per-test compile time substantially.
+  # Safe because every test invokes `runTest(name)` with no per-test
+  # compile flag overrides — all tests build with identical `cfg`, so
+  # cache hits are flag-correct.
 
 proc runTest(filename: string, moreoptions: string = "") =
   var compileCmd = nimc & " " & lang & " " & cfg & " " & flags
