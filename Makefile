@@ -4,8 +4,9 @@ all: build
 
 # `nimble.lock` is an intermediate build artefact, not committed to git
 # (see .gitignore and issue #13). It's regenerated here from
-# `libp2p_mix.nimble` only as input to `gen-deps.sh`, which produces the
-# committed `nix/deps.nix`. CI does not consume `nimble.lock` directly.
+# `libp2p_mix.nimble` only as input to `./tools/gen-deps.sh`, which
+# produces the committed `nix/deps.nix`. CI does not consume `nimble.lock`
+# directly.
 #
 # `--solver:legacy` is required while libp2p_mix.nimble pins libp2p to a
 # git commit (nimble's default SAT solver can't resolve transitive git
