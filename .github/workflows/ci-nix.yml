@@ -1,0 +1,71 @@
+name: ci / nix
+
+# Triggers conservatively to avoid taxing every code-only PR with a
+# ~5-min nix install + build:
+#
+# - pull_request: only when nix-relevant files actually change.
+# - push to master: post-merge smoke test (catches merge_group bypass).
+# - schedule: weekly cron to catch external drift (nimble release,
+#   nixpkgs bump, upstream rev moves) that no in-repo file change
+#   would otherwise surface.
+# - workflow_dispatch: manual trigger for ad-hoc validation (e.g.
+#   after bumping the libp2p pin in libp2p_mix.nimble).
+on:
+  pull_request:
+    paths:
+      - 'libp2p_mix.nimble'
+      - 'nix/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'Makefile'
+      - 'tools/gen-deps.sh'
+      - '.github/workflows/ci-nix.yml'
+  push:
+    branches: [master]
+  schedule:
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  nix-build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      # GitHub-hosted runners don't ship nix; install via the
+      # DeterminateSystems action (faster cold install than the
+      # cachix one). If self-hosted runners with nix preinstalled
+      # become available for this repo, drop this step.
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Use Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      # `make deps` regenerates nix/deps.nix from libp2p_mix.nimble.
+      # If the committed snapshot is stale (missing transitive deps,
+      # outdated revs after a libp2p bump, etc.), the diff is non-empty
+      # and we fail the job — surfaces drift on the PR that introduced
+      # it rather than the next time someone runs `nix build` locally.
+      - name: Regenerate nix/deps.nix and verify no drift
+        run: |
+          nix develop --command bash -c "make deps"
+          if ! git diff --exit-code nix/deps.nix; then
+            echo "::error::nix/deps.nix is out of sync with libp2p_mix.nimble."
+            echo "Run 'nix develop --command make deps' locally and commit the result."
+            exit 1
+          fi
+
+      - name: nix build
+        run: nix build -L
+
+      - name: Show build outputs
+        run: find result -type f | head -50
