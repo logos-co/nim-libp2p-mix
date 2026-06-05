@@ -29,8 +29,7 @@ let verbose = getEnv("V", "") notin ["", "0"]
 
 let cfg =
   " --styleCheck:usages --styleCheck:error" & (if verbose: "" else: " --verbosity:0") &
-  " --skipUserCfg --threads:on --opt:speed" &
-  " -d:libp2p_mix_experimental_exit_is_dest"
+  " --skipUserCfg --threads:on --opt:speed" & " -d:libp2p_mix_experimental_exit_is_dest"
   # `-f` (force recompile) was previously here. Dropped so test binaries
   # share the nimcache: each subsequent test in `nimble test` /
   # `nimble testComponent` reuses compiled libp2p / chronos / stew object
