@@ -40,7 +40,10 @@
             nativeBuildInputs = [
               pkgs.nim-2_2
               pkgs.nimble
+              pkgs.git
+              pkgs.jq
               pkgs.makeWrapper
+              pkgs.nix-prefetch-git
             ];
           };
         }
