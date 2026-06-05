@@ -31,8 +31,13 @@ jobs:
           - { os: macos, builder: macos-15,     cpu: arm64, cc: clang }
         nim:
           # libp2p v2.0.0 requires nim >= 2.2.4 transitively, so 2.0.16 is
-          # no longer compatible — drop it from the matrix.
-          - { ref: '2.2.6',  mm: refc }
+          # no longer compatible. We test both the floor and current:
+          # - 2.2.4 is the libp2p v2.0.0 minimum and the version this PR
+          #   was validated against locally;
+          # - 2.2.10 is the current 2.2.x and ships nimble 0.22.3, which
+          #   is what most contributors will have on their host machines.
+          - { ref: '2.2.4',  mm: refc }
+          - { ref: '2.2.10', mm: refc }
 
     name: ${{ matrix.platform.os }}-${{ matrix.platform.cpu }} (Nim ${{ matrix.nim.ref }})
     runs-on: ${{ matrix.platform.builder }}
