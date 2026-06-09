@@ -5,14 +5,12 @@ all: build
 # `nimble.lock` is an intermediate build artefact, not committed to git
 # (see .gitignore and issue #13). It's regenerated here from
 # `libp2p_mix.nimble` only as input to `./tools/gen-deps.sh`, which
-# produces the committed `nix/deps.nix`. CI does not consume `nimble.lock`
-# directly.
-#
-# `--solver:legacy` is required while libp2p_mix.nimble pins libp2p to a
-# git commit (nimble's default SAT solver can't resolve transitive git
-# pins). Drop the flag once libp2p is pinned by version.
+# produces the committed `nix/deps.nix`. The Nim-matrix CI jobs install
+# deps via `nimble setup --localdeps -y` and don't read `nimble.lock`;
+# only the `ci / nix` job regenerates `nimble.lock` on the fly (via
+# `make deps`) and uses it as input to `gen-deps.sh`.
 nimble.lock: libp2p_mix.nimble
-	nimble --solver:legacy lock
+	nimble lock
 
 nix/deps.nix: nimble.lock tools/gen-deps.sh
 	./tools/gen-deps.sh nimble.lock nix/deps.nix

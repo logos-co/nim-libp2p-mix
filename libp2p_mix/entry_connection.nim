@@ -81,6 +81,9 @@ method closeImpl*(self: MixEntryConnection): Future[void] {.async: (raises: []).
   if not self.incomingFut.isNil:
     self.incomingFut.cancelSoon()
 
+method getWrapped*(self: MixEntryConnection): Connection =
+  nil
+
 func hash*(self: MixEntryConnection): Hash =
   hash($self.destination)
 

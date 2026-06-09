@@ -151,20 +151,16 @@ let mix = MixProtocol.new(
 
 ## Building & running
 
-To setup the project:
+To set up the project:
 
 ```bash
 git clone https://github.com/logos-co/nim-libp2p-mix.git
 cd nim-libp2p-mix
-nimble setup -l --solver:legacy   # generates nimble.paths
+nimble setup -l   # generates nimble.paths
 ```
 
-Using `-l`, or `--localdeps` option runs nimble in project local dependency mode.
-It adds `--noNimblePath` to the genrated `nimble.paths`.
-
-> `--solver:legacy` is needed while libp2p_mix.nimble pins libp2p to a git
-> commit (nimble's default SAT solver can't resolve transitive git pins).
-> Drop the flag once libp2p is pinned by version.
+`-l` (`--localdeps`) runs nimble in project-local dependency mode and adds
+`--noNimblePath` to the generated `nimble.paths`.
 
 ### Tests
 
@@ -215,13 +211,13 @@ pinned transitive dependencies. Refresh it after bumping the libp2p pin in
 make deps   # regenerates nix/deps.nix
 ```
 
-If this does not work for any reason and need to start fresh while in the Nix shell
+If this does not work for any reason and you need to start fresh while in the Nix shell
 (so after the initial `nix develop`), run:
 
 ```
 make clean
 rm -rf nimbledeps nimble.paths
-nimble setup -l --solver:legacy
+nimble setup -l
 make deps
 nix build
 ```
@@ -229,15 +225,17 @@ nix build
 To quickly check that you are in the nix shell run:
 
 ```bash
-echo $IN_NIX_SHELL
-impure
+echo "${IN_NIX_SHELL:-not in nix shell}"
 ```
 
-If you see `impure` you are already in the nix shell.
+`$IN_NIX_SHELL` is set by both `nix develop` and `nix-shell`. Typical
+values: `impure` (default) or `pure` (when invoked with `--pure`). Any
+non-empty value means you're inside a nix shell. Empty or unset means
+you're not.
 
 `make deps` requires `nix-prefetch-git` and `jq` on `$PATH`. Internally it
-runs `nimble --solver:legacy lock` to produce a fresh `nimble.lock` and
-then transforms it via `tools/gen-deps.sh`.
+runs `nimble lock` to produce a fresh `nimble.lock` and then transforms
+it via `tools/gen-deps.sh`.
 
 `nimble.lock` itself is **not** committed — it's an intermediate build
 artefact regenerated on demand (it lives in `.gitignore`). The long-lived

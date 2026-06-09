@@ -71,18 +71,22 @@ jobs:
         id: nimble-cache
         uses: actions/cache@v5
         with:
-          path: ~/.nimble
+          # `nimble setup --localdeps -y` (below) provisions deps into the
+          # project-local `nimbledeps/`, so cache both that and `~/.nimble`
+          # (which holds nimble's package metadata + downloaded tarballs).
+          path: |
+            ~/.nimble
+            nimbledeps
           key: nimble-${{ matrix.platform.os }}-${{ matrix.platform.cpu }}-${{ matrix.nim.ref }}-${{ hashFiles('libp2p_mix.nimble') }}
 
       - name: Install deps
         run: |
           nim --version
           nimble --version
-          # `nimble setup --localdeps -y` mirrors the logos-delivery (waku)
-          # recipe: it provisions into a project-local `nimbledeps/` and is
-          # tolerant of platform drift in the lockfile's `nim` checksum.
-          # `nimble install -dy` would re-validate every lock entry strictly
-          # and fail on the Nim entry checksum mismatch.
+          # Project-local install: provisions deps into `nimbledeps/` and
+          # generates `nimble.paths`. We don't commit `nimble.lock` (see
+          # #13), so `nimble setup --localdeps -y` is the right bootstrap
+          # (vs `nimble install -dy`, which would expect a committed lock).
           nimble setup --localdeps -y
 
       - name: Run unit tests

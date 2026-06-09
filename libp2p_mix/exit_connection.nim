@@ -41,6 +41,9 @@ method initStream*(self: MixExitConnection) =
 method closeImpl*(self: MixExitConnection): Future[void] {.async: (raises: []).} =
   discard
 
+method getWrapped*(self: MixExitConnection): Connection =
+  nil
+
 func hash*(self: MixExitConnection): Hash =
   discard
 

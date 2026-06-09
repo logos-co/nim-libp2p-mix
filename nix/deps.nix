@@ -152,8 +152,8 @@
 
   protobuf_serialization = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-protobuf-serialization";
-    rev = "38d24eb3bd93e605fb88199da71d36b1ec0ad60d";
-    sha256 = "0jr0a41b4r444si6xfa7bclw8mjsk6id10lrdvbxzp99750zspb9";
+    rev = "f45476a3c1f4e7bff73845e6450d686be040ddeb";
+    sha256 = "1b4cnlkqlmnhx5gd4smiz4xwaj2zmyccc2q20r26gcqfiyp9na0v";
     fetchSubmodules = true;
   };
 
@@ -165,7 +165,7 @@
   };
 
   libp2p = pkgs.fetchgit {
-    url = "https://github.com/vacp2p/nim-libp2p.git";
+    url = "https://github.com/vacp2p/nim-libp2p";
     rev = "c43199378f46d0aaf61be1cad1ee1d63e8f665d6";
     sha256 = "0q1hkwwz08zfdwwz7cfql1hqil0iyv3dn8jypdwqmg7497l1bmxk";
     fetchSubmodules = true;

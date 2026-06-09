@@ -38,6 +38,9 @@ method initStream*(self: MixReplyConnection) =
 method closeImpl*(self: MixReplyConnection): Future[void] {.async: (raises: []).} =
   discard
 
+method getWrapped*(self: MixReplyConnection): Connection =
+  nil
+
 func hash*(self: MixReplyConnection): Hash =
   hash($self.surbs)
 

@@ -43,7 +43,7 @@ if [[ ! -f "$LOCKFILE" ]]; then
   (
     LOCKDIR="$(dirname "$LOCKFILE")"
     cd "$LOCKDIR" || { echo "error: $LOCKDIR does not exist"; exit 1; }
-    nimble --solver:legacy lock
+    nimble lock
   )
 fi
 
@@ -63,6 +63,10 @@ jq -c '
   .packages
   | to_entries[]
   | select(.value.downloadMethod == "git")
+  # Filter out `nim` itself: nix builds use `pkgs.nim-2_2` from the system,
+  # not a fetched Nim source. Including it in deps.nix is redundant and
+  # bloats the dependency closure.
+  | select(.key != "nim")
 ' "$LOCKFILE" | while read -r entry; do
   name=$(jq -r '.key' <<<"$entry")
   url=$(jq -r '.value.url' <<<"$entry")

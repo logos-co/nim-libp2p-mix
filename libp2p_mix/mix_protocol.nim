@@ -58,7 +58,7 @@ type MixProtocol* = ref object of LPProtocol
   rng: Rng
   # TODO: verify if this requires cleanup for cases in which response never arrives (and connection is closed)
   connCreds: Table[SURBIdentifier, ConnCreds]
-  destReadBehavior: TableRef[string, DestReadBehavior]
+  destReadBehaviors: TableRef[string, DestReadBehavior]
   connPool: Table[PeerId, Connection]
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
@@ -68,12 +68,12 @@ type MixProtocol* = ref object of LPProtocol
     ## cancelled on stop and waited for during teardown.
 
 proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
-  return mixProto.destReadBehavior.hasKey(codec)
+  return mixProto.destReadBehaviors.hasKey(codec)
 
 proc registerDestReadBehavior*(
     mixProto: MixProtocol, codec: string, behavior: DestReadBehavior
 ) =
-  mixProto.destReadBehavior[codec] = behavior
+  mixProto.destReadBehaviors[codec] = behavior
 
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
@@ -861,14 +861,14 @@ proc anonymizeLocalProtocolSend*(
   return await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)
 
 proc reply(
-    mixProto: MixProtocol, surb: SURB, msg: seq[byte]
+    mixProto: MixProtocol, surb: SURB, msg: sink seq[byte]
 ) {.async: (raises: [CancelledError]).} =
   let (peerId, multiAddr) = surb.hop.get().bytesToMultiAddr().valueOr:
       error "could not obtain multiaddress from hop", err = error
       return
 
-  # Message does not require a codec, as it is already associated to a specific I
-  let message = buildMessage(msg, "", peerId).valueOr:
+  # Reply messages don't require an application codec: routing is determined by the SURB.
+  let message = buildMessage(move(msg), "", peerId).valueOr:
     error "could not build reply message", err = error
     return
 
@@ -951,7 +951,7 @@ proc buildCoverPacket*(
   mixProto.rng.generate(randomPayload)
 
   let message = buildMessage(
-    randomPayload, CoverTrafficCodec, mixProto.mixNodeInfo.peerId
+    move(randomPayload), CoverTrafficCodec, mixProto.mixNodeInfo.peerId
   ).valueOr:
     return err("Error building cover message: " & error[0])
 
@@ -1033,7 +1033,7 @@ proc init*(
   mixProto.rng = switch.rng
   mixProto.nodePool = MixNodePool.new(switch.peerStore)
   mixProto.tagManager = tagManager
-  mixProto.destReadBehavior = newTable[string, DestReadBehavior]()
+  mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
 
   mixProto.spamProtection = spamProtection
   mixProto.delayStrategy = delayStrategy.valueOr:
@@ -1071,9 +1071,14 @@ proc init*(
   let onReplyDialer = proc(
       surb: SURB, message: seq[byte]
   ) {.async: (raises: [CancelledError]).} =
+    # `message` is passed by value (the closure signature is fixed by
+    # `ExitLayer.init`'s callback type). A full sink-through chain
+    # would require updating the callback type in libp2p_mix.
+    # For now: reply() takes `sink seq[byte]` and `move()`s into
+    # buildMessage internally — the optimization stops at this boundary.
     await mixProto.reply(surb, message)
 
-  mixProto.exitLayer = ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehavior)
+  mixProto.exitLayer = ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehaviors)
 
   mixProto.codecs = @[MixProtocolID]
   mixProto.handler = proc(

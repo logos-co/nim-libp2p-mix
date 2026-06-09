@@ -31,16 +31,16 @@ type DestReadBehavior* = object
 type ExitLayer* = object
   switch: Switch
   onReplyDialer: OnReplyDialer
-  destReadBehavior: TableRef[string, DestReadBehavior]
+  destReadBehaviors: TableRef[string, DestReadBehavior]
 
 proc init*(
     T: typedesc[ExitLayer],
     switch: Switch,
     onReplyDialer: OnReplyDialer,
-    destReadBehavior: TableRef[string, DestReadBehavior],
+    destReadBehaviors: TableRef[string, DestReadBehavior],
 ): T =
   ExitLayer(
-    switch: switch, onReplyDialer: onReplyDialer, destReadBehavior: destReadBehavior
+    switch: switch, onReplyDialer: onReplyDialer, destReadBehaviors: destReadBehaviors
   )
 
 proc replyDialerCbFactory(self: ExitLayer): MixReplyDialer =
@@ -51,7 +51,7 @@ proc replyDialerCbFactory(self: ExitLayer): MixReplyDialer =
     await allFutures(respFuts)
 
 proc reply(
-    self: ExitLayer, surbs: seq[SURB], response: seq[byte]
+    self: ExitLayer, surbs: seq[SURB], response: sink seq[byte]
 ) {.async: (raises: [CancelledError]).} =
   if surbs.len == 0:
     return
@@ -60,7 +60,9 @@ proc reply(
   defer:
     await replyConn.close()
   try:
-    await replyConn.write(response)
+    # response is `sink seq[byte]` and isn't read after this; move() lets
+    # MixReplyConnection.write (also sink) take ownership without a copy.
+    await replyConn.write(move(response))
   except LPStreamError as exc:
     error "could not reply", description = exc.msg
     mix_messages_error.inc(labelValues = ["ExitLayer", "REPLY_FAILED"])
@@ -93,7 +95,7 @@ when defined(libp2p_mix_experimental_exit_is_dest):
 proc fwdRequest(
     self: ExitLayer,
     codec: string,
-    message: seq[byte],
+    message: sink seq[byte],
     destination: Hop,
     surbs: seq[SURB],
 ) {.async: (raises: [CancelledError]).} =
@@ -117,16 +119,18 @@ proc fwdRequest(
     let destConn = await self.switch.dial(destPeerId, @[destAddr], codec)
     defer:
       await destConn.close()
-    await destConn.write(message)
+    # message is `sink seq[byte]` and isn't read after this; move() lets
+    # MixExitConnection.write (also sink) take ownership without a copy.
+    await destConn.write(move(message))
 
     if surbs.len != 0:
-      if not self.destReadBehavior.hasKey(codec):
-        error "No destReadBehavior for codec", codec
+      if not self.destReadBehaviors.hasKey(codec):
+        error "No destReadBehavior registered for codec", codec
         return
 
       var behavior: DestReadBehavior
       try:
-        behavior = self.destReadBehavior[codec]
+        behavior = self.destReadBehaviors[codec]
       except KeyError:
         raiseAssert "checked with HasKey"
 
