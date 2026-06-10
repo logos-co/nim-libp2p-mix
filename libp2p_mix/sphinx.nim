@@ -278,9 +278,9 @@ template extractSurbId(data: seq[byte]): SURBIdentifier =
   copyMem(addr id[0], addr data[startIndex], SurbIdLen)
   id
 
-proc computeTag(alpha: seq[byte], s: FieldElement): Tag =
-  ## Compute replay detection tag as H(α || s) per spec Section 8.6.1 Step 2
-  sha256_hash(alpha & fieldElementToBytes(s))
+proc computeTag(s: FieldElement): Tag =
+  ## Compute replay detection tag as H(s) per spec Section 8.6.1 Step 2.
+  sha256_hash(fieldElementToBytes(s))
 
 proc checkReplay*(
     sphinxPacket: SphinxPacket, privateKey: FieldElement, tm: var TagManager
@@ -298,8 +298,8 @@ proc checkReplay*(
 
   let s = multiplyPointWithScalars(alphaFE, [privateKey])
 
-  # Compute tag as H(α || s) per spec
-  let tag = computeTag(alpha, s)
+  # Compute tag as H(s) per spec
+  let tag = computeTag(s)
 
   ok((isReplay: isTagSeen(tm, tag), sharedSecret: s))
 
@@ -321,8 +321,8 @@ proc processSphinxPacket*(
 
   let sBytes = fieldElementToBytes(s)
 
-  # Compute tag as H(α || s) per spec Section 8.6.1 Step 2
-  let tag = computeTag(alpha, s)
+  # Compute tag as H(s) per spec Section 8.6.1 Step 2
+  let tag = computeTag(s)
 
   # Check if the tag has been seen (only if we didn't get pre-validated sharedSecret)
   if sharedSecret.isNone and isTagSeen(tm, tag):

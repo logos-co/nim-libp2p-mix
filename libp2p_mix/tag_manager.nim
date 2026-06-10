@@ -16,7 +16,7 @@ const
   DefaultMaxTags* = 1_000_000
 
 type
-  ## Tag is H(α || s) as per spec Section 8.6.1 Step 2
+  ## Tag is H(s) as per spec Section 8.6.1 Step 2
   Tag* = array[32, byte]
 
   TagManager* = ref object

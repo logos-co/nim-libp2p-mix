@@ -246,6 +246,33 @@ suite "Sphinx Tests":
 
     check processedSP2.status == Duplicate
 
+  test "sphinx replay detected after alpha high-bit malleability":
+    # Flipping α's RFC 7748-masked top bit yields different α bytes but the same
+    # shared secret s, so an H(s) replay tag must still flag the copy as a replay.
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "Sphinx wrap error"
+      )
+    let packetBytes = sp.serialize()
+
+    # seq assignment copies, so flipping malleatedBytes leaves packetBytes intact
+    var malleatedBytes = packetBytes
+    malleatedBytes[AlphaSize - 1] = packetBytes[AlphaSize - 1] xor 0x80
+    check malleatedBytes != packetBytes
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+    let malleated = SphinxPacket.deserialize(malleatedBytes).expect("deserialize error")
+
+    let first =
+      processSphinxPacket(packet, privateKeys[0], tm).expect("Sphinx processing error")
+    check first.status == Intermediate
+
+    let replay = processSphinxPacket(malleated, privateKeys[0], tm).expect(
+        "Sphinx processing error"
+      )
+    check replay.status == Duplicate
+
   test "sphinx wrap and process message sizes":
     let MessageSizes = @[32, 64, 128, 256, 512]
     for size in MessageSizes:
