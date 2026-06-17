@@ -11,6 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  NIMBLE_FLAGS: "-y"
+
 jobs:
   test:
     # Each linux matrix job builds + runs 14 unit tests and 6 component tests
@@ -71,7 +74,7 @@ jobs:
         id: nimble-cache
         uses: actions/cache@v5
         with:
-          # `nimble setup --localdeps -y` (below) provisions deps into the
+          # `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` (below) provisions deps into the
           # project-local `nimbledeps/`, so cache both that and `~/.nimble`
           # (which holds nimble's package metadata + downloaded tarballs).
           path: |
@@ -85,9 +88,9 @@ jobs:
           nimble --version
           # Project-local install: provisions deps into `nimbledeps/` and
           # generates `nimble.paths`. We don't commit `nimble.lock` (see
-          # #13), so `nimble setup --localdeps -y` is the right bootstrap
+          # #13), so `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` is the right bootstrap
           # (vs `nimble install -dy`, which would expect a committed lock).
-          nimble setup --localdeps -y
+          make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Run unit tests
         run: nimble test

@@ -156,11 +156,19 @@ To set up the project:
 ```bash
 git clone https://github.com/logos-co/nim-libp2p-mix.git
 cd nim-libp2p-mix
-nimble setup -l   # generates nimble.paths
+make setup        # generates nimble.paths
 ```
 
-`-l` (`--localdeps`) runs nimble in project-local dependency mode and adds
-`--noNimblePath` to the generated `nimble.paths`.
+`make setup` runs `nimble setup -l` (`--localdeps`), which runs nimble in
+project-local dependency mode and adds `--noNimblePath` to the generated
+`nimble.paths`.
+
+You can override the `NIMBLE_FLAGS` variable to pass extra flags to nimble:
+
+```bash
+make setup NIMBLE_FLAGS="-y"          # non-interactive
+make setup NIMBLE_FLAGS=--solver:legacy # legacy solver
+```
 
 ### Tests
 
@@ -194,6 +202,13 @@ nim c -d:libp2p_mix_experimental_exit_is_dest -d:metrics -o:mix_ping examples/mi
 ./mix_ping
 ```
 
+### Cleaning
+
+- `make clean` removes generated artifacts: `nimble.lock`, `nix/deps.nix`,
+  `nimbledeps/`, and `nimble.paths`.
+- `make clean-nimbledeps` only removes `nimbledeps/` and `nimble.paths`,
+  leaving the Nix dependency lock untouched.
+
 ### Nix
 
 A flake is provided for reproducible dev shells and builds.
@@ -214,10 +229,9 @@ make deps   # regenerates nix/deps.nix
 If this does not work for any reason and you need to start fresh while in the Nix shell
 (so after the initial `nix develop`), run:
 
-```
+```bash
 make clean
-rm -rf nimbledeps nimble.paths
-nimble setup -l
+make setup
 make deps
 nix build
 ```
@@ -234,8 +248,8 @@ non-empty value means you're inside a nix shell. Empty or unset means
 you're not.
 
 `make deps` requires `nix-prefetch-git` and `jq` on `$PATH`. Internally it
-runs `nimble lock` to produce a fresh `nimble.lock` and then transforms
-it via `tools/gen-deps.sh`.
+runs `nimble lock $(NIMBLE_FLAGS)` to produce a fresh `nimble.lock` and then
+transforms it via `tools/gen-deps.sh`.
 
 `nimble.lock` itself is **not** committed — it's an intermediate build
 artefact regenerated on demand (it lives in `.gitignore`). The long-lived

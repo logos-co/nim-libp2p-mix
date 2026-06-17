@@ -1,19 +1,27 @@
-.PHONY: all build deps clean
+.PHONY: all build deps clean clean-nimbledeps setup
+
+NIMBLE_FLAGS ?=
+
+RMDIR := rm -rf
 
 all: build
+
+setup:
+	nimble setup -l $(NIMBLE_FLAGS)
 
 # `nimble.lock` is an intermediate build artefact, not committed to git
 # (see .gitignore and issue #13). It's regenerated here from
 # `libp2p_mix.nimble` only as input to `./tools/gen-deps.sh`, which
 # produces the committed `nix/deps.nix`. The Nim-matrix CI jobs install
-# deps via `nimble setup --localdeps -y` and don't read `nimble.lock`;
+# deps via `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"`, with `NIMBLE_FLAGS`
+# defined once at workflow level, and don't read `nimble.lock`;
 # only the `ci / nix` job regenerates `nimble.lock` on the fly (via
 # `make deps`) and uses it as input to `gen-deps.sh`.
 nimble.lock: libp2p_mix.nimble
-	nimble lock
+	nimble lock $(NIMBLE_FLAGS)
 
 nix/deps.nix: nimble.lock tools/gen-deps.sh
-	./tools/gen-deps.sh nimble.lock nix/deps.nix
+	NIMBLE_FLAGS='$(NIMBLE_FLAGS)' ./tools/gen-deps.sh nimble.lock nix/deps.nix
 
 deps: nix/deps.nix
 
@@ -21,4 +29,7 @@ build: deps
 	nix build
 
 clean:
-	$(RM) nimble.lock nix/deps.nix
+	$(RMDIR) nimble.lock nix/deps.nix nimbledeps nimble.paths
+
+clean-nimbledeps:
+	$(RMDIR) nimbledeps nimble.paths

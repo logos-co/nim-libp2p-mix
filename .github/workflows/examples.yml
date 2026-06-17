@@ -11,6 +11,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  NIMBLE_FLAGS: "-y"
+
 jobs:
   example:
     name: Build mix_ping example
@@ -31,7 +34,7 @@ jobs:
       - name: Cache nimble deps
         uses: actions/cache@v5
         with:
-          # `nimble setup --localdeps -y` (below) provisions deps into the
+          # `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` (below) provisions deps into the
           # project-local `nimbledeps/`, so cache both that and `~/.nimble`.
           path: |
             ~/.nimble
@@ -41,8 +44,8 @@ jobs:
       - name: Install deps
         # Project-local install: provisions deps into `nimbledeps/` and
         # generates `nimble.paths`. We don't commit `nimble.lock` (see #13),
-        # so `nimble setup --localdeps -y` is the right bootstrap.
-        run: nimble setup --localdeps -y
+        # so `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` is the right bootstrap.
+        run: make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Build mix_ping
         run: nimble example

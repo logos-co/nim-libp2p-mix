@@ -54,8 +54,8 @@
 
   serialization = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-serialization";
-    rev = "b0f2fa32960ea532a184394b0f27be37bd80248b";
-    sha256 = "0wip1fjx7ka39ck1g1xvmyarzq1p5dlngpqil6zff8k8z5skiz27";
+    rev = "4092500cea76154576539371709ae801afbd2a9d";
+    sha256 = "04pz6d6p3nd1y2khbb667fcd6p2jk4bxv65iaffzq06bqqhalcwc";
     fetchSubmodules = true;
   };
 
@@ -152,8 +152,8 @@
 
   protobuf_serialization = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-protobuf-serialization";
-    rev = "d9aa950b9d9e8bfc8a201740042b5e8ea5880875";
-    sha256 = "11hrqpq7dpdqfn71izmq7ysrdnh8gry0qvrgqdspcz2k2lifzz0c";
+    rev = "cec5f1da897c0b3e6d3a1f2da6a36b4bbdc3a1a8";
+    sha256 = "0dmrm8l1293fcmyzm4kmhwplyrd1clrjs8hpf9s9bpbyjw7vf927";
     fetchSubmodules = true;
   };
 
