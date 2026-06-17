@@ -65,10 +65,11 @@ jobs:
           nim-version: ${{ matrix.nim.ref }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set NIMFLAGS for i386
+      - name: Set i386 build flags
         if: matrix.platform.cpu == 'i386'
         run: |
           echo "NIMFLAGS=${NIMFLAGS} --cpu:i386 --passC:-m32 --passL:-m32" >> $GITHUB_ENV
+          echo "CC=gcc -m32" >> $GITHUB_ENV
 
       - name: Cache nimble deps
         id: nimble-cache
@@ -80,7 +81,7 @@ jobs:
           path: |
             ~/.nimble
             nimbledeps
-          key: nimble-${{ matrix.platform.os }}-${{ matrix.platform.cpu }}-${{ matrix.nim.ref }}-${{ hashFiles('libp2p_mix.nimble') }}
+          key: nimble-${{ matrix.platform.os }}-${{ matrix.platform.cpu }}-${{ matrix.nim.ref }}-${{ hashFiles('libp2p_mix.nimble', '.github/workflows/ci.yml') }}
 
       - name: Install deps
         run: |
