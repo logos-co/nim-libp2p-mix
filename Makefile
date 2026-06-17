@@ -1,4 +1,4 @@
-.PHONY: all build deps clean clean-nimbledeps setup
+.PHONY: all build deps refresh-deps clean clean-nimbledeps setup
 
 NIMBLE_FLAGS ?=
 
@@ -29,7 +29,11 @@ build: deps
 	nix build
 
 clean:
-	$(RMDIR) nimble.lock nix/deps.nix nimbledeps nimble.paths
+	$(RMDIR) nimble.lock nimbledeps nimble.paths
 
 clean-nimbledeps:
 	$(RMDIR) nimbledeps nimble.paths
+
+refresh-deps:
+	$(RMDIR) nimble.lock
+	$(MAKE) deps

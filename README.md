@@ -204,10 +204,12 @@ nim c -d:libp2p_mix_experimental_exit_is_dest -d:metrics -o:mix_ping examples/mi
 
 ### Cleaning
 
-- `make clean` removes generated artifacts: `nimble.lock`, `nix/deps.nix`,
+- `make clean` removes local generated artifacts: `nimble.lock`,
   `nimbledeps/`, and `nimble.paths`.
 - `make clean-nimbledeps` only removes `nimbledeps/` and `nimble.paths`,
   leaving the Nix dependency lock untouched.
+- `make refresh-deps` forces regeneration of the committed `nix/deps.nix`
+  snapshot.
 
 ### Nix
 
@@ -226,13 +228,19 @@ pinned transitive dependencies. Refresh it after bumping the libp2p pin in
 make deps   # regenerates nix/deps.nix
 ```
 
+If you need to force regeneration from a clean intermediate lock file, run:
+
+```bash
+make refresh-deps
+```
+
 If this does not work for any reason and you need to start fresh while in the Nix shell
 (so after the initial `nix develop`), run:
 
 ```bash
 make clean
 make setup
-make deps
+make refresh-deps
 nix build
 ```
 
@@ -248,8 +256,8 @@ non-empty value means you're inside a nix shell. Empty or unset means
 you're not.
 
 `make deps` requires `nix-prefetch-git` and `jq` on `$PATH`. Internally it
-runs `nimble lock $(NIMBLE_FLAGS)` to produce a fresh `nimble.lock` and then
-transforms it via `tools/gen-deps.sh`.
+generates a fresh `nimble.lock`, forwards `NIMBLE_FLAGS` to `nimble lock`,
+and then transforms the lock file via `tools/gen-deps.sh`.
 
 `nimble.lock` itself is **not** committed — it's an intermediate build
 artefact regenerated on demand (it lives in `.gitignore`). The long-lived
