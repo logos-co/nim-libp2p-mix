@@ -181,6 +181,23 @@ nimble testAll         # both
 The `tests/config.nims` enables `-d:metrics` and several
 `libp2p_*_metrics` defines so tests can assert on metric counters.
 
+### Formatting
+
+```bash
+make format
+```
+
+`make format` runs `nph` over tracked Nim files. It assumes `nph` version
+`0.7.0` is installed globally in the native shell, matching CI:
+
+```bash
+nimble -y install nph@0.7.0
+```
+
+Check the installed package version with `nimble dump nph` and look for
+`version: "0.7.0"`. The `nph --version` output may still show a prerelease
+string for this release, so prefer the Nimble package metadata.
+
 ### Example
 
 ```bash
