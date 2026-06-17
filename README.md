@@ -234,6 +234,14 @@ If you need to force regeneration from a clean intermediate lock file, run:
 make refresh-deps
 ```
 
+`NIMBLE_FLAGS` can be passed to `make refresh-deps` the same way as
+`make setup`; command-line variables are forwarded to the recursive
+`make deps` invocation:
+
+```bash
+make refresh-deps NIMBLE_FLAGS="-y --solver:legacy"
+```
+
 If this does not work for any reason and you need to start fresh while in the Nix shell
 (so after the initial `nix develop`), run:
 
