@@ -1,6 +1,7 @@
-.PHONY: all build deps refresh-deps clean clean-nimbledeps setup
+.PHONY: all build deps refresh-deps clean clean-nimbledeps setup format
 
 NIMBLE_FLAGS ?=
+NPH_FILES := $(shell git ls-files '*.nim' '*.nimble' '*.nims')
 
 RMDIR := rm -rf
 
@@ -27,6 +28,9 @@ deps: nix/deps.nix
 
 build: deps
 	nix build
+
+format:
+	nph $(NPH_FILES)
 
 clean:
 	$(RMDIR) nimble.lock nimbledeps nimble.paths
