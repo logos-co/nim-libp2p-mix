@@ -1,7 +1,7 @@
 .PHONY: all build deps refresh-deps clean clean-nimbledeps setup format
 
 NIMBLE_FLAGS ?=
-NPH_FILES := $(shell git ls-files '*.nim' '*.nimble' '*.nims')
+NPH_FILES = $(shell git ls-files '*.nim' '*.nimble' '*.nims')
 
 RMDIR := rm -rf
 
