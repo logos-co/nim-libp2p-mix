@@ -10,8 +10,8 @@ skipDirs = @["examples", "tests"]
 
 requires "nim >= 2.2.4",
   "https://github.com/vacp2p/nim-libp2p.git#c470b1146fa2ef23ab88c5a0940923cf7645e9c5",
-  "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
-  "nimcrypto >= 0.6.0", "stew >= 0.4.2", "results", "unittest2"
+  "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics", "nimcrypto >= 0.6.0",
+  "stew >= 0.4.2", "results", "unittest2"
 
 import os, strutils
 
