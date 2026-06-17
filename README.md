@@ -242,6 +242,17 @@ make refresh-deps
 make refresh-deps NIMBLE_FLAGS="-y --solver:legacy"
 ```
 
+`NIMBLE_FLAGS` can also be passed to `make build` when dependency generation
+may be triggered as part of the build:
+
+```bash
+make build NIMBLE_FLAGS="--solver:legacy"
+```
+
+For predictable forced regeneration, prefer `make refresh-deps`; `make build`
+only uses `NIMBLE_FLAGS` if `nimble.lock` or `nix/deps.nix` need to be
+regenerated.
+
 If this does not work for any reason and you need to start fresh while in the Nix shell
 (so after the initial `nix develop`), run:
 
@@ -251,6 +262,8 @@ make setup
 make refresh-deps
 nix build
 ```
+
+optionally including `NIMBLE_FLAGS="--solver:legacy"` if necessary.
 
 To quickly check that you are in the nix shell run:
 

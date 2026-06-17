@@ -14,13 +14,14 @@ method readOnce*(
 ): Future[int] {.async: (raises: [CancelledError, LPStreamError]).} =
   if self.message.len == 0:
     return 0 # Nothing else to read.
-  if self.message.len < nbytes:
-    raise newException(
-      LPStreamError, "Not enough data in to read exactly " & $nbytes & " bytes."
-    )
-  copyMem(pbytes, addr self.message[0], nbytes)
-  self.message = self.message[nbytes ..^ 1]
-  nbytes
+  let readLen = min(self.message.len, nbytes)
+  copyMem(pbytes, addr self.message[0], readLen)
+  self.message = self.message[readLen ..^ 1]
+  self.activity = true
+  readLen
+
+method atEof*(self: MixExitConnection): bool =
+  self.message.len == 0
 
 method write*(
     self: MixExitConnection, msg: sink seq[byte]
