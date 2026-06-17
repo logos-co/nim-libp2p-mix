@@ -43,7 +43,11 @@ if [[ ! -f "$LOCKFILE" ]]; then
   (
     LOCKDIR="$(dirname "$LOCKFILE")"
     cd "$LOCKDIR" || { echo "error: $LOCKDIR does not exist"; exit 1; }
-    nimble lock ${NIMBLE_FLAGS:-}
+    nimble_flags=()
+    if [[ -n "${NIMBLE_FLAGS:-}" ]]; then
+      read -r -a nimble_flags <<< "$NIMBLE_FLAGS"
+    fi
+    nimble lock "${nimble_flags[@]}"
   )
 fi
 
