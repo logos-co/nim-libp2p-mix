@@ -30,6 +30,18 @@ suite "curve25519_tests":
 
     check publicKey == derivedPublicKey
 
+  test "alpha field element rejects invalid alpha encodings":
+    check bytesToAlphaFieldElement(newSeq[byte](FieldElementSize)).isErr()
+
+    var nonCanonical = newSeq[byte](FieldElementSize)
+    nonCanonical[FieldElementSize - 1] = byte(0x80)
+    check bytesToAlphaFieldElement(nonCanonical).isErr()
+
+    let (_, publicKey) = generateKeyPair().expect("generate keypair error")
+    check:
+      bytesToAlphaFieldElement(fieldElementToBytes(publicKey)).isOk()
+      not publicKey.isZeroFieldElement()
+
   test "commutativity":
     let
       x1 = generateRandomFieldElement().expect("generate random field element error")

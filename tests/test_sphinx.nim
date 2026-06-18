@@ -122,6 +122,25 @@ suite "Sphinx Tests":
 
     check invalidMacPkt.status == InvalidMAC
 
+  test "all-zero alpha is rejected before processing":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    var packetBytes = sp.serialize()
+
+    for i in 0 ..< AlphaSize:
+      packetBytes[i] = 0
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    check checkReplay(packet, privateKeys[0], tm).isErr()
+    check processSphinxPacket(packet, privateKeys[0], tm).isErr()
+
+    let zeroSecret =
+      bytesToFieldElement(newSeq[byte](FieldElementSize)).expect("zero field element")
+    check processSphinxPacket(packet, privateKeys[0], tm, Opt.some(zeroSecret)).isErr()
+
   test "tampered Beta invalidates MAC":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
     let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
