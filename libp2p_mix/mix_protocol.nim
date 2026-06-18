@@ -393,7 +393,7 @@ method handleMixMessages*(
         startTime,
         metadata,
         Opt.some(fromPeerId),
-        Opt.some(nodeInfo.peerId)
+        Opt.some(nextPeerId)
 
     # Per-hop spam protection: generate the fresh proof while the packet is
     # being held. When using SpamProtectionDelayStrategy (or similar) with
