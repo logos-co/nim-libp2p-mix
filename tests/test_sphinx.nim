@@ -121,6 +121,38 @@ suite "Sphinx Tests":
       )
 
     check invalidMacPkt.status == InvalidMAC
+    check tm.len == 0
+
+  test "invalid MAC with replay precheck does not add tag":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    var packetBytes = sp.serialize()
+
+    # Keep alpha valid but break the authenticated beta data.
+    packetBytes[AlphaSize] = packetBytes[AlphaSize] xor 0x01
+
+    let tamperedPacket =
+      SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    let replay =
+      checkReplay(tamperedPacket, privateKeys[0], tm).expect("checkReplay error")
+    check:
+      not replay.isReplay
+      tm.len == 0
+
+    let processed = processSphinxPacket(
+        tamperedPacket, privateKeys[0], tm, Opt.some(replay.sharedSecret)
+      )
+      .expect("processing error")
+    check:
+      processed.status == InvalidMAC
+      tm.len == 0
+
+    let replayAgain =
+      checkReplay(tamperedPacket, privateKeys[0], tm).expect("checkReplay error")
+    check not replayAgain.isReplay
 
   test "tampered Beta invalidates MAC":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
@@ -426,7 +458,7 @@ suite "Sphinx Tests":
 
       check paddedMessage == msg
 
-  test "checkReplay returns false for new packet, true for replay":
+  test "checkReplay does not add tags before processing":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
     let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
         "sphinx wrap error"
@@ -435,14 +467,27 @@ suite "Sphinx Tests":
 
     # First check - not a replay
     let first = checkReplay(packet, privateKeys[0], tm).expect("checkReplay error")
-    check not first.isReplay
+    check:
+      not first.isReplay
+      tm.len == 0
 
-    # Second check - replay detected
+    # Prechecking does not add unauthenticated replay tags.
     let second = checkReplay(packet, privateKeys[0], tm).expect("checkReplay error")
-    check second.isReplay
+    check:
+      not second.isReplay
+      tm.len == 0
 
     # Shared secret should be the same both times
     check first.sharedSecret == second.sharedSecret
+
+    let processed = processSphinxPacket(
+        packet, privateKeys[0], tm, Opt.some(first.sharedSecret)
+      )
+      .expect("processing error")
+    check processed.status == Intermediate
+
+    let third = checkReplay(packet, privateKeys[0], tm).expect("checkReplay error")
+    check third.isReplay
 
   test "processSphinxPacket with reused sharedSecret":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()

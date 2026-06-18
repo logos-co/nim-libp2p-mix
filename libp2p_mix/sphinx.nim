@@ -287,7 +287,7 @@ proc checkReplay*(
 ): Result[tuple[isReplay: bool, sharedSecret: FieldElement], string] =
   ## Check if a Sphinx packet is a replay without doing full processing.
   ## Returns (isReplay, sharedSecret) to enable reuse of expensive EC multiplication.
-  ## If not a replay, the tag is immediately added to prevent race conditions.
+  ## The tag is not added until MAC verification succeeds in processSphinxPacket.
   let
     (header, _) = sphinxPacket.get()
     (alpha, _, _) = header.get()
@@ -301,11 +301,7 @@ proc checkReplay*(
   # Compute tag as H(α || s) per spec
   let tag = computeTag(alpha, s)
 
-  # Atomically check and add the tag to prevent race conditions
-  # (checkAndAddTag returns true if already present, false if newly added)
-  let isDuplicate = checkAndAddTag(tm, tag)
-
-  ok((isReplay: isDuplicate, sharedSecret: s))
+  ok((isReplay: isTagSeen(tm, tag), sharedSecret: s))
 
 proc processSphinxPacket*(
     sphinxPacket: SphinxPacket,
@@ -339,9 +335,9 @@ proc processSphinxPacket*(
     # If MAC not verified
     return ok(ProcessedSphinxPacket(status: InvalidMAC))
 
-  # Add tag if it wasn't already added by checkReplay
-  if sharedSecret.isNone:
-    tm.addTag(tag)
+  # Atomically add the replay tag only after authentication succeeds.
+  if checkAndAddTag(tm, tag):
+    return ok(ProcessedSphinxPacket(status: Duplicate))
 
   # Derive AES key and IV
   let

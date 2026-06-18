@@ -13,6 +13,7 @@ import libp2p/utils/heartbeat
 const
   DefaultTagTTL* = chronos.hours(1)
   DefaultPurgeInterval* = chronos.minutes(5)
+  DefaultMaxTags* = 1_000_000
 
 type
   ## Tag is H(α || s) as per spec Section 8.6.1 Step 2
@@ -21,6 +22,7 @@ type
   TagManager* = ref object
     cache: TimedCache[Tag]
     tagTTL: Duration
+    maxTags: int
     purgeInterval: Duration
     purgeLoop: Future[void]
 
@@ -63,10 +65,13 @@ proc new*(
     tagTTL: Duration = DefaultTagTTL,
     purgeInterval: Duration = DefaultPurgeInterval,
     autoStart: bool = true,
+    maxTags: int = DefaultMaxTags,
 ): T =
   let tm = T(
-    cache: TimedCache[Tag].init(timeout = tagTTL, refreshOnPut = false),
+    cache:
+      TimedCache[Tag].init(timeout = tagTTL, maxSize = maxTags, refreshOnPut = false),
     tagTTL: tagTTL,
+    maxTags: maxTags,
     purgeInterval: purgeInterval,
   )
   if autoStart:
@@ -94,4 +99,6 @@ proc removeTag*(tm: TagManager, tag: Tag) =
 
 proc clearTags*(tm: TagManager) =
   ## Remove all tags.
-  tm.cache = TimedCache[Tag].init(timeout = tm.tagTTL, refreshOnPut = false)
+  tm.cache = TimedCache[Tag].init(
+    timeout = tm.tagTTL, maxSize = tm.maxTags, refreshOnPut = false
+  )
