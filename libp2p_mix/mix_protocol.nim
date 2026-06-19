@@ -489,8 +489,7 @@ proc handleMixNodeConnection(
   while not conn.atEof:
     var metadataBytes = newSeqUninit[byte](0)
     when defined(enable_mix_benchmarks):
-      metadataBytes = newSeqUninit[byte](MetadataSize)
-      await conn.readExactly(addr metadataBytes[0], MetadataSize)
+      metadataBytes = await conn.readLp(MetadataSize)
 
     # Calculate maximum wire packet size including spam protection proof
     let maxWireSize = PacketSize + mixProto.spamProtection.proofSize()
