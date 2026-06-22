@@ -273,6 +273,44 @@ suite "Sphinx Tests":
       )
     check replay.status == Duplicate
 
+  test "checkReplay detects replay after alpha high-bit malleability":
+    # Same α-malleability as the test above, exercised through the production path:
+    # mix_protocol calls checkReplay (read-only) then processSphinxPacket, which
+    # stores the H(s) tag only after MAC verification. checkReplay is the sole replay
+    # check for a pre-validated sharedSecret, so a later malleated copy — sharing s —
+    # must be flagged there via H(s).
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    let packetBytes = sp.serialize()
+
+    # seq assignment copies, so flipping malleatedBytes leaves packetBytes intact
+    var malleatedBytes = packetBytes
+    malleatedBytes[AlphaSize - 1] = packetBytes[AlphaSize - 1] xor 0x80
+    check malleatedBytes != packetBytes
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+    let malleated = SphinxPacket.deserialize(malleatedBytes).expect("deserialize error")
+
+    # Original packet: checkReplay reports no replay, then processSphinxPacket stores
+    # the H(s) tag post-MAC (mirroring the mix_protocol pre-validated path).
+    let first = checkReplay(packet, privateKeys[0], tm).expect("checkReplay error")
+    check not first.isReplay
+
+    let processed = processSphinxPacket(
+        packet, privateKeys[0], tm, Opt.some(first.sharedSecret)
+      )
+      .expect("processing error")
+    check processed.status == Intermediate
+
+    # The malleated copy shares s, so checkReplay flags it as a replay via H(s).
+    let second = checkReplay(malleated, privateKeys[0], tm).expect("checkReplay error")
+    check second.isReplay
+
+    # Shared secret is identical despite the different α encoding
+    check first.sharedSecret == second.sharedSecret
+
   test "sphinx wrap and process message sizes":
     let MessageSizes = @[32, 64, 128, 256, 512]
     for size in MessageSizes:
