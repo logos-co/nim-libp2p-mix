@@ -75,9 +75,8 @@ proc registerDestReadBehavior*(
 ) =
   mixProto.destReadBehaviors[codec] = behavior
 
-proc mixNodeInfo*(mixProto: MixProtocol): MixNodeInfo =
-  ## Returns the MixNodeInfo of this mix node.
-  mixProto.mixNodeInfo
+proc localMixPubInfo*(mixProto: MixProtocol): MixPubInfo =
+  mixProto.mixNodeInfo.toMixPubInfo()
 
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
