@@ -328,8 +328,8 @@ proc processSphinxPacket*(
     (header, payload) = sphinxPacket.get()
     (alpha, beta, gamma) = header.get()
 
-  # Validate alpha even when sharedSecret is supplied; alpha still drives MAC and
-  # blinding, and callers must not be able to bypass public-input checks.
+  # Validate alpha encoding even when sharedSecret is supplied; alpha still
+  # drives MAC and blinding.
   let alphaFE = bytesToAlphaFieldElement(alpha).valueOr:
     return err("Invalid alpha: " & error)
 
@@ -337,7 +337,7 @@ proc processSphinxPacket*(
     computeSharedSecret(alphaFE, privateKey).valueOr:
       return err(error)
 
-  if s.isZeroFieldElement():
+  if sharedSecret.isSome() and s.isZeroFieldElement():
     return err("Invalid alpha: low-order shared secret")
 
   let sBytes = fieldElementToBytes(s)

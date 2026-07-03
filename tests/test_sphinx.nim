@@ -141,6 +141,36 @@ suite "Sphinx Tests":
       bytesToFieldElement(newSeq[byte](FieldElementSize)).expect("zero field element")
     check processSphinxPacket(packet, privateKeys[0], tm, Opt.some(zeroSecret)).isErr()
 
+  test "zero supplied sharedSecret is rejected":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    let packet = SphinxPacket.deserialize(sp.serialize()).expect("deserialize error")
+    let zeroSecret =
+      bytesToFieldElement(newSeq[byte](FieldElementSize)).expect("zero field element")
+
+    check processSphinxPacket(packet, privateKeys[0], tm, Opt.some(zeroSecret)).isErr()
+
+  test "canonical low-order alpha is rejected after shared-secret computation":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    var packetBytes = sp.serialize()
+
+    # u = 1 is canonical and non-zero, but low-order for Curve25519.
+    for i in 0 ..< AlphaSize:
+      packetBytes[i] = 0
+    packetBytes[0] = 1
+
+    check bytesToAlphaFieldElement(packetBytes[0 .. AlphaSize - 1]).isOk()
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    check checkReplay(packet, privateKeys[0], tm).isErr()
+    check processSphinxPacket(packet, privateKeys[0], tm).isErr()
+
   test "tampered Beta invalidates MAC":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
     let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(

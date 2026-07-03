@@ -51,13 +51,13 @@ func isCanonicalFieldElement(bytes: openArray[byte]): bool =
 proc bytesToFieldElement*(bytes: openArray[byte]): Result[FieldElement, string] =
   ## Convert bytes to FieldElement
   if bytes.len != FieldElementSize:
-    return err("Field element size must be 32 bytes")
+    return err("Field element size must be " & $FieldElementSize & " bytes")
   ok(intoCurve25519Key(bytes))
 
 proc bytesToAlphaFieldElement*(bytes: openArray[byte]): Result[FieldElement, string] =
   ## Convert bytes to a Sphinx alpha field element.
   if bytes.len != FieldElementSize:
-    return err("Field element size must be 32 bytes")
+    return err("Field element size must be " & $FieldElementSize & " bytes")
   if bytes.isZeroFieldElement():
     return err("Field element must not be all zero")
   if not bytes.isCanonicalFieldElement():
