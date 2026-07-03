@@ -49,3 +49,7 @@ jobs:
 
       - name: Build mix_ping
         run: nimble example
+
+      # Compile-checks the -d:enable_mix_benchmarks paths (see #27).
+      - name: Build mix_ping with benchmarks enabled
+        run: nimble benchmarkBuild
