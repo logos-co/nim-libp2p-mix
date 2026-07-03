@@ -75,6 +75,9 @@ proc registerDestReadBehavior*(
 ) =
   mixProto.destReadBehaviors[codec] = behavior
 
+proc localMixPubInfo*(mixProto: MixProtocol): MixPubInfo =
+  mixProto.mixNodeInfo.toMixPubInfo()
+
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
     return err("Max cannot be zero.")
