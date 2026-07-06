@@ -75,6 +75,9 @@ proc registerDestReadBehavior*(
 ) =
   mixProto.destReadBehaviors[codec] = behavior
 
+proc localMixPubInfo*(mixProto: MixProtocol): MixPubInfo =
+  mixProto.mixNodeInfo.toMixPubInfo()
+
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
     return err("Max cannot be zero.")
@@ -393,7 +396,7 @@ method handleMixMessages*(
         startTime,
         metadata,
         Opt.some(fromPeerId),
-        Opt.some(nodeInfo.peerId)
+        Opt.some(nextPeerId)
 
     # Per-hop spam protection: generate the fresh proof while the packet is
     # being held. When using SpamProtectionDelayStrategy (or similar) with
@@ -489,8 +492,7 @@ proc handleMixNodeConnection(
   while not conn.atEof:
     var metadataBytes = newSeqUninit[byte](0)
     when defined(enable_mix_benchmarks):
-      metadataBytes = newSeqUninit[byte](MetadataSize)
-      await conn.readExactly(addr metadataBytes[0], MetadataSize)
+      metadataBytes = await conn.readLp(MetadataSize)
 
     # Calculate maximum wire packet size including spam protection proof
     let maxWireSize = PacketSize + mixProto.spamProtection.proofSize()
