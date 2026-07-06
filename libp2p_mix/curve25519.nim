@@ -58,6 +58,9 @@ proc bytesToAlphaFieldElement*(bytes: openArray[byte]): Result[FieldElement, str
   ## Convert bytes to a Sphinx alpha field element.
   if bytes.len != FieldElementSize:
     return err("Field element size must be " & $FieldElementSize & " bytes")
+  # Alpha is both Curve25519 input and replay-tag material. Require a single
+  # canonical, non-zero encoding so equivalent public values cannot get
+  # distinct replay tags.
   if bytes.isZeroFieldElement():
     return err("Field element must not be all zero")
   if not bytes.isCanonicalFieldElement():

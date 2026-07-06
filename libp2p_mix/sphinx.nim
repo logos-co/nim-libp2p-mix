@@ -337,7 +337,7 @@ proc processSphinxPacket*(
     computeSharedSecret(alphaFE, privateKey).valueOr:
       return err(error)
 
-  if sharedSecret.isSome() and s.isZeroFieldElement():
+  if s.isZeroFieldElement():
     return err("Invalid alpha: low-order shared secret")
 
   let sBytes = fieldElementToBytes(s)
