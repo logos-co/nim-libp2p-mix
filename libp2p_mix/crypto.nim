@@ -2,6 +2,7 @@
 # Copyright (c) Status Research & Development GmbH
 
 import endians, nimcrypto
+import ./lioness # LIONESS interface types (Digest, LionessScheme) for the Mix scheme
 
 proc aes_ctr*(key, iv, data: openArray[byte]): seq[byte] =
   ## Processes 'data' using AES in CTR mode.
@@ -54,3 +55,51 @@ proc hmac*(key, data: openArray[byte]): seq[byte] =
   ## Computes a HMAC for 'data' using given 'key'.
   let hmac = sha256.hmac(key, data).data
   return hmac[0 .. 15]
+
+# ---------------------------------------------------------------------------
+# LIONESS primitive instantiation (LIP-183 §4). These are the only
+# place the LIONESS payload cipher touches a concrete crypto library; the
+# `lioness.nim` core stays algorithm-agnostic. Swap the payload primitives by
+# defining a different `LionessScheme`.
+# ---------------------------------------------------------------------------
+
+proc aesCtrStream*(
+    key: openArray[byte], data: var openArray[byte]
+) {.nimcall, gcsafe, raises: [].} =
+  ## LIONESS stream cipher S (LIP-183 §4.1): the mu-byte round key is split as
+  ## k_aes (first 16 bytes) || IV (last 16 bytes); the AES-CTR keystream is
+  ## XORed into `data` in place.
+  doAssert key.len == Mu, "LIONESS stream key must be Mu bytes"
+  var ctx: CTR[aes128]
+  ctx.init(key.toOpenArray(0, 15), key.toOpenArray(16, Mu - 1))
+  ctx.encrypt(data, data)
+  ctx.clear()
+
+proc sha256KeyedHash*(
+    key, msg: openArray[byte]
+): Digest {.nimcall, gcsafe, raises: [].} =
+  ## LIONESS keyed hash H_k (LIP-183 §4.2): SHA256(key || msg). Used only inside
+  ## the LIONESS Feistel construction; it is NOT a general-purpose MAC.
+  var ctx: sha256
+  ctx.init()
+  ctx.update(key)
+  ctx.update(msg)
+  let digest = ctx.finish().data
+  ctx.clear()
+  digest
+
+proc sha256DomSepKdf*(
+    dom: string, seed: openArray[byte]
+): Digest {.nimcall, gcsafe, raises: [].} =
+  ## LIONESS KDF (LIP-183 §4.3): SHA256(dom || seed), full 32-byte output.
+  var ctx: sha256
+  ctx.init()
+  ctx.update(dom.toOpenArrayByte(0, dom.high))
+  ctx.update(seed)
+  let digest = ctx.finish().data
+  ctx.clear()
+  digest
+
+const MixLionessScheme* =
+  LionessScheme(stream: aesCtrStream, hash: sha256KeyedHash, kdf: sha256DomSepKdf)
+  ## The LIP-183 payload-encryption scheme: AES-CTR + SHA-256.

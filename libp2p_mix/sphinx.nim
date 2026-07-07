@@ -2,12 +2,19 @@
 # Copyright (c) Status Research & Development GmbH
 
 import results, sequtils
-import ./[crypto, curve25519, delay, serialization, tag_manager]
+import ./[crypto, curve25519, delay, lioness, serialization, tag_manager]
 import libp2p/crypto/crypto
 import libp2p/utils/sequninit
 
 const PathLength* = 3 # Path length (L)
 const PaddingLength = (((t + 1) * (r - PathLength)) + 1) * k
+
+const
+  # KDF domain-separation labels used in per-hop key derivation.
+  AesKeyLabel = "aes_key" # header (beta) AES key
+  IvLabel = "iv" # header (beta) AES IV
+  MacKeyLabel = "mac_key" # per-hop MAC key
+  PayloadEncKeyLabel = "payload_enc_key" # LIP-183 §4.3: payload delta_key domain
 
 type ProcessingStatus* = enum
   Exit
@@ -68,14 +75,21 @@ proc computeAlpha(
 proc deriveKeyMaterial(keyName: string, s: seq[byte]): seq[byte] =
   @(keyName.toOpenArrayByte(0, keyName.high)) & s
 
+proc isZeros(data: seq[byte], startIdx: int, endIdx: int): bool =
+  doAssert 0 <= startIdx and endIdx < data.len and startIdx <= endIdx
+  for i in startIdx .. endIdx:
+    if data[i] != 0:
+      return false
+  return true
+
 proc computeFillerStrings(s: seq[seq[byte]]): Result[seq[byte], string] =
   var filler: seq[byte] = @[] # Start with an empty filler string
 
   for i in 1 ..< s.len:
     # Derive AES key and IV
     let
-      aes_key = deriveKeyMaterial("aes_key", s[i - 1]).kdf()
-      iv = deriveKeyMaterial("iv", s[i - 1]).kdf()
+      aes_key = deriveKeyMaterial(AesKeyLabel, s[i - 1]).kdf()
+      iv = deriveKeyMaterial(IvLabel, s[i - 1]).kdf()
 
     # Compute filler string
     let
@@ -110,9 +124,9 @@ proc computeBetaGamma(
   for i in countdown(sLen - 1, 0):
     # Derive AES key, MAC key, and IV
     let
-      beta_aes_key = deriveKeyMaterial("aes_key", s[i]).kdf()
-      mac_key = deriveKeyMaterial("mac_key", s[i]).kdf()
-      beta_iv = deriveKeyMaterial("iv", s[i]).kdf()
+      beta_aes_key = deriveKeyMaterial(AesKeyLabel, s[i]).kdf()
+      mac_key = deriveKeyMaterial(MacKeyLabel, s[i]).kdf()
+      beta_iv = deriveKeyMaterial(IvLabel, s[i]).kdf()
 
     # Compute Beta and Gamma
     if i == sLen - 1:
@@ -141,17 +155,19 @@ proc computeDelta(s: seq[seq[byte]], msg: Message): Result[seq[byte], string] =
   var delta: seq[byte]
 
   for i in countdown(sLen - 1, 0):
-    # Derive AES key and IV
-    let
-      delta_aes_key = deriveKeyMaterial("delta_aes_key", s[i]).kdf()
-      delta_iv = deriveKeyMaterial("delta_iv", s[i]).kdf()
+    # delta_key = KDF("payload_enc_key", s_i) is the LIONESS seed for this layer.
+    let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+    var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
+      return err("LIONESS init error: " & $error)
 
-    # Compute Delta
+    # The exit layer starts from the plaintext (which already carries the k
+    # zero-byte integrity prefix from serialize); inner layers re-encrypt the
+    # previous delta. Each layer is one in-place LIONESS encryption.
     if i == sLen - 1:
-      let serializedMsg = msg.serialize()
-      delta = aes_ctr(delta_aes_key, delta_iv, serializedMsg)
-    else:
-      delta = aes_ctr(delta_aes_key, delta_iv, delta)
+      delta = msg.serialize()
+    lion.encrypt(delta).isOkOr:
+      return err("LIONESS encrypt error: " & $error)
+    lion.clear()
 
   return ok(delta)
 
@@ -190,32 +206,46 @@ proc createSURB*(
   )
 
 proc useSURB*(surb: SURB, msg: Message): SphinxPacket =
-  # Derive AES key and IV
-  let
-    delta_aes_key = deriveKeyMaterial("delta_aes_key", surb.key).kdf()
-    delta_iv = deriveKeyMaterial("delta_iv", surb.key).kdf()
-
-  # Compute Delta
-  let serializedMsg = msg.serialize()
-  let delta = aes_ctr(delta_aes_key, delta_iv, serializedMsg)
+  # The reply sender encrypts the payload once, using the reply key k~
+  # (surb.key) directly as the LIONESS seed (LIP-183 §6.2.2). Inputs are
+  # structurally valid (|k~| = k >= kappa, |payload| = PayloadSize >= 2*Mu), so
+  # the LIONESS calls cannot fail here (serialize already asserts the size).
+  var delta = msg.serialize()
+  var lion = Lioness.init(MixLionessScheme, surb.key).expect("LIONESS init")
+  lion.encrypt(delta).expect("LIONESS encrypt")
+  lion.clear()
 
   return SphinxPacket.init(surb.header, delta)
 
 proc processReply*(
     key: seq[byte], s: seq[seq[byte]], delta_prime: seq[byte]
 ): Result[seq[byte], string] =
-  var delta = delta_prime[0 ..^ 1]
+  var delta = delta_prime # var: independent, mutable buffer for in-place LIONESS
 
-  var key_prime = key
-  for i in 0 .. s.len:
-    if i != 0:
-      key_prime = s[i - 1]
+  # LIP-183 §7.3 step 1: re-apply the §6.2.1 layered LIONESS *encryption* over the
+  # return-path secrets (i = L-1 downto 0), reversing each return hop's
+  # decryption so that only the reply sender's initial encryption remains.
+  for i in countdown(s.len - 1, 0):
+    let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+    var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
+      return err("LIONESS init error: " & $error)
+    lion.encrypt(delta).isOkOr:
+      return err("LIONESS encrypt error: " & $error)
+    lion.clear()
 
-    let
-      delta_aes_key = deriveKeyMaterial("delta_aes_key", key_prime).kdf()
-      delta_iv = deriveKeyMaterial("delta_iv", key_prime).kdf()
+  # LIP-183 §7.3 step 2: remove the reply sender's initial encryption, which used
+  # the reply key k~ as the LIONESS seed (LIP-183 §6.2.2).
+  var lion = Lioness.init(MixLionessScheme, key).valueOr:
+    return err("LIONESS init error: " & $error)
+  lion.decrypt(delta).isOkOr:
+    return err("LIONESS decrypt error: " & $error)
+  lion.clear()
 
-    delta = aes_ctr(delta_aes_key, delta_iv, delta)
+  # LIP-183 §7.3 step 3: verify the k-byte zero integrity prefix (mirrors the
+  # forward-path exit check) before recovering the message, so a tampered reply
+  # is rejected instead of silently returning a corrupted message.
+  if not delta.isZeros(0, k - 1):
+    return err("reply payload integrity check failed")
 
   let deserializeMsg = Message.deserialize(delta).valueOr:
     return err("Message deserialization error: " & error)
@@ -262,13 +292,6 @@ type ProcessedSphinxPacket* = object
     delta_prime*: seq[byte]
   else:
     discard
-
-proc isZeros(data: seq[byte], startIdx: int, endIdx: int): bool =
-  doAssert 0 <= startIdx and endIdx < data.len and startIdx <= endIdx
-  for i in startIdx .. endIdx:
-    if data[i] != 0:
-      return false
-  return true
 
 template extractSurbId(data: seq[byte]): SURBIdentifier =
   const startIndex = t * k
@@ -329,7 +352,7 @@ proc processSphinxPacket*(
     return ok(ProcessedSphinxPacket(status: Duplicate))
 
   # Compute MAC
-  let mac_key = deriveKeyMaterial("mac_key", sBytes).kdf()
+  let mac_key = deriveKeyMaterial(MacKeyLabel, sBytes).kdf()
 
   if not (hmac(mac_key, beta).toSeq() == gamma):
     # If MAC not verified
@@ -339,16 +362,20 @@ proc processSphinxPacket*(
   if checkAndAddTag(tm, tag):
     return ok(ProcessedSphinxPacket(status: Duplicate))
 
-  # Derive AES key and IV
+  # Derive AES key and IV for the header (beta)
   let
-    beta_aes_key = deriveKeyMaterial("aes_key", sBytes).kdf()
-    beta_iv = deriveKeyMaterial("iv", sBytes).kdf()
+    beta_aes_key = deriveKeyMaterial(AesKeyLabel, sBytes).kdf()
+    beta_iv = deriveKeyMaterial(IvLabel, sBytes).kdf()
 
-    delta_aes_key = deriveKeyMaterial("delta_aes_key", sBytes).kdf()
-    delta_iv = deriveKeyMaterial("delta_iv", sBytes).kdf()
-
-  # Compute delta
-  let delta_prime = aes_ctr(delta_aes_key, delta_iv, payload)
+  # Decrypt one LIONESS layer of the payload. delta_key = KDF("payload_enc_key", s).
+  # `var` forces a real mutable copy, so the shared input payload is not mutated.
+  let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, sBytes)
+  var delta_prime = payload
+  var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
+    return err("LIONESS init error: " & $error)
+  lion.decrypt(delta_prime).isOkOr:
+    return err("LIONESS decrypt error: " & $error)
+  lion.clear()
 
   # Compute B
   let zeroPadding = newSeq[byte]((t + 1) * k)

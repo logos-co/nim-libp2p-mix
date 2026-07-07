@@ -97,6 +97,36 @@ suite "Sphinx Tests":
       processedSP3.status == Exit
       processedSP3.messageChunk == message
 
+  test "sphinx exit rejects tampered payload":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    var packetBytes = sp.serialize()
+
+    # Flip a byte in the payload (delta) region. The header and its MAC are
+    # untouched, so the packet still routes hop-to-hop; the LIONESS wide-block
+    # PRP scrambles the whole payload, so only the exit's zero-prefix integrity
+    # check should catch the tampering.
+    packetBytes[HeaderSize + 500] = packetBytes[HeaderSize + 500] xor 0x01
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    let sp1 = processSphinxPacket(packet, privateKeys[0], tm).expect("hop0 error")
+    check sp1.status == Intermediate
+
+    let p1 =
+      SphinxPacket.deserialize(sp1.serializedSphinxPacket).expect("deserialize error")
+    let sp2 = processSphinxPacket(p1, privateKeys[1], tm).expect("hop1 error")
+    check sp2.status == Intermediate
+
+    let p2 =
+      SphinxPacket.deserialize(sp2.serializedSphinxPacket).expect("deserialize error")
+
+    # Exit must reject the tampered payload (integrity prefix no longer zero).
+    check processSphinxPacket(p2, privateKeys[2], tm).isErr
+
   test "sphinx wrap empty public keys":
     let (message, _, _, delay, _, dest) = createDummyData()
     check wrapInSphinxPacket(message, @[], delay, @[], dest).isErr
@@ -404,6 +434,36 @@ suite "Sphinx Tests":
       )
 
     check msg == message
+
+  test "surb reply rejects tampered payload":
+    let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()
+
+    let surb =
+      createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
+    var packetBytes = useSURB(surb, message).serialize()
+
+    # Flip a byte in the reply payload (delta). Routing is unaffected, so the
+    # packet still reaches Reply status; the integrity-prefix check in
+    # processReply must reject it after the return-path layers are removed.
+    packetBytes[HeaderSize + 500] = packetBytes[HeaderSize + 500] xor 0x01
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    let sp1 = processSphinxPacket(packet, privateKeys[0], tm).expect("hop0 error")
+    check sp1.status == Intermediate
+
+    let p1 =
+      SphinxPacket.deserialize(sp1.serializedSphinxPacket).expect("deserialize error")
+    let sp2 = processSphinxPacket(p1, privateKeys[1], tm).expect("hop1 error")
+    check sp2.status == Intermediate
+
+    let p2 =
+      SphinxPacket.deserialize(sp2.serializedSphinxPacket).expect("deserialize error")
+    let sp3 = processSphinxPacket(p2, privateKeys[2], tm).expect("hop2 error")
+    check sp3.status == Reply
+
+    # The tampered reply must be rejected by the integrity check.
+    check processReply(surb.key, surb.secret.get(), sp3.delta_prime).isErr
 
   test "create surb empty public keys":
     let (_, _, _, delay, _, _) = createDummyData()
