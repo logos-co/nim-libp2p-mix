@@ -5,21 +5,22 @@
 
 import nimcrypto, results
 import libp2p_mix/[lioness, crypto]
-from libp2p_mix/serialization import k
+from libp2p_mix/serialization import k, PayloadSize
 import ./tools/[unittest]
 
 proc seqBytes(n: int, start = 0): seq[byte] =
   ## Deterministic byte pattern. Built fresh on each call so callers get
   ## independent buffers (avoids the cursor-aliasing that `let copy = buf` can
   ## introduce when the buffer is later mutated in place via `var openArray`).
-  result = newSeq[byte](n)
+  var bytes = newSeq[byte](n)
   for i in 0 ..< n:
-    result[i] = byte((start + i) and 0xff)
+    bytes[i] = byte((start + i) and 0xff)
+  bytes
 
 suite "lioness_tests":
   test "round_trip_multiple_sizes":
     let lion = Lioness.init(MixLionessScheme, seqBytes(32)).expect("init")
-    for size in [MinBlockSize, 512, 4000]: # 4000 = the Mix payload size
+    for size in [MinBlockSize, 512, PayloadSize]: # the actual Mix payload size
       var blk = seqBytes(size, 3)
       let expected = seqBytes(size, 3) # independent buffer, identical content
       check lion.encrypt(blk).isOk
