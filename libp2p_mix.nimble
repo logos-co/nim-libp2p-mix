@@ -32,8 +32,8 @@ proc runTest(filename: string, moreoptions: string = "") =
   exec "./tests/" & filename.toExe
   rmFile "tests/" & filename.toExe
 
-proc buildExample(filename: string) =
-  let cmd = nimc & " " & lang & " " & cfg & " " & flags & " --hints:off"
+proc buildExample(filename: string, moreoptions: string = "") =
+  let cmd = nimc & " " & lang & " " & cfg & " " & flags & " --hints:off " & moreoptions
   exec cmd & " examples/" & filename
   let exeName = filename.changeFileExt("").toExe
   rmFile "examples/" & exeName
@@ -56,3 +56,7 @@ task testAll, "Run unit + component tests":
 
 task example, "Build and run the mix_ping example":
   buildExample("mix_ping.nim")
+
+task benchmarkBuild, "Compile-check the -d:enable_mix_benchmarks code paths":
+  # No regular build sets this flag, so these paths go unchecked (see #27).
+  buildExample("mix_ping.nim", "-d:enable_mix_benchmarks")

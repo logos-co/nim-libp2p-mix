@@ -23,6 +23,7 @@ export MixParameters
 export destReadBehaviorCb
 export DestReadBehavior
 export registerDestReadBehavior
+export localMixPubInfo
 
 # Spam protection exports
 export SpamProtection
