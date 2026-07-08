@@ -119,9 +119,10 @@ proc streamRound(self: Lioness, blk: var openArray[byte], subkey: Digest) =
 
 proc hashRound(self: Lioness, blk: var openArray[byte], subkey: Digest) =
   ## L ^= H_subkey(R)
-  let d = self.scheme.hash(subkey, blk.toOpenArray(Mu, blk.high))
+  var d = self.scheme.hash(subkey, blk.toOpenArray(Mu, blk.high))
   for i in 0 ..< Mu:
     blk[i] = blk[i] xor d[i]
+  burnMem(d)
 
 proc encrypt*(self: Lioness, blk: var openArray[byte]): Result[void, LionessError] =
   ## Encrypt one wide block in place (LIP-183 §5.4). `blk.len` >= `2 * Mu`.
