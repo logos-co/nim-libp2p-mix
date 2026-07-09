@@ -159,6 +159,8 @@ proc computeDelta(s: seq[seq[byte]], msg: Message): Result[seq[byte], string] =
     let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
     var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
       return err("LIONESS init error: " & $error)
+    defer:
+      lion.clear()
 
     # The exit layer starts from the plaintext (which already carries the k
     # zero-byte integrity prefix from serialize); inner layers re-encrypt the
@@ -167,7 +169,6 @@ proc computeDelta(s: seq[seq[byte]], msg: Message): Result[seq[byte], string] =
       delta = msg.serialize()
     lion.encrypt(delta).isOkOr:
       return err("LIONESS encrypt error: " & $error)
-    lion.clear()
 
   return ok(delta)
 
@@ -212,8 +213,9 @@ proc useSURB*(surb: SURB, msg: Message): SphinxPacket =
   # the LIONESS calls cannot fail here (serialize already asserts the size).
   var delta = msg.serialize()
   var lion = Lioness.init(MixLionessScheme, surb.key).expect("LIONESS init")
+  defer:
+    lion.clear()
   lion.encrypt(delta).expect("LIONESS encrypt")
-  lion.clear()
 
   return SphinxPacket.init(surb.header, delta)
 
@@ -229,17 +231,19 @@ proc processReply*(
     let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
     var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
       return err("LIONESS init error: " & $error)
+    defer:
+      lion.clear()
     lion.encrypt(delta).isOkOr:
       return err("LIONESS encrypt error: " & $error)
-    lion.clear()
 
   # LIP-183 §7.3 step 2: remove the reply sender's initial encryption, which used
   # the reply key k~ as the LIONESS seed (LIP-183 §6.2.2).
   var lion = Lioness.init(MixLionessScheme, key).valueOr:
     return err("LIONESS init error: " & $error)
+  defer:
+    lion.clear()
   lion.decrypt(delta).isOkOr:
     return err("LIONESS decrypt error: " & $error)
-  lion.clear()
 
   # LIP-183 §7.3 step 3: verify the k-byte zero integrity prefix (mirrors the
   # forward-path exit check) before recovering the message, so a tampered reply
@@ -373,9 +377,10 @@ proc processSphinxPacket*(
   var delta_prime = payload
   var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
     return err("LIONESS init error: " & $error)
+  defer:
+    lion.clear()
   lion.decrypt(delta_prime).isOkOr:
     return err("LIONESS decrypt error: " & $error)
-  lion.clear()
 
   # Compute B
   let zeroPadding = newSeq[byte]((t + 1) * k)

@@ -104,11 +104,13 @@ suite "Sphinx Tests":
         "sphinx wrap error"
       )
     var packetBytes = sp.serialize()
+    check packetBytes.len == PacketSize
 
     # Flip a byte in the payload (delta) region. The header and its MAC are
     # untouched, so the packet still routes hop-to-hop; the LIONESS wide-block
     # PRP scrambles the whole payload, so only the exit's zero-prefix integrity
     # check should catch the tampering.
+    check packetBytes.len > HeaderSize + 500
     packetBytes[HeaderSize + 500] = packetBytes[HeaderSize + 500] xor 0x01
 
     let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
@@ -441,10 +443,12 @@ suite "Sphinx Tests":
     let surb =
       createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
     var packetBytes = useSURB(surb, message).serialize()
+    check packetBytes.len == PacketSize
 
     # Flip a byte in the reply payload (delta). Routing is unaffected, so the
     # packet still reaches Reply status; the integrity-prefix check in
     # processReply must reject it after the return-path layers are removed.
+    check packetBytes.len > HeaderSize + 500
     packetBytes[HeaderSize + 500] = packetBytes[HeaderSize + 500] xor 0x01
 
     let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
