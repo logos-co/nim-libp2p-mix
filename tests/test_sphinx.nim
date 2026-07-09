@@ -251,7 +251,7 @@ suite "Sphinx Tests":
     let exitResult = processSphinxPacket(packet3, privateKeys[2], tm)
     check:
       exitResult.isErr()
-      exitResult.error() == "delta_prime should be all zeros"
+      exitResult.error() == "payload integrity check failed"
 
   test "sphinx process duplicate tag":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()

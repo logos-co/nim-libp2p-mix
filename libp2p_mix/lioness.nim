@@ -5,7 +5,7 @@
 ## encryption, per LIP-183 ("LIONESS encryption scheme for LIBP2P-MIX payload
 ## encryption").
 ##
-## Spec: https://github.com/logos-co/logos-lips/blob/master/docs/anoncomms/raw/mix-lioness.md
+## Spec: https://lip.logos.co/anoncomms/raw/mix-lioness.html
 ## Section references of the form `LIP-183 §N` in the LIONESS code point there.
 ##
 ## Layering

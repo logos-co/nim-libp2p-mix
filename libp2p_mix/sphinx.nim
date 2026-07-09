@@ -396,7 +396,7 @@ proc processSphinxPacket*(
           )
         )
       else:
-        return err("delta_prime should be all zeros")
+        return err("payload integrity check failed")
     elif B.isZeros(0, (t * k) - 1):
       return ok(
         ProcessedSphinxPacket(
