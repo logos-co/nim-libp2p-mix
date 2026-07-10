@@ -12,7 +12,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NIMBLE_FLAGS: "-y --solver:legacy"
+  NIMBLE_FLAGS: "-y"
 
 jobs:
   example:

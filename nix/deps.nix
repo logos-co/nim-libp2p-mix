@@ -47,8 +47,8 @@
 
   serialization = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-serialization";
-    rev = "4092500cea76154576539371709ae801afbd2a9d";
-    sha256 = "04pz6d6p3nd1y2khbb667fcd6p2jk4bxv65iaffzq06bqqhalcwc";
+    rev = "b0f2fa32960ea532a184394b0f27be37bd80248b";
+    sha256 = "0wip1fjx7ka39ck1g1xvmyarzq1p5dlngpqil6zff8k8z5skiz27";
     fetchSubmodules = true;
   };
 
@@ -96,8 +96,8 @@
 
   metrics = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-metrics";
-    rev = "b4b70a88fe1755d281366cbc3f22d7515240d192";
-    sha256 = "0y85na0ah53zk4la8jxjwml9l6269bv21daqn8ylcsd2wg463qs6";
+    rev = "9f2e1d4a4164deb37603b16cedd1707408ee5955";
+    sha256 = "05fwkysgj1q3p9ya15pl48nkvl5jv43bmrrkg70z7b6may6fgvqj";
     fetchSubmodules = true;
   };
 
@@ -131,8 +131,8 @@
 
   protobuf_serialization = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-protobuf-serialization";
-    rev = "8406e7287196661614ce6a8e8be20f755376af7f";
-    sha256 = "0lb4756a77vr1x1khy3dxl97kyxy7w09ap92ylkkgjp093dic59k";
+    rev = "f45476a3c1f4e7bff73845e6450d686be040ddeb";
+    sha256 = "1b4cnlkqlmnhx5gd4smiz4xwaj2zmyccc2q20r26gcqfiyp9na0v";
     fetchSubmodules = true;
   };
 
@@ -151,9 +151,9 @@
   };
 
   libp2p = pkgs.fetchgit {
-    url = "https://github.com/vacp2p/nim-libp2p.git";
-    rev = "c470b1146fa2ef23ab88c5a0940923cf7645e9c5";
-    sha256 = "0y1z5pvpxgajqqdz0fr4zj51z8nimc8z7k6clsnj96wl26v2a5ma";
+    url = "https://github.com/vacp2p/nim-libp2p";
+    rev = "3b5ae1da95f0614af06221be7a3bb2aeab03f4c7";
+    sha256 = "0sd7w12bx6w3d0f40wm65xj4cc746ijw583x3lgxrcgh9ssmjpck";
     fetchSubmodules = true;
   };
 
