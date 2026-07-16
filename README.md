@@ -263,7 +263,7 @@ make refresh-deps NIMBLE_FLAGS="-y --solver:legacy"
 may be triggered as part of the build:
 
 ```bash
-make build NIMBLE_FLAGS="--solver:legacy"
+make build NIMBLE_FLAGS="-y --solver:legacy"
 ```
 
 For predictable forced regeneration, prefer `make refresh-deps`; `make build`
@@ -280,7 +280,7 @@ make refresh-deps
 nix build
 ```
 
-optionally including `NIMBLE_FLAGS="--solver:legacy"` if necessary.
+optionally including `NIMBLE_FLAGS="-y --solver:legacy"` if necessary.
 
 To quickly check that you are in the nix shell run:
 
