@@ -97,6 +97,38 @@ suite "Sphinx Tests":
       processedSP3.status == Exit
       processedSP3.messageChunk == message
 
+  test "sphinx exit rejects tampered payload":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    var packetBytes = sp.serialize()
+    check packetBytes.len == PacketSize
+
+    # Flip a byte in the payload (delta) region. The header and its MAC are
+    # untouched, so the packet still routes hop-to-hop; the LIONESS wide-block
+    # PRP scrambles the whole payload, so only the exit's zero-prefix integrity
+    # check should catch the tampering.
+    check packetBytes.len > HeaderSize + 500
+    packetBytes[HeaderSize + 500] = packetBytes[HeaderSize + 500] xor 0x01
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    let sp1 = processSphinxPacket(packet, privateKeys[0], tm).expect("hop0 error")
+    check sp1.status == Intermediate
+
+    let p1 =
+      SphinxPacket.deserialize(sp1.serializedSphinxPacket).expect("deserialize error")
+    let sp2 = processSphinxPacket(p1, privateKeys[1], tm).expect("hop1 error")
+    check sp2.status == Intermediate
+
+    let p2 =
+      SphinxPacket.deserialize(sp2.serializedSphinxPacket).expect("deserialize error")
+
+    # Exit must reject the tampered payload (integrity prefix no longer zero).
+    check processSphinxPacket(p2, privateKeys[2], tm).isErr
+
   test "sphinx wrap empty public keys":
     let (message, _, _, delay, _, dest) = createDummyData()
     check wrapInSphinxPacket(message, @[], delay, @[], dest).isErr
@@ -121,6 +153,38 @@ suite "Sphinx Tests":
       )
 
     check invalidMacPkt.status == InvalidMAC
+    check tm.len == 0
+
+  test "invalid MAC with replay precheck does not add tag":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    var packetBytes = sp.serialize()
+
+    # Keep alpha valid but break the authenticated beta data.
+    packetBytes[AlphaSize] = packetBytes[AlphaSize] xor 0x01
+
+    let tamperedPacket =
+      SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    let replay =
+      checkReplay(tamperedPacket, privateKeys[0], tm).expect("checkReplay error")
+    check:
+      not replay.isReplay
+      tm.len == 0
+
+    let processed = processSphinxPacket(
+        tamperedPacket, privateKeys[0], tm, Opt.some(replay.sharedSecret)
+      )
+      .expect("processing error")
+    check:
+      processed.status == InvalidMAC
+      tm.len == 0
+
+    let replayAgain =
+      checkReplay(tamperedPacket, privateKeys[0], tm).expect("checkReplay error")
+    check not replayAgain.isReplay
 
   test "all-zero alpha is rejected before processing":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
@@ -238,7 +302,7 @@ suite "Sphinx Tests":
     let exitResult = processSphinxPacket(packet3, privateKeys[2], tm)
     check:
       exitResult.isErr()
-      exitResult.error() == "delta_prime should be all zeros"
+      exitResult.error() == "payload integrity check failed"
 
   test "sphinx process duplicate tag":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
@@ -262,6 +326,71 @@ suite "Sphinx Tests":
       processSphinxPacket(packet, privateKeys[0], tm).expect("Sphinx processing error")
 
     check processedSP2.status == Duplicate
+
+  test "sphinx replay detected after alpha high-bit malleability":
+    # Flipping α's RFC 7748-masked top bit yields different α bytes but the same
+    # shared secret s, so an H(s) replay tag must still flag the copy as a replay.
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "Sphinx wrap error"
+      )
+    let packetBytes = sp.serialize()
+
+    # seq assignment copies, so flipping malleatedBytes leaves packetBytes intact
+    var malleatedBytes = packetBytes
+    malleatedBytes[AlphaSize - 1] = packetBytes[AlphaSize - 1] xor 0x80
+    check malleatedBytes != packetBytes
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+    let malleated = SphinxPacket.deserialize(malleatedBytes).expect("deserialize error")
+
+    let first =
+      processSphinxPacket(packet, privateKeys[0], tm).expect("Sphinx processing error")
+    check first.status == Intermediate
+
+    let replay = processSphinxPacket(malleated, privateKeys[0], tm).expect(
+        "Sphinx processing error"
+      )
+    check replay.status == Duplicate
+
+  test "checkReplay detects replay after alpha high-bit malleability":
+    # Same α-malleability as the test above, exercised through the production path:
+    # mix_protocol calls checkReplay (read-only) then processSphinxPacket, which
+    # stores the H(s) tag only after MAC verification. checkReplay is the sole replay
+    # check for a pre-validated sharedSecret, so a later malleated copy — sharing s —
+    # must be flagged there via H(s).
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    let packetBytes = sp.serialize()
+
+    # seq assignment copies, so flipping malleatedBytes leaves packetBytes intact
+    var malleatedBytes = packetBytes
+    malleatedBytes[AlphaSize - 1] = packetBytes[AlphaSize - 1] xor 0x80
+    check malleatedBytes != packetBytes
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+    let malleated = SphinxPacket.deserialize(malleatedBytes).expect("deserialize error")
+
+    # Original packet: checkReplay reports no replay, then processSphinxPacket stores
+    # the H(s) tag post-MAC (mirroring the mix_protocol pre-validated path).
+    let first = checkReplay(packet, privateKeys[0], tm).expect("checkReplay error")
+    check not first.isReplay
+
+    let processed = processSphinxPacket(
+        packet, privateKeys[0], tm, Opt.some(first.sharedSecret)
+      )
+      .expect("processing error")
+    check processed.status == Intermediate
+
+    # The malleated copy shares s, so checkReplay flags it as a replay via H(s).
+    let second = checkReplay(malleated, privateKeys[0], tm).expect("checkReplay error")
+    check second.isReplay
+
+    # Shared secret is identical despite the different α encoding
+    check first.sharedSecret == second.sharedSecret
 
   test "sphinx wrap and process message sizes":
     let MessageSizes = @[32, 64, 128, 256, 512]
@@ -356,6 +485,38 @@ suite "Sphinx Tests":
       )
 
     check msg == message
+
+  test "surb reply rejects tampered payload":
+    let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()
+
+    let surb =
+      createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
+    var packetBytes = useSURB(surb, message).serialize()
+    check packetBytes.len == PacketSize
+
+    # Flip a byte in the reply payload (delta). Routing is unaffected, so the
+    # packet still reaches Reply status; the integrity-prefix check in
+    # processReply must reject it after the return-path layers are removed.
+    check packetBytes.len > HeaderSize + 500
+    packetBytes[HeaderSize + 500] = packetBytes[HeaderSize + 500] xor 0x01
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    let sp1 = processSphinxPacket(packet, privateKeys[0], tm).expect("hop0 error")
+    check sp1.status == Intermediate
+
+    let p1 =
+      SphinxPacket.deserialize(sp1.serializedSphinxPacket).expect("deserialize error")
+    let sp2 = processSphinxPacket(p1, privateKeys[1], tm).expect("hop1 error")
+    check sp2.status == Intermediate
+
+    let p2 =
+      SphinxPacket.deserialize(sp2.serializedSphinxPacket).expect("deserialize error")
+    let sp3 = processSphinxPacket(p2, privateKeys[2], tm).expect("hop2 error")
+    check sp3.status == Reply
+
+    # The tampered reply must be rejected by the integrity check.
+    check processReply(surb.key, surb.secret.get(), sp3.delta_prime).isErr
 
   test "create surb empty public keys":
     let (_, _, _, delay, _, _) = createDummyData()
@@ -475,7 +636,7 @@ suite "Sphinx Tests":
 
       check paddedMessage == msg
 
-  test "checkReplay returns false for new packet, true for replay":
+  test "checkReplay does not add tags before processing":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
     let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
         "sphinx wrap error"
@@ -484,14 +645,27 @@ suite "Sphinx Tests":
 
     # First check - not a replay
     let first = checkReplay(packet, privateKeys[0], tm).expect("checkReplay error")
-    check not first.isReplay
+    check:
+      not first.isReplay
+      tm.len == 0
 
-    # Second check - replay detected
+    # Prechecking does not add unauthenticated replay tags.
     let second = checkReplay(packet, privateKeys[0], tm).expect("checkReplay error")
-    check second.isReplay
+    check:
+      not second.isReplay
+      tm.len == 0
 
     # Shared secret should be the same both times
     check first.sharedSecret == second.sharedSecret
+
+    let processed = processSphinxPacket(
+        packet, privateKeys[0], tm, Opt.some(first.sharedSecret)
+      )
+      .expect("processing error")
+    check processed.status == Intermediate
+
+    let third = checkReplay(packet, privateKeys[0], tm).expect("checkReplay error")
+    check third.isReplay
 
   test "processSphinxPacket with reused sharedSecret":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()

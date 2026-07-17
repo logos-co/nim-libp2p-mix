@@ -100,6 +100,32 @@ suite "Tag Manager":
     check tmShort.isTagSeen(makeTag(3))
     check tmShort.isTagSeen(makeTag(4))
 
+  test "max tags bounds cache growth":
+    let bounded = TagManager.new(maxTags = 3, autoStart = false)
+    let baseTime = Moment.now()
+
+    for i in 0 ..< 4:
+      bounded.addTag(makeTag(byte(i)), baseTime + chronos.milliseconds(i))
+
+    check:
+      bounded.len == 3
+      not bounded.isTagSeen(makeTag(0))
+      bounded.isTagSeen(makeTag(1))
+      bounded.isTagSeen(makeTag(2))
+      bounded.isTagSeen(makeTag(3))
+
+    bounded.clearTags()
+
+    for i in 10 ..< 14:
+      bounded.addTag(makeTag(byte(i)), baseTime + chronos.milliseconds(i))
+
+    check:
+      bounded.len == 3
+      not bounded.isTagSeen(makeTag(10))
+      bounded.isTagSeen(makeTag(11))
+      bounded.isTagSeen(makeTag(12))
+      bounded.isTagSeen(makeTag(13))
+
   test "purge with no expired tags":
     tm.addTag(makeTag(1))
 
