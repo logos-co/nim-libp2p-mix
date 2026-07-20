@@ -54,7 +54,7 @@ jobs:
       - name: Use Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
-      # `make deps` regenerates nix/deps.nix from libp2p_mix.nimble.
+      # `make refresh-deps` regenerates nix/deps.nix from libp2p_mix.nimble.
       # If the committed snapshot is stale (missing transitive deps,
       # outdated revs after a libp2p bump, etc.), the diff is non-empty
       # and we fail the job — surfaces drift on the PR that introduced
