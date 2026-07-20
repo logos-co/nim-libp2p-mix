@@ -52,10 +52,17 @@
     fetchSubmodules = true;
   };
 
+  libbacktrace = pkgs.fetchgit {
+    url = "https://github.com/status-im/nim-libbacktrace";
+    rev = "95f1bbfe696b4b5c768f7cc52c2597cd782f1e7d";
+    sha256 = "0pkhwmzidh82ilm4hcd1hwg25jbkcnqgq41ky52y1z6hgxyj6ddm";
+    fetchSubmodules = true;
+  };
+
   libp2p = pkgs.fetchgit {
     url = "https://github.com/vacp2p/nim-libp2p";
-    rev = "3b5ae1da95f0614af06221be7a3bb2aeab03f4c7";
-    sha256 = "0sd7w12bx6w3d0f40wm65xj4cc746ijw583x3lgxrcgh9ssmjpck";
+    rev = "0e763288c10b6488e5971608f12aa49ab129720e";
+    sha256 = "1wqy7zcpjrbf2585jw6rmzd7f9yq0kv9jvhkrg5nq8xaikf6hhb4";
     fetchSubmodules = true;
   };
 
