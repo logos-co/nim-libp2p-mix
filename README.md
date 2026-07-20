@@ -256,14 +256,14 @@ make refresh-deps
 `make deps` invocation:
 
 ```bash
-make refresh-deps NIMBLE_FLAGS="-y --solver:legacy"
+make refresh-deps NIMBLE_FLAGS="-y"
 ```
 
 `NIMBLE_FLAGS` can also be passed to `make build` when dependency generation
 may be triggered as part of the build:
 
 ```bash
-make build NIMBLE_FLAGS="-y --solver:legacy"
+make build NIMBLE_FLAGS="-y"
 ```
 
 For predictable forced regeneration, prefer `make refresh-deps`; `make build`
@@ -280,7 +280,13 @@ make refresh-deps
 nix build
 ```
 
-optionally including `NIMBLE_FLAGS="-y --solver:legacy"` if necessary.
+optionally including `NIMBLE_FLAGS="-y"` if necessary.
+
+`--solver:legacy` was needed while `libp2p` was pinned as a git dependency.
+Now that `libp2p_mix.nimble` requires an ordinary published version
+(`libp2p == 2.1.4`), nimble's default solver resolves it, and CI passes only
+`-y`. The `make setup` example above still shows the flag to document that
+the option exists.
 
 To quickly check that you are in the nix shell run:
 
