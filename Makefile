@@ -76,4 +76,4 @@ clean-nimbledeps:
 
 refresh-deps:
 	$(RMDIR) nimble.lock
-	$(MAKE) deps
+	$(MAKE) -B deps
