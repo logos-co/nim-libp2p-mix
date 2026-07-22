@@ -151,6 +151,11 @@ let mix = MixProtocol.new(
 
 ## Building & running
 
+> You can set up the project and run the tests in either a native or Nix shell.
+> The Nix shell pins Nim v2.2.4 and Nimble v0.18.2. CI tests both that
+> toolchain and Nim v2.2.10 with Nimble v0.22.2. A native shell can use a
+> newer supported toolchain.
+
 To set up the project:
 
 ```bash
@@ -162,6 +167,23 @@ make setup        # generates nimble.paths
 `make setup` runs `nimble setup -l` (`--localdeps`), which runs nimble in
 project-local dependency mode and adds `--noNimblePath` to the generated
 `nimble.paths`.
+
+If the default SAT solver reports an invalid dependency even though a suitable
+tag exists, its tag index in `~/.nimble/pkgcache/tagged_versions.json` may be
+stale. Nimble does not automatically refresh this index when new tags are
+published.
+
+Retry from a clean project and resolver state with:
+
+```bash
+make clean-all
+make setup
+```
+
+`clean-nimble-cache` affects the global Nimble cache shared by other projects,
+so it is kept separate from the normal `clean` target. The legacy solver does
+not use this SAT index; removing it is harmless but unnecessary when using the
+legacy solver.
 
 You can override the `NIMBLE_FLAGS` variable to pass extra flags to nimble:
 
@@ -225,6 +247,10 @@ nim c -d:libp2p_mix_experimental_exit_is_dest -d:metrics -o:mix_ping examples/mi
   `nimbledeps/`, and `nimble.paths`.
 - `make clean-nimbledeps` only removes `nimbledeps/` and `nimble.paths`,
   leaving the Nix dependency lock untouched.
+- `make clean-nimble-cache` removes
+  `$NIMBLE_DIR/pkgcache/tagged_versions.json`; `NIMBLE_DIR` defaults to
+  `~/.nimble`.
+- `make clean-all` is equivalent to `make clean` plus `make clean-nimble-cache`.
 - `make refresh-deps` forces regeneration of the committed `nix/deps.nix`
   snapshot.
 
@@ -282,11 +308,17 @@ nix build
 
 optionally including `NIMBLE_FLAGS="-y"` if necessary.
 
+After regenerating dependencies, review any changes to `nix/deps.nix`. A
+change means that the newly resolved dependency snapshot differs from the
+committed one; commit it only when the update is intentional. Otherwise,
+restore the committed snapshot before running `nix build`, which consumes this
+file.
+
 `--solver:legacy` was needed while `libp2p` was pinned as a git dependency.
-Now that `libp2p_mix.nimble` requires an ordinary published version
-(`libp2p == 2.1.4`), nimble's default solver resolves it, and CI passes only
-`-y`. The `make setup` example above still shows the flag to document that
-the option exists.
+With a tagged dependency such as `libp2p == 2.1.4`, Nimble's default SAT solver
+should resolve the graph, and CI passes only `-y`. If the SAT solver reports an
+invalid dependency, first retry with a fresh tag index as described above. Use
+the legacy solver only as a temporary workaround or diagnostic fallback.
 
 To quickly check that you are in the nix shell run:
 
