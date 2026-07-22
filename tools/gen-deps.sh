@@ -40,8 +40,8 @@ if [[ ! -f "$LOCKFILE" ]]; then
   exit 1
 fi
 
-command -v jq >/dev/null || { echo "error: jq required"; exit 1; }
-command -v nix-prefetch-git >/dev/null || { echo "error: nix-prefetch-git required"; exit 1; }
+command -v jq >/dev/null || { echo "error: jq required" >&2; exit 1; }
+command -v nix-prefetch-git >/dev/null || { echo "error: nix-prefetch-git required" >&2; exit 1; }
 
 echo "[*] Generating $OUTFILE from $LOCKFILE"
 

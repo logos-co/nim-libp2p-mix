@@ -6,7 +6,9 @@ NIMBLE_DIR ?= $(HOME)/.nimble
 # Choosenim puts a proxy in ~/.nimble/bin, but Nimble needs the underlying
 # installation containing nim.nimble in order to recognize a system compiler.
 # `choosenim show path` can print Nimble diagnostics before the requested path.
-NIMBLE_NIM ?= $(shell if command -v choosenim >/dev/null 2>&1; then printf '%s/bin/nim' "$$(choosenim show path | tail -n 1)"; else command -v nim; fi)
+ifeq ($(origin NIMBLE_NIM), undefined)
+NIMBLE_NIM := $(shell if command -v choosenim >/dev/null 2>&1; then printf '%s/bin/nim' "$$(choosenim show path | tail -n 1)"; else command -v nim; fi)
+endif
 NIMBLE = nimble --useSystemNim --nim:"$(NIMBLE_NIM)"
 NPH_FILES = $(shell git ls-files '*.nim' '*.nimble' '*.nims')
 
