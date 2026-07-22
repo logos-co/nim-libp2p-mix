@@ -106,7 +106,7 @@ jobs:
           make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Run unit tests
-        run: nimble test
+        run: make test NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Run component tests
-        run: nimble testComponent
+        run: make testComponent NIMBLE_FLAGS="$NIMBLE_FLAGS"

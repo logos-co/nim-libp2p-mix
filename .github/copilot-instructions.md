@@ -68,15 +68,15 @@ make setup                            # generates nimble.paths
 ### Running tests
 
 ```sh
-nimble test            # unit tests (tests/test_*.nim)
-nimble testComponent   # component/integration tests (tests/component/test_*.nim)
-nimble testAll         # unit + component tests
+make test            # unit tests (tests/test_*.nim)
+make testComponent   # component/integration tests (tests/component/test_*.nim)
+make testAll         # unit + component tests
 ```
 
 ### Example
 
 ```sh
-nimble example
+make example
 ```
 
 ---
@@ -336,10 +336,10 @@ nimble develop --add=../nim-libp2p
 make setup
 
 # Run tests
-nimble test
-nimble testComponent
-nimble testAll
+make test
+make testComponent
+make testAll
 
 # Build example
-nimble example
+make example
 ```

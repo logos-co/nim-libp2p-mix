@@ -1,8 +1,11 @@
-.PHONY: all build deps refresh-deps clean clean-all clean-nimble-cache clean-nimbledeps setup format
+.PHONY: all build deps refresh-deps clean clean-all clean-nimble-cache clean-nimbledeps setup test testComponent testAll example benchmarkBuild format
 
 NIMBLE_FLAGS ?=
 NIMBLE_DIR ?= $(HOME)/.nimble
-NIMBLE_NIM ?= nim
+# Choosenim puts a proxy in ~/.nimble/bin, but Nimble needs the underlying
+# installation containing nim.nimble in order to recognize a system compiler.
+NIMBLE_NIM ?= $(shell if command -v choosenim >/dev/null 2>&1; then printf '%s/bin/nim' "$$(choosenim show path)"; else command -v nim; fi)
+NIMBLE = nimble --nimbleDir:"$(NIMBLE_DIR)" --useSystemNim --nim:"$(NIMBLE_NIM)"
 NPH_FILES = $(shell git ls-files '*.nim' '*.nimble' '*.nims')
 
 RMDIR := rm -rf
@@ -10,7 +13,23 @@ RMDIR := rm -rf
 all: build
 
 setup:
-	nimble setup -l --useSystemNim --nim:"$(NIMBLE_NIM)" $(NIMBLE_FLAGS)
+	$(NIMBLE) setup -l $(NIMBLE_FLAGS)
+
+test:
+	$(NIMBLE) test $(NIMBLE_FLAGS)
+
+testComponent:
+	$(NIMBLE) testComponent $(NIMBLE_FLAGS)
+
+testAll:
+	$(NIMBLE) test $(NIMBLE_FLAGS)
+	$(NIMBLE) testComponent $(NIMBLE_FLAGS)
+
+example:
+	$(NIMBLE) example $(NIMBLE_FLAGS)
+
+benchmarkBuild:
+	$(NIMBLE) benchmarkBuild $(NIMBLE_FLAGS)
 
 # `nimble.lock` is an intermediate build artefact, not committed to git
 # (see .gitignore and issue #13). It's regenerated here from
@@ -21,10 +40,11 @@ setup:
 # only the `ci / nix` job regenerates `nimble.lock` on the fly (via
 # `make deps`) and uses it as input to `gen-deps.sh`.
 nimble.lock: libp2p_mix.nimble
-	nimble lock --useSystemNim --nim:"$(NIMBLE_NIM)" $(NIMBLE_FLAGS)
+	$(NIMBLE) lock $(NIMBLE_FLAGS)
+	@test -f "$@" || { echo "error: Nimble did not create $@" >&2; exit 1; }
 
 nix/deps.nix: nimble.lock tools/gen-deps.sh
-	NIMBLE_FLAGS='$(NIMBLE_FLAGS)' ./tools/gen-deps.sh nimble.lock nix/deps.nix
+	NIMBLE_DIR='$(NIMBLE_DIR)' NIMBLE_FLAGS='$(NIMBLE_FLAGS)' NIMBLE_NIM='$(NIMBLE_NIM)' ./tools/gen-deps.sh nimble.lock nix/deps.nix
 
 deps: nix/deps.nix
 
@@ -39,10 +59,13 @@ clean:
 
 clean-all: clean clean-nimble-cache
 
-# Nimble's SAT tag index has no automatic invalidation and can omit versions
-# published after it was created. Keep this global cleanup explicit.
+# Nimble's package registry and SAT tag index have no automatic invalidation
+# and can omit packages or versions published after they were created. Keep
+# this global metadata cleanup explicit.
 clean-nimble-cache:
 	$(RM) "$(NIMBLE_DIR)/pkgcache/tagged_versions.json"
+	$(RM) "$(NIMBLE_DIR)/packages_official.json"
+	$(RM) "$(NIMBLE_DIR)/packages_temp.json"
 
 clean-nimbledeps:
 	$(RMDIR) nimbledeps nimble.paths

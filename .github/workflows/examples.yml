@@ -52,8 +52,8 @@ jobs:
           make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Build mix_ping
-        run: nimble example
+        run: make example NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       # Compile-checks the -d:enable_mix_benchmarks paths (see #27).
       - name: Build mix_ping with benchmarks enabled
-        run: nimble benchmarkBuild
+        run: make benchmarkBuild NIMBLE_FLAGS="$NIMBLE_FLAGS"

@@ -164,39 +164,67 @@ cd nim-libp2p-mix
 make setup        # generates nimble.paths
 ```
 
-`make setup` runs `nimble setup -l --useSystemNim --nim:$NIMBLE_NIM`, with
-`NIMBLE_NIM` defaulting to `nim`. This uses project-local dependency mode,
-keeps the selected compiler instead of downloading a different Nim version,
-and adds `--noNimblePath` to the generated `nimble.paths`.
+`make setup` runs Nimble with `--nimbleDir:$NIMBLE_DIR`, `--useSystemNim`, and
+`--nim:$NIMBLE_NIM`. `NIMBLE_DIR` defaults to `~/.nimble`. When choosenim is
+available, `NIMBLE_NIM` defaults to the real compiler under the toolchain path
+reported by `choosenim show path`; otherwise it uses `nim` from `PATH`. This is
+necessary because choosenim's `~/.nimble/bin/nim` proxy does not live in a Nim
+installation containing `nim.nimble`, so Nimble cannot recognize that proxy as
+a system compiler. The Nix shell sets `NIMBLE_NIM` to its underlying pinned Nim
+derivation for the same reason. This uses project-local dependency mode, keeps
+the selected compiler instead of downloading a different Nim version, and adds
+`--noNimblePath` to the generated `nimble.paths`.
 
 If the default SAT solver reports an invalid dependency even though a suitable
-tag exists, its tag index in `~/.nimble/pkgcache/tagged_versions.json` may be
-stale. Nimble does not automatically refresh this index when new tags are
-published.
+package or tag exists, its registry or tag index may be stale. Nimble does not
+automatically refresh this metadata when new packages or tags are published.
 
-Retry after clearing the project state and SAT tag index with:
+If metadata cleanup is not enough, completely reset Nimble's downloaded package
+and resolver state before retrying:
+
+```bash
+nimble_dir="${NIMBLE_DIR:-$HOME/.nimble}"
+rm -rf "$nimble_dir/pkgcache" "$nimble_dir/pkgs2" "$nimble_dir/buildtemp"
+rm -f "$nimble_dir/nimbledata2.json" \
+  "$nimble_dir/packages_official.json" "$nimble_dir/packages_temp.json"
+make clean
+make setup NIMBLE_FLAGS="-y"
+```
+
+This is destructive global cleanup. It affects other projects, removes globally
+installed package sources, and can leave launchers in `$NIMBLE_DIR/bin` that
+need to be reinstalled. It deliberately leaves the Nim and Nimble executables
+themselves untouched.
+
+For the less destructive metadata-only retry, use:
 
 ```bash
 make clean-all
 make setup
 ```
 
-`clean-nimble-cache` affects the global Nimble cache shared by other projects,
-so it is kept separate from the normal `clean` target. It removes only the SAT
-tag index, not downloaded packages or other global Nimble state. The legacy
-solver does not use this SAT index; removing it is harmless but unnecessary
-when using the legacy solver.
+`clean-nimble-cache` affects global Nimble metadata shared by other projects,
+so it is kept separate from the normal `clean` target. It removes the package
+registry and SAT tag index, not downloaded packages or other global Nimble
+state. The legacy solver does not use the SAT index; removing it is harmless
+but unnecessary when using the legacy solver.
 
-For a completely isolated resolver diagnostic, use a fresh Nimble directory:
+To verify resolution without changing either global Nimble state or the
+project's generated paths, use a fresh directory:
 
 ```bash
-make clean
-nimble --nimbleDir:"$(mktemp -d)" setup -l --useSystemNim \
-  --nim:"${NIMBLE_NIM:-nim}" -y
+tmpdir="$(mktemp -d)"
+cp libp2p_mix.nimble "$tmpdir/"
+(
+  cd "$tmpdir"
+  nimble --nimbleDir:"$tmpdir/nimble" setup -l --useSystemNim \
+    --nim:"${NIMBLE_NIM:-nim}" -y
+)
+rm -rf "$tmpdir"
 ```
 
-This redownloads package metadata and sources, so it is intentionally not
-provided as a routine Make target.
+This redownloads package metadata and sources without replacing the project's
+`nimble.paths`, so it is intentionally not provided as a routine Make target.
 
 You can override the `NIMBLE_FLAGS` variable to pass extra flags to nimble:
 
@@ -208,10 +236,14 @@ make setup NIMBLE_FLAGS=--solver:legacy # legacy solver
 ### Tests
 
 ```bash
-nimble test            # 14 unit-test files (~143 individual checks)
-nimble testComponent   # 6 component (integration) tests, ~26 checks
-nimble testAll         # both
+make test            # 14 unit-test files (~143 individual checks)
+make testComponent   # 6 component (integration) tests, ~26 checks
+make testAll         # both
 ```
+
+The Make targets pass the same system-compiler selection flags used by
+`make setup`, preventing each Nimble task invocation from selecting a different
+Nim package.
 
 The `tests/config.nims` enables `-d:metrics` and several
 `libp2p_*_metrics` defines so tests can assert on metric counters.
@@ -236,7 +268,7 @@ string for this release, so prefer the Nimble package metadata.
 ### Example
 
 ```bash
-nimble example
+make example
 ```
 
 This compiles `examples/mix_ping.nim`, which spins up 10 mix nodes locally,
@@ -260,9 +292,9 @@ nim c -d:libp2p_mix_experimental_exit_is_dest -d:metrics -o:mix_ping examples/mi
   `nimbledeps/`, and `nimble.paths`.
 - `make clean-nimbledeps` only removes `nimbledeps/` and `nimble.paths`,
   leaving the Nix dependency lock untouched.
-- `make clean-nimble-cache` removes
+- `make clean-nimble-cache` removes the cached package registry and
   `$NIMBLE_DIR/pkgcache/tagged_versions.json`; `NIMBLE_DIR` defaults to
-  `~/.nimble`.
+  `~/.nimble`. It leaves downloaded packages intact.
 - `make clean-all` is equivalent to `make clean` plus `make clean-nimble-cache`.
 - `make refresh-deps` forces regeneration of the committed `nix/deps.nix`
   snapshot.

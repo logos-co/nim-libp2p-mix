@@ -61,6 +61,7 @@ jobs:
       # it rather than the next time someone runs `nix build` locally.
       - name: Regenerate nix/deps.nix and verify no drift
         run: |
+          nix develop --command make clean-nimble-cache
           nix develop --command make refresh-deps NIMBLE_FLAGS="$NIMBLE_FLAGS"
           if ! git diff --exit-code nix/deps.nix; then
             echo "::error::nix/deps.nix is out of sync with libp2p_mix.nimble."

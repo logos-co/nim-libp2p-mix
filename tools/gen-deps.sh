@@ -47,7 +47,12 @@ if [[ ! -f "$LOCKFILE" ]]; then
     if [[ -n "${NIMBLE_FLAGS:-}" ]]; then
       read -r -a nimble_flags <<< "$NIMBLE_FLAGS"
     fi
-    nimble lock "${nimble_flags[@]}"
+    nimble --nimbleDir:"${NIMBLE_DIR:-$HOME/.nimble}" \
+      --useSystemNim --nim:"${NIMBLE_NIM:-nim}" lock "${nimble_flags[@]}"
+    if [[ ! -f "$(basename "$LOCKFILE")" ]]; then
+      echo "error: Nimble did not create $LOCKFILE" >&2
+      exit 1
+    fi
   )
 fi
 
