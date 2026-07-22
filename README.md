@@ -152,9 +152,9 @@ let mix = MixProtocol.new(
 ## Building & running
 
 > You can set up the project and run the tests in either a native or Nix shell.
-> The Nix shell pins Nim v2.2.4 and Nimble v0.18.2. CI tests both that
-> toolchain and Nim v2.2.10 with Nimble v0.22.2. A native shell can use a
-> newer supported toolchain.
+> The Nix shell pins Nim v2.2.4 and Nimble v0.22.2. CI tests Nim v2.2.4 and
+> v2.2.10 with Nimble v0.22.2. A native shell can use a newer supported
+> toolchain.
 
 To set up the project:
 
@@ -164,16 +164,17 @@ cd nim-libp2p-mix
 make setup        # generates nimble.paths
 ```
 
-`make setup` runs `nimble setup -l` (`--localdeps`), which runs nimble in
-project-local dependency mode and adds `--noNimblePath` to the generated
-`nimble.paths`.
+`make setup` runs `nimble setup -l --useSystemNim --nim:$NIMBLE_NIM`, with
+`NIMBLE_NIM` defaulting to `nim`. This uses project-local dependency mode,
+keeps the selected compiler instead of downloading a different Nim version,
+and adds `--noNimblePath` to the generated `nimble.paths`.
 
 If the default SAT solver reports an invalid dependency even though a suitable
 tag exists, its tag index in `~/.nimble/pkgcache/tagged_versions.json` may be
 stale. Nimble does not automatically refresh this index when new tags are
 published.
 
-Retry from a clean project and resolver state with:
+Retry after clearing the project state and SAT tag index with:
 
 ```bash
 make clean-all
@@ -181,9 +182,21 @@ make setup
 ```
 
 `clean-nimble-cache` affects the global Nimble cache shared by other projects,
-so it is kept separate from the normal `clean` target. The legacy solver does
-not use this SAT index; removing it is harmless but unnecessary when using the
-legacy solver.
+so it is kept separate from the normal `clean` target. It removes only the SAT
+tag index, not downloaded packages or other global Nimble state. The legacy
+solver does not use this SAT index; removing it is harmless but unnecessary
+when using the legacy solver.
+
+For a completely isolated resolver diagnostic, use a fresh Nimble directory:
+
+```bash
+make clean
+nimble --nimbleDir:"$(mktemp -d)" setup -l --useSystemNim \
+  --nim:"${NIMBLE_NIM:-nim}" -y
+```
+
+This redownloads package metadata and sources, so it is intentionally not
+provided as a routine Make target.
 
 You can override the `NIMBLE_FLAGS` variable to pass extra flags to nimble:
 
@@ -262,6 +275,10 @@ A flake is provided for reproducible dev shells and builds.
 nix develop          # drops you into a shell with nim 2.2 + nimble
 nix build            # type-checks libp2p_mix.nim against locked deps
 ```
+
+The development shell uses Nimble v0.22.2 because the v0.18.2 release in
+nixos-25.05 cannot reliably resolve the current dependency graph from a cold
+cache.
 
 The flake reads `nix/deps.nix`, which is the **committed** snapshot of all
 pinned transitive dependencies. Refresh it after bumping the libp2p pin in

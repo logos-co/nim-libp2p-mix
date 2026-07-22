@@ -2,6 +2,7 @@
 
 NIMBLE_FLAGS ?=
 NIMBLE_DIR ?= $(HOME)/.nimble
+NIMBLE_NIM ?= nim
 NPH_FILES = $(shell git ls-files '*.nim' '*.nimble' '*.nims')
 
 RMDIR := rm -rf
@@ -9,7 +10,7 @@ RMDIR := rm -rf
 all: build
 
 setup:
-	nimble setup -l $(NIMBLE_FLAGS)
+	nimble setup -l --useSystemNim --nim:"$(NIMBLE_NIM)" $(NIMBLE_FLAGS)
 
 # `nimble.lock` is an intermediate build artefact, not committed to git
 # (see .gitignore and issue #13). It's regenerated here from
@@ -20,7 +21,7 @@ setup:
 # only the `ci / nix` job regenerates `nimble.lock` on the fly (via
 # `make deps`) and uses it as input to `gen-deps.sh`.
 nimble.lock: libp2p_mix.nimble
-	nimble lock $(NIMBLE_FLAGS)
+	nimble lock --useSystemNim --nim:"$(NIMBLE_NIM)" $(NIMBLE_FLAGS)
 
 nix/deps.nix: nimble.lock tools/gen-deps.sh
 	NIMBLE_FLAGS='$(NIMBLE_FLAGS)' ./tools/gen-deps.sh nimble.lock nix/deps.nix
