@@ -45,7 +45,11 @@ jobs:
         # Project-local install: provisions deps into `nimbledeps/` and
         # generates `nimble.paths`. We don't commit `nimble.lock` (see #13),
         # so `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` is the right bootstrap.
-        run: make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
+        run: |
+          # Force the SAT solver to discover current tags. This index can be
+          # stale even when the project-local dependency cache is clean.
+          make clean-nimble-cache
+          make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Build mix_ping
         run: nimble example

@@ -1,6 +1,7 @@
-.PHONY: all build deps refresh-deps clean clean-nimbledeps setup format
+.PHONY: all build deps refresh-deps clean clean-all clean-nimble-cache clean-nimbledeps setup format
 
 NIMBLE_FLAGS ?=
+NIMBLE_DIR ?= $(HOME)/.nimble
 NPH_FILES = $(shell git ls-files '*.nim' '*.nimble' '*.nims')
 
 RMDIR := rm -rf
@@ -34,6 +35,13 @@ format:
 
 clean:
 	$(RMDIR) nimble.lock nimbledeps nimble.paths
+
+clean-all: clean clean-nimble-cache
+
+# Nimble's SAT tag index has no automatic invalidation and can omit versions
+# published after it was created. Keep this global cleanup explicit.
+clean-nimble-cache:
+	$(RM) "$(NIMBLE_DIR)/pkgcache/tagged_versions.json"
 
 clean-nimbledeps:
 	$(RMDIR) nimbledeps nimble.paths
