@@ -164,16 +164,15 @@ cd nim-libp2p-mix
 make setup        # generates nimble.paths
 ```
 
-`make setup` runs Nimble with `--nimbleDir:$NIMBLE_DIR`, `--useSystemNim`, and
-`--nim:$NIMBLE_NIM`. `NIMBLE_DIR` defaults to `~/.nimble`. When choosenim is
-available, `NIMBLE_NIM` defaults to the real compiler under the toolchain path
-reported by `choosenim show path`; otherwise it uses `nim` from `PATH`. This is
-necessary because choosenim's `~/.nimble/bin/nim` proxy does not live in a Nim
-installation containing `nim.nimble`, so Nimble cannot recognize that proxy as
-a system compiler. The Nix shell sets `NIMBLE_NIM` to its underlying pinned Nim
-derivation for the same reason. This uses project-local dependency mode, keeps
-the selected compiler instead of downloading a different Nim version, and adds
-`--noNimblePath` to the generated `nimble.paths`.
+`make setup` runs Nimble with `--useSystemNim` and `--nim:$NIMBLE_NIM`. When
+choosenim is available, `NIMBLE_NIM` defaults to the real compiler under the
+toolchain path reported by `choosenim show path`; otherwise it uses `nim` from
+`PATH`. This is necessary because choosenim's `~/.nimble/bin/nim` proxy does not
+live in a Nim installation containing `nim.nimble`, so Nimble cannot recognize
+that proxy as a system compiler. The Nix shell sets `NIMBLE_NIM` to its
+underlying pinned Nim derivation for the same reason. This uses project-local
+dependency mode, keeps the selected compiler instead of downloading a different
+Nim version, and adds `--noNimblePath` to the generated `nimble.paths`.
 
 If the default SAT solver reports an invalid dependency even though a suitable
 package or tag exists, its registry or tag index may be stale. Nimble does not
@@ -192,7 +191,7 @@ make setup NIMBLE_FLAGS="-y"
 ```
 
 This is destructive global cleanup. It affects other projects, removes globally
-installed package sources, and can leave launchers in `$NIMBLE_DIR/bin` that
+installed package sources, and can leave launchers in `$nimble_dir/bin` that
 need to be reinstalled. It deliberately leaves the Nim and Nimble executables
 themselves untouched.
 
@@ -380,15 +379,18 @@ values: `impure` (default) or `pure` (when invoked with `--pure`). Any
 non-empty value means you're inside a nix shell. Empty or unset means
 you're not.
 
-`make deps` requires `nix-prefetch-git` and `jq` on `$PATH`. Internally it
-generates a fresh `nimble.lock`, forwards `NIMBLE_FLAGS` to `nimble lock`,
-and then transforms the lock file via `tools/gen-deps.sh`.
+`make deps` requires `nix-prefetch-git` and `jq` on `$PATH`. Make generates a
+fresh `nimble.lock`, forwards `NIMBLE_FLAGS` to `nimble lock`, and then passes
+the existing lock file to `tools/gen-deps.sh`. When invoked directly, the
+script requires its lock file argument to exist; it does not run Nimble or
+generate lock files itself.
 
 `nimble.lock` itself is **not** committed — it's an intermediate build
-artefact regenerated on demand (it lives in `.gitignore`). The long-lived
-pinning artefact for this repo is `nix/deps.nix`. Downstream consumers
-that need an exact dep set should pin libp2p_mix by URL+SHA in their own
-`.nimble`. See logos-co/nim-libp2p-mix#13 for the discussion behind this.
+artefact regenerated on demand and removed after `nix/deps.nix` is generated
+(it lives in `.gitignore`). The long-lived pinning artefact for this repo is
+`nix/deps.nix`. Downstream consumers that need an exact dep set should pin
+libp2p_mix by URL+SHA in their own `.nimble`. See
+logos-co/nim-libp2p-mix#13 for the discussion behind this.
 
 ## Compile-time flags
 

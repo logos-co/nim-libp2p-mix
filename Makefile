@@ -1,11 +1,13 @@
 .PHONY: all build deps refresh-deps clean clean-all clean-nimble-cache clean-nimbledeps setup test testComponent testAll example benchmarkBuild format
+.INTERMEDIATE: nimble.lock
 
 NIMBLE_FLAGS ?=
 NIMBLE_DIR ?= $(HOME)/.nimble
 # Choosenim puts a proxy in ~/.nimble/bin, but Nimble needs the underlying
 # installation containing nim.nimble in order to recognize a system compiler.
-NIMBLE_NIM ?= $(shell if command -v choosenim >/dev/null 2>&1; then printf '%s/bin/nim' "$$(choosenim show path)"; else command -v nim; fi)
-NIMBLE = nimble --nimbleDir:"$(NIMBLE_DIR)" --useSystemNim --nim:"$(NIMBLE_NIM)"
+# `choosenim show path` can print Nimble diagnostics before the requested path.
+NIMBLE_NIM ?= $(shell if command -v choosenim >/dev/null 2>&1; then printf '%s/bin/nim' "$$(choosenim show path | tail -n 1)"; else command -v nim; fi)
+NIMBLE = nimble --useSystemNim --nim:"$(NIMBLE_NIM)"
 NPH_FILES = $(shell git ls-files '*.nim' '*.nimble' '*.nims')
 
 RMDIR := rm -rf
@@ -44,7 +46,7 @@ nimble.lock: libp2p_mix.nimble
 	@test -f "$@" || { echo "error: Nimble did not create $@" >&2; exit 1; }
 
 nix/deps.nix: nimble.lock tools/gen-deps.sh
-	NIMBLE_DIR='$(NIMBLE_DIR)' NIMBLE_FLAGS='$(NIMBLE_FLAGS)' NIMBLE_NIM='$(NIMBLE_NIM)' ./tools/gen-deps.sh nimble.lock nix/deps.nix
+	./tools/gen-deps.sh nimble.lock nix/deps.nix
 
 deps: nix/deps.nix
 
