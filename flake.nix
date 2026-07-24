@@ -41,7 +41,7 @@
             version = "0.22.2";
             src = pkgs.fetchgit {
               url = "https://github.com/nim-lang/nimble.git";
-              rev = "v0.22.2";
+              rev = "aa03f886e4a111d6af9090c6a1f1271d64b66f7b";
               sha256 = "1i2hs52vc7ig3z7dj2w4czqkhsiyv991mw20xyfd615q7ll0k09y";
               fetchSubmodules = true;
             };

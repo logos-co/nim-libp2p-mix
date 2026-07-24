@@ -68,9 +68,11 @@ jobs:
       - name: Upgrade Nimble on floor-Nim jobs
         # Nim 2.2.4 ships Nimble 0.18.2, whose resolver cannot reliably
         # select a single version from the current dependency graph.
+        # Pin the commit behind Nimble 0.22.2 to avoid a registry/tag lookup.
         if: matrix.nim.ref == '2.2.4'
         run: |
-          nimble install -y --useSystemNim nimble@0.22.2
+          nimble install -y --useSystemNim \
+            'https://github.com/nim-lang/nimble.git@#aa03f886e4a111d6af9090c6a1f1271d64b66f7b'
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
           "$HOME/.nimble/bin/nimble" --version
 
@@ -85,10 +87,10 @@ jobs:
         uses: actions/cache@v5
         with:
           # `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` (below) provisions deps into the
-          # project-local `nimbledeps/`, so cache both that and `~/.nimble`
-          # (which holds nimble's package metadata + downloaded tarballs).
+          # project-local `nimbledeps/`. Cache it and Nimble's downloaded package
+          # repositories, but not global executables or installation state.
           path: |
-            ~/.nimble
+            ~/.nimble/pkgcache
             nimbledeps
           key: nimble-${{ matrix.platform.os }}-${{ matrix.platform.cpu }}-${{ matrix.nim.ref }}-${{ hashFiles('libp2p_mix.nimble', '.github/workflows/ci.yml') }}
 
