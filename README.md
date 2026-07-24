@@ -295,8 +295,9 @@ nim c -d:libp2p_mix_experimental_exit_is_dest -d:metrics -o:mix_ping examples/mi
   `$NIMBLE_DIR/pkgcache/tagged_versions.json`; `NIMBLE_DIR` defaults to
   `~/.nimble`. It leaves downloaded packages intact.
 - `make clean-all` is equivalent to `make clean` plus `make clean-nimble-cache`.
-- `make refresh-deps` forces regeneration of the committed `nix/deps.nix`
-  snapshot.
+- `make refresh-deps` runs `make clean-all` and then forces regeneration of
+  the committed `nix/deps.nix` snapshot. Because this removes `nimbledeps/`
+  and `nimble.paths`, run `make setup` afterwards before building or testing.
 
 ### Nix
 
@@ -319,11 +320,15 @@ pinned transitive dependencies. Refresh it after bumping the libp2p pin in
 make deps   # regenerates nix/deps.nix
 ```
 
-If you need to force regeneration from a clean intermediate lock file, run:
+To force regeneration from clean project-local dependencies and Nimble
+metadata, run:
 
 ```bash
 make refresh-deps
 ```
+
+This removes `nimbledeps/` and `nimble.paths`. Run `make setup` afterwards
+before building or testing.
 
 `NIMBLE_FLAGS` can be passed to `make refresh-deps` the same way as
 `make setup`; command-line variables are forwarded to the recursive
@@ -343,18 +348,6 @@ make build NIMBLE_FLAGS="-y"
 For predictable forced regeneration, prefer `make refresh-deps`; `make build`
 only uses `NIMBLE_FLAGS` if `nimble.lock` or `nix/deps.nix` need to be
 regenerated.
-
-If this does not work for any reason and you need to start fresh while in the Nix shell
-(so after the initial `nix develop`), run:
-
-```bash
-make clean
-make setup
-make refresh-deps
-nix build
-```
-
-optionally including `NIMBLE_FLAGS="-y"` if necessary.
 
 After regenerating dependencies, review any changes to `nix/deps.nix`. A
 change means that the newly resolved dependency snapshot differs from the

@@ -74,6 +74,7 @@ clean-nimble-cache:
 clean-nimbledeps:
 	$(RMDIR) nimbledeps nimble.paths
 
-refresh-deps:
-	$(RMDIR) nimble.lock
+refresh-deps: clean-all
 	$(MAKE) -B deps
+	@printf '\033[34m%s\033[0m\n' \
+		"Dependency snapshot refreshed. Run 'make setup' before building or testing."
