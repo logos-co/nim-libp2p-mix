@@ -4,7 +4,6 @@
 import std/endians, times
 import libp2p/peerid
 import ./crypto
-import libp2p/utils/sequninit
 
 type SeqNo* = uint32
 

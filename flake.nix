@@ -35,11 +35,23 @@
       devShells = forAllSystems (system:
         let
           pkgs = import nixpkgs { inherit system; };
+          # nixos-25.05 ships Nimble 0.18.2, whose resolver cannot reliably
+          # select a single version from the current dependency graph.
+          nimble_0_22_2 = pkgs.nimble.overrideAttrs (_: {
+            version = "0.22.2";
+            src = pkgs.fetchgit {
+              url = "https://github.com/nim-lang/nimble.git";
+              rev = "aa03f886e4a111d6af9090c6a1f1271d64b66f7b";
+              sha256 = "1i2hs52vc7ig3z7dj2w4czqkhsiyv991mw20xyfd615q7ll0k09y";
+              fetchSubmodules = true;
+            };
+          });
         in {
           default = pkgs.mkShell {
+            NIMBLE_NIM = "${pkgs.nim-2_2.nim}/nim/bin/nim";
             nativeBuildInputs = [
               pkgs.nim-2_2
-              pkgs.nimble
+              nimble_0_22_2
               pkgs.git
               pkgs.jq
               pkgs.makeWrapper

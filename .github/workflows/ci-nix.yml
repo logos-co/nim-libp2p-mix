@@ -33,6 +33,9 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  NIMBLE_FLAGS: "-y"
+
 jobs:
   nix-build:
     runs-on: ubuntu-22.04
@@ -51,17 +54,17 @@ jobs:
       - name: Use Magic Nix Cache
         uses: DeterminateSystems/magic-nix-cache-action@v14
 
-      # `make deps` regenerates nix/deps.nix from libp2p_mix.nimble.
+      # `make refresh-deps` regenerates nix/deps.nix from libp2p_mix.nimble.
       # If the committed snapshot is stale (missing transitive deps,
       # outdated revs after a libp2p bump, etc.), the diff is non-empty
       # and we fail the job — surfaces drift on the PR that introduced
       # it rather than the next time someone runs `nix build` locally.
       - name: Regenerate nix/deps.nix and verify no drift
         run: |
-          nix develop --command bash -c "make deps"
+          nix develop --command make refresh-deps NIMBLE_FLAGS="$NIMBLE_FLAGS"
           if ! git diff --exit-code nix/deps.nix; then
             echo "::error::nix/deps.nix is out of sync with libp2p_mix.nimble."
-            echo "Run 'nix develop --command make deps' locally and commit the result."
+            echo "Run 'nix develop --command make refresh-deps NIMBLE_FLAGS=\"$NIMBLE_FLAGS\"' locally and commit the result."
             exit 1
           fi
 

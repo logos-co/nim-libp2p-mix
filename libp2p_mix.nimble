@@ -9,7 +9,7 @@ license = "MIT"
 skipDirs = @["examples", "tests"]
 
 requires "nim >= 2.2.4",
-  "libp2p == 2.0.0", "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
+  "libp2p == 2.2.0", "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
   "nimcrypto >= 0.6.0", "stew >= 0.4.2", "results", "unittest2"
 
 import os, strutils
@@ -18,11 +18,18 @@ let nimc = getEnv("NIMC", "nim") # Which nim compiler to use
 let lang = getEnv("NIMLANG", "c") # Which backend (c/cpp/js)
 let flags = getEnv("NIMFLAGS", "") # Extra flags for the compiler
 let verbose = getEnv("V", "") notin ["", "0"]
+let cxxRuntime =
+  when defined(macosx):
+    " --passL:-lc++"
+  elif defined(posix):
+    " --passL:-lstdc++"
+  else:
+    ""
 
 let cfg =
   " --styleCheck:usages --styleCheck:error" & (if verbose: "" else: " --verbosity:0") &
   " --skipUserCfg -f --threads:on --opt:speed" &
-  " -d:libp2p_mix_experimental_exit_is_dest"
+  " -d:libp2p_mix_experimental_exit_is_dest" & cxxRuntime
 
 proc runTest(filename: string, moreoptions: string = "") =
   var compileCmd = nimc & " " & lang & " " & cfg & " " & flags

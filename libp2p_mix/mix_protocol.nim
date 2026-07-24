@@ -10,7 +10,6 @@ import
     delay_strategy, pool, cover_traffic,
   ]
 import libp2p/protocols/protocol
-import libp2p/utils/[sequninit]
 import libp2p/stream/[connection, lpstream]
 import libp2p/[switch, multicodec, peerinfo, varint]
 import libp2p/crypto/crypto

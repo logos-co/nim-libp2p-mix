@@ -8,7 +8,6 @@ import
   ]
 import libp2p/stream/connection
 import chronos
-import libp2p/utils/sequninit
 
 export toConnection
 export MixProtocolID

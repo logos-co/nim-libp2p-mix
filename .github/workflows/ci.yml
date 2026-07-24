@@ -37,7 +37,7 @@ jobs:
           # no longer compatible. We test both the floor and current:
           # - 2.2.4 is the libp2p v2.0.0 minimum and the version this PR
           #   was validated against locally;
-          # - 2.2.10 is the current 2.2.x and ships nimble 0.22.3, which
+          # - 2.2.10 is the current 2.2.x and ships nimble 0.22.2, which
           #   is what most contributors will have on their host machines.
           - { ref: '2.2.4',  mm: refc }
           - { ref: '2.2.10', mm: refc }
@@ -65,27 +65,44 @@ jobs:
           nim-version: ${{ matrix.nim.ref }}
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set NIMFLAGS for i386
+      - name: Upgrade Nimble on floor-Nim jobs
+        # Nim 2.2.4 ships Nimble 0.18.2, whose resolver cannot reliably
+        # select a single version from the current dependency graph.
+        # Pin the commit behind Nimble 0.22.2 to avoid a registry/tag lookup.
+        if: matrix.nim.ref == '2.2.4'
+        run: |
+          nimble install -y --useSystemNim \
+            'https://github.com/nim-lang/nimble.git@#aa03f886e4a111d6af9090c6a1f1271d64b66f7b'
+          echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
+          "$HOME/.nimble/bin/nimble" --version
+
+      - name: Set i386 build flags
         if: matrix.platform.cpu == 'i386'
         run: |
           echo "NIMFLAGS=${NIMFLAGS} --cpu:i386 --passC:-m32 --passL:-m32" >> $GITHUB_ENV
+          echo "CC=gcc -m32" >> $GITHUB_ENV
 
       - name: Cache nimble deps
         id: nimble-cache
         uses: actions/cache@v5
         with:
           # `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` (below) provisions deps into the
-          # project-local `nimbledeps/`, so cache both that and `~/.nimble`
-          # (which holds nimble's package metadata + downloaded tarballs).
+          # project-local `nimbledeps/`. Cache its reusable installation state and
+          # Nimble's downloaded package repositories, but not registry/build state.
           path: |
-            ~/.nimble
-            nimbledeps
-          key: nimble-${{ matrix.platform.os }}-${{ matrix.platform.cpu }}-${{ matrix.nim.ref }}-${{ hashFiles('libp2p_mix.nimble') }}
+            ~/.nimble/pkgcache
+            nimbledeps/bin
+            nimbledeps/pkgs2
+            nimbledeps/nimbledata2.json
+          key: nimble-${{ matrix.platform.os }}-${{ matrix.platform.cpu }}-${{ matrix.nim.ref }}-${{ hashFiles('libp2p_mix.nimble', '.github/workflows/ci.yml') }}
 
       - name: Install deps
         run: |
           nim --version
           nimble --version
+          # Force the SAT solver to discover current tags. This index can be
+          # stale even when the project-local dependency cache is clean.
+          make clean-nimble-cache
           # Project-local install: provisions deps into `nimbledeps/` and
           # generates `nimble.paths`. We don't commit `nimble.lock` (see
           # #13), so `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` is the right bootstrap
@@ -93,7 +110,7 @@ jobs:
           make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Run unit tests
-        run: nimble test
+        run: make test NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Run component tests
-        run: nimble testComponent
+        run: make testComponent NIMBLE_FLAGS="$NIMBLE_FLAGS"

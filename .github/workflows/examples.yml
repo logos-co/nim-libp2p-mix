@@ -35,21 +35,28 @@ jobs:
         uses: actions/cache@v5
         with:
           # `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` (below) provisions deps into the
-          # project-local `nimbledeps/`, so cache both that and `~/.nimble`.
+          # project-local `nimbledeps/`. Cache its reusable installation state and
+          # Nimble's downloaded package repositories, but not registry/build state.
           path: |
-            ~/.nimble
-            nimbledeps
+            ~/.nimble/pkgcache
+            nimbledeps/bin
+            nimbledeps/pkgs2
+            nimbledeps/nimbledata2.json
           key: nimble-examples-${{ hashFiles('libp2p_mix.nimble') }}
 
       - name: Install deps
         # Project-local install: provisions deps into `nimbledeps/` and
         # generates `nimble.paths`. We don't commit `nimble.lock` (see #13),
         # so `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` is the right bootstrap.
-        run: make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
+        run: |
+          # Force the SAT solver to discover current tags. This index can be
+          # stale even when the project-local dependency cache is clean.
+          make clean-nimble-cache
+          make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       - name: Build mix_ping
-        run: nimble example
+        run: make example NIMBLE_FLAGS="$NIMBLE_FLAGS"
 
       # Compile-checks the -d:enable_mix_benchmarks paths (see #27).
       - name: Build mix_ping with benchmarks enabled
-        run: nimble benchmarkBuild
+        run: make benchmarkBuild NIMBLE_FLAGS="$NIMBLE_FLAGS"

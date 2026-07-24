@@ -151,6 +151,11 @@ let mix = MixProtocol.new(
 
 ## Building & running
 
+> You can set up the project and run the tests in either a native or Nix shell.
+> The Nix shell pins Nim v2.2.4 and Nimble v0.22.2. CI tests Nim v2.2.4 and
+> v2.2.10 with Nimble v0.22.2. A native shell can use a newer supported
+> toolchain.
+
 To set up the project:
 
 ```bash
@@ -159,9 +164,66 @@ cd nim-libp2p-mix
 make setup        # generates nimble.paths
 ```
 
-`make setup` runs `nimble setup -l` (`--localdeps`), which runs nimble in
-project-local dependency mode and adds `--noNimblePath` to the generated
-`nimble.paths`.
+`make setup` runs Nimble with `--useSystemNim` and `--nim:$NIMBLE_NIM`. When
+choosenim is available, `NIMBLE_NIM` defaults to the real compiler under the
+toolchain path reported by `choosenim show path`; otherwise it uses `nim` from
+`PATH`. This is necessary because choosenim's `~/.nimble/bin/nim` proxy does not
+live in a Nim installation containing `nim.nimble`, so Nimble cannot recognize
+that proxy as a system compiler. The Nix shell sets `NIMBLE_NIM` to its
+underlying pinned Nim derivation for the same reason. This uses project-local
+dependency mode, keeps the selected compiler instead of downloading a different
+Nim version, and adds `--noNimblePath` to the generated `nimble.paths`.
+
+If the default SAT solver reports an invalid dependency even though a suitable
+package or tag exists, its registry or tag index may be stale. Nimble does not
+automatically refresh this metadata when new packages or tags are published.
+
+If metadata cleanup is not enough, completely reset Nimble's downloaded package
+and resolver state before retrying:
+
+```bash
+nimble_dir="${NIMBLE_DIR:-$HOME/.nimble}"
+rm -rf "$nimble_dir/pkgcache" "$nimble_dir/pkgs2" "$nimble_dir/buildtemp"
+rm -f "$nimble_dir/nimbledata2.json" \
+  "$nimble_dir/packages_official.json" "$nimble_dir/packages_temp.json"
+make clean
+make setup NIMBLE_FLAGS="-y"
+```
+
+This is destructive global cleanup. It affects other projects, removes globally
+installed package sources, and can leave launchers in `$nimble_dir/bin` that
+need to be reinstalled. It deliberately leaves the Nim and Nimble executables
+themselves untouched.
+
+For the less destructive metadata-only retry, use:
+
+```bash
+make clean-all
+make setup
+```
+
+`clean-nimble-cache` affects global Nimble metadata shared by other projects,
+so it is kept separate from the normal `clean` target. It removes the package
+registry and SAT tag index, not downloaded packages or other global Nimble
+state. The legacy solver does not use the SAT index; removing it is harmless
+but unnecessary when using the legacy solver.
+
+To verify resolution without changing either global Nimble state or the
+project's generated paths, use a fresh directory:
+
+```bash
+tmpdir="$(mktemp -d)"
+cp libp2p_mix.nimble "$tmpdir/"
+(
+  cd "$tmpdir"
+  nimble --nimbleDir:"$tmpdir/nimble" setup -l --useSystemNim \
+    --nim:"${NIMBLE_NIM:-nim}" -y
+)
+rm -rf "$tmpdir"
+```
+
+This redownloads package metadata and sources without replacing the project's
+`nimble.paths`, so it is intentionally not provided as a routine Make target.
 
 You can override the `NIMBLE_FLAGS` variable to pass extra flags to nimble:
 
@@ -173,18 +235,39 @@ make setup NIMBLE_FLAGS=--solver:legacy # legacy solver
 ### Tests
 
 ```bash
-nimble test            # 14 unit-test files (~143 individual checks)
-nimble testComponent   # 6 component (integration) tests, ~26 checks
-nimble testAll         # both
+make test            # 14 unit-test files (~143 individual checks)
+make testComponent   # 6 component (integration) tests, ~26 checks
+make testAll         # both
 ```
+
+The Make targets pass the same system-compiler selection flags used by
+`make setup`, preventing each Nimble task invocation from selecting a different
+Nim package.
 
 The `tests/config.nims` enables `-d:metrics` and several
 `libp2p_*_metrics` defines so tests can assert on metric counters.
 
+### Formatting
+
+```bash
+make format
+```
+
+`make format` runs `nph` over tracked Nim files. It assumes `nph` version
+`0.7.0` is installed globally in the native shell, matching CI:
+
+```bash
+nimble -y install nph@0.7.0
+```
+
+Check the installed package version with `nimble dump nph` and look for
+`version: "0.7.0"`. The `nph --version` output may still show a prerelease
+string for this release, so prefer the Nimble package metadata.
+
 ### Example
 
 ```bash
-nimble example
+make example
 ```
 
 This compiles `examples/mix_ping.nim`, which spins up 10 mix nodes locally,
@@ -208,8 +291,13 @@ nim c -d:libp2p_mix_experimental_exit_is_dest -d:metrics -o:mix_ping examples/mi
   `nimbledeps/`, and `nimble.paths`.
 - `make clean-nimbledeps` only removes `nimbledeps/` and `nimble.paths`,
   leaving the Nix dependency lock untouched.
-- `make refresh-deps` forces regeneration of the committed `nix/deps.nix`
-  snapshot.
+- `make clean-nimble-cache` removes the cached package registry and
+  `$NIMBLE_DIR/pkgcache/tagged_versions.json`; `NIMBLE_DIR` defaults to
+  `~/.nimble`. It leaves downloaded packages intact.
+- `make clean-all` is equivalent to `make clean` plus `make clean-nimble-cache`.
+- `make refresh-deps` runs `make clean-all` and then forces regeneration of
+  the committed `nix/deps.nix` snapshot. Because this removes `nimbledeps/`
+  and `nimble.paths`, run `make setup` afterwards before building or testing.
 
 ### Nix
 
@@ -220,6 +308,10 @@ nix develop          # drops you into a shell with nim 2.2 + nimble
 nix build            # type-checks libp2p_mix.nim against locked deps
 ```
 
+The development shell uses Nimble v0.22.2 because the v0.18.2 release in
+nixos-25.05 cannot reliably resolve the current dependency graph from a cold
+cache.
+
 The flake reads `nix/deps.nix`, which is the **committed** snapshot of all
 pinned transitive dependencies. Refresh it after bumping the libp2p pin in
 `libp2p_mix.nimble`:
@@ -228,29 +320,46 @@ pinned transitive dependencies. Refresh it after bumping the libp2p pin in
 make deps   # regenerates nix/deps.nix
 ```
 
-If you need to force regeneration from a clean intermediate lock file, run:
+To force regeneration from clean project-local dependencies and Nimble
+metadata, run:
 
 ```bash
 make refresh-deps
 ```
+
+This removes `nimbledeps/` and `nimble.paths`. Run `make setup` afterwards
+before building or testing.
 
 `NIMBLE_FLAGS` can be passed to `make refresh-deps` the same way as
 `make setup`; command-line variables are forwarded to the recursive
 `make deps` invocation:
 
 ```bash
-make refresh-deps NIMBLE_FLAGS="-y --solver:legacy"
+make refresh-deps NIMBLE_FLAGS="-y"
 ```
 
-If this does not work for any reason and you need to start fresh while in the Nix shell
-(so after the initial `nix develop`), run:
+`NIMBLE_FLAGS` can also be passed to `make build` when dependency generation
+may be triggered as part of the build:
 
 ```bash
-make clean
-make setup
-make refresh-deps
-nix build
+make build NIMBLE_FLAGS="-y"
 ```
+
+For predictable forced regeneration, prefer `make refresh-deps`; `make build`
+only uses `NIMBLE_FLAGS` if `nimble.lock` or `nix/deps.nix` need to be
+regenerated.
+
+After regenerating dependencies, review any changes to `nix/deps.nix`. A
+change means that the newly resolved dependency snapshot differs from the
+committed one; commit it only when the update is intentional. Otherwise,
+restore the committed snapshot before running `nix build`, which consumes this
+file.
+
+`--solver:legacy` was needed while `libp2p` was pinned as a git dependency.
+With a tagged dependency such as `libp2p == 2.1.4`, Nimble's default SAT solver
+should resolve the graph, and CI passes only `-y`. If the SAT solver reports an
+invalid dependency, first retry with a fresh tag index as described above. Use
+the legacy solver only as a temporary workaround or diagnostic fallback.
 
 To quickly check that you are in the nix shell run:
 
@@ -263,15 +372,18 @@ values: `impure` (default) or `pure` (when invoked with `--pure`). Any
 non-empty value means you're inside a nix shell. Empty or unset means
 you're not.
 
-`make deps` requires `nix-prefetch-git` and `jq` on `$PATH`. Internally it
-generates a fresh `nimble.lock`, forwards `NIMBLE_FLAGS` to `nimble lock`,
-and then transforms the lock file via `tools/gen-deps.sh`.
+`make deps` requires `nix-prefetch-git` and `jq` on `$PATH`. Make generates a
+fresh `nimble.lock`, forwards `NIMBLE_FLAGS` to `nimble lock`, and then passes
+the existing lock file to `tools/gen-deps.sh`. When invoked directly, the
+script requires its lock file argument to exist; it does not run Nimble or
+generate lock files itself.
 
 `nimble.lock` itself is **not** committed — it's an intermediate build
-artefact regenerated on demand (it lives in `.gitignore`). The long-lived
-pinning artefact for this repo is `nix/deps.nix`. Downstream consumers
-that need an exact dep set should pin libp2p_mix by URL+SHA in their own
-`.nimble`. See logos-co/nim-libp2p-mix#13 for the discussion behind this.
+artefact regenerated on demand and removed after `nix/deps.nix` is generated
+(it lives in `.gitignore`). The long-lived pinning artefact for this repo is
+`nix/deps.nix`. Downstream consumers that need an exact dep set should pin
+libp2p_mix by URL+SHA in their own `.nimble`. See
+logos-co/nim-libp2p-mix#13 for the discussion behind this.
 
 ## Compile-time flags
 

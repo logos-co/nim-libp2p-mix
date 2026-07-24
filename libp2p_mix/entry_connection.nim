@@ -4,7 +4,6 @@
 import hashes, chronos, results, chronicles
 import libp2p/stream/connection
 import libp2p/varint
-import libp2p/utils/sequninit
 import ./mix_protocol
 from fragmentation import DataSize
 

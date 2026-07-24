@@ -15,6 +15,8 @@ usage() {
 Usage:
   $0 <nimble.lock> <output.nix>
 
+The input lock file must already exist.
+
 Example:
   $0 nimble.lock nix/deps.nix
 EOF
@@ -33,23 +35,13 @@ fi
 LOCKFILE="$1"
 OUTFILE="$2"
 
-command -v jq >/dev/null || { echo "error: jq required"; exit 1; }
-command -v nix-prefetch-git >/dev/null || { echo "error: nix-prefetch-git required"; exit 1; }
-
 if [[ ! -f "$LOCKFILE" ]]; then
-  echo "[!] $LOCKFILE not found"
-  echo "[*] Generating $LOCKFILE"
-
-  (
-    LOCKDIR="$(dirname "$LOCKFILE")"
-    cd "$LOCKDIR" || { echo "error: $LOCKDIR does not exist"; exit 1; }
-    nimble_flags=()
-    if [[ -n "${NIMBLE_FLAGS:-}" ]]; then
-      read -r -a nimble_flags <<< "$NIMBLE_FLAGS"
-    fi
-    nimble lock "${nimble_flags[@]}"
-  )
+  echo "error: lock file not found: $LOCKFILE" >&2
+  exit 1
 fi
+
+command -v jq >/dev/null || { echo "error: jq required" >&2; exit 1; }
+command -v nix-prefetch-git >/dev/null || { echo "error: nix-prefetch-git required" >&2; exit 1; }
 
 echo "[*] Generating $OUTFILE from $LOCKFILE"
 
@@ -65,7 +57,8 @@ EOF
 
 jq -c '
   .packages
-  | to_entries[]
+  | to_entries
+  | sort_by(.key)[]
   | select(.value.downloadMethod == "git")
   # Filter out `nim` itself: nix builds use `pkgs.nim-2_2` from the system,
   # not a fetched Nim source. Including it in deps.nix is redundant and
@@ -74,6 +67,9 @@ jq -c '
 ' "$LOCKFILE" | while read -r entry; do
   name=$(jq -r '.key' <<<"$entry")
   url=$(jq -r '.value.url' <<<"$entry")
+  # Nimble can retain either spelling for the same repository depending on
+  # which transitive declaration it visits first. Keep deps.nix deterministic.
+  url="${url%.git}"
   rev=$(jq -r '.value.vcsRevision' <<<"$entry")
 
   echo "  [*] Prefetching $name"
