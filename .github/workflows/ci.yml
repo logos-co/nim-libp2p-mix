@@ -87,11 +87,13 @@ jobs:
         uses: actions/cache@v5
         with:
           # `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"` (below) provisions deps into the
-          # project-local `nimbledeps/`. Cache it and Nimble's downloaded package
-          # repositories, but not global executables or installation state.
+          # project-local `nimbledeps/`. Cache its reusable installation state and
+          # Nimble's downloaded package repositories, but not registry/build state.
           path: |
             ~/.nimble/pkgcache
-            nimbledeps
+            nimbledeps/bin
+            nimbledeps/pkgs2
+            nimbledeps/nimbledata2.json
           key: nimble-${{ matrix.platform.os }}-${{ matrix.platform.cpu }}-${{ matrix.nim.ref }}-${{ hashFiles('libp2p_mix.nimble', '.github/workflows/ci.yml') }}
 
       - name: Install deps
