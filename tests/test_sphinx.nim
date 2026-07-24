@@ -235,6 +235,30 @@ suite "Sphinx Tests":
     check checkReplay(packet, privateKeys[0], tm).isErr()
     check processSphinxPacket(packet, privateKeys[0], tm).isErr()
 
+  test "invalid alpha is rejected even when a valid sharedSecret is supplied":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    var packetBytes = sp.serialize()
+
+    # A real, non-zero shared secret for hop 0, derived from the untampered
+    # packet. checkReplay does not store a tag, so tm stays clean.
+    let goodPacket = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+    let (_, validSecret) =
+      checkReplay(goodPacket, privateKeys[0], tm).expect("checkReplay error")
+    check not validSecret.isZeroFieldElement()
+
+    # Corrupt alpha to a non-canonical (all-zero) encoding. Even with a valid
+    # supplied secret, alpha validation must run first and reject the packet,
+    # so a caller cannot bypass the public-input checks.
+    for i in 0 ..< AlphaSize:
+      packetBytes[i] = 0
+
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    check processSphinxPacket(packet, privateKeys[0], tm, Opt.some(validSecret)).isErr()
+
   test "tampered Beta invalidates MAC":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
     let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
@@ -327,9 +351,11 @@ suite "Sphinx Tests":
 
     check processedSP2.status == Duplicate
 
-  test "sphinx replay detected after alpha high-bit malleability":
+  test "alpha high-bit malleability is rejected as non-canonical":
     # Flipping α's RFC 7748-masked top bit yields different α bytes but the same
-    # shared secret s, so an H(s) replay tag must still flag the copy as a replay.
+    # shared secret s. It used to slip through and be caught later by the H(s)
+    # replay tag; now the canonical-α check rejects the non-canonical encoding
+    # (top bit set ⇒ value ≥ 2^255 > p) outright, which is strictly stronger.
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
 
     let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
@@ -349,17 +375,13 @@ suite "Sphinx Tests":
       processSphinxPacket(packet, privateKeys[0], tm).expect("Sphinx processing error")
     check first.status == Intermediate
 
-    let replay = processSphinxPacket(malleated, privateKeys[0], tm).expect(
-        "Sphinx processing error"
-      )
-    check replay.status == Duplicate
+    check processSphinxPacket(malleated, privateKeys[0], tm).isErr()
 
-  test "checkReplay detects replay after alpha high-bit malleability":
+  test "checkReplay rejects alpha high-bit malleability as non-canonical":
     # Same α-malleability as the test above, exercised through the production path:
-    # mix_protocol calls checkReplay (read-only) then processSphinxPacket, which
-    # stores the H(s) tag only after MAC verification. checkReplay is the sole replay
-    # check for a pre-validated sharedSecret, so a later malleated copy — sharing s —
-    # must be flagged there via H(s).
+    # mix_protocol calls checkReplay (read-only) then processSphinxPacket. The
+    # original packet processes normally; the malleated copy is non-canonical, so
+    # checkReplay rejects it before the H(s) replay check rather than flagging it.
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
     let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
         "sphinx wrap error"
@@ -385,12 +407,8 @@ suite "Sphinx Tests":
       .expect("processing error")
     check processed.status == Intermediate
 
-    # The malleated copy shares s, so checkReplay flags it as a replay via H(s).
-    let second = checkReplay(malleated, privateKeys[0], tm).expect("checkReplay error")
-    check second.isReplay
-
-    # Shared secret is identical despite the different α encoding
-    check first.sharedSecret == second.sharedSecret
+    # The malleated copy is non-canonical, so checkReplay rejects it outright.
+    check checkReplay(malleated, privateKeys[0], tm).isErr()
 
   test "sphinx wrap and process message sizes":
     let MessageSizes = @[32, 64, 128, 256, 512]

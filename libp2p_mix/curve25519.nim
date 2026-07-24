@@ -7,7 +7,7 @@ import libp2p/crypto/[crypto, curve25519]
 const FieldElementSize* = Curve25519KeySize
 
 func curve25519FieldPrime(): array[FieldElementSize, byte] =
-  # This is calculated in compile time
+  # This is calculated at compile time
 
   ## p = 2^255 - 19, encoded as a little-endian field element.
   var prime: array[FieldElementSize, byte]
@@ -58,9 +58,10 @@ proc bytesToAlphaFieldElement*(bytes: openArray[byte]): Result[FieldElement, str
   ## Convert bytes to a Sphinx alpha field element.
   if bytes.len != FieldElementSize:
     return err("Field element size must be " & $FieldElementSize & " bytes")
-  # Alpha is both Curve25519 input and replay-tag material. Require a single
-  # canonical, non-zero encoding so equivalent public values cannot get
-  # distinct replay tags.
+  # Alpha is a public Curve25519 input, not replay-tag material: replay is keyed
+  # on H(s) per spec Section 8.6.1 (see PR #18). Reject the all-zero encoding (a
+  # low-order point that forces a zero shared secret) and any non-canonical
+  # encoding, so malformed headers are dropped deterministically before use.
   if bytes.isZeroFieldElement():
     return err("Field element must not be all zero")
   if not bytes.isCanonicalFieldElement():
