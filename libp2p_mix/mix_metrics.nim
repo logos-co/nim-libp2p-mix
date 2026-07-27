@@ -27,3 +27,15 @@ declarePublicCounter mix_cover_error, "number of cover traffic errors", ["error"
 
 declarePublicCounter mix_cover_precomputed,
   "number of cover packets pre-computed per epoch"
+
+declarePublicGauge mix_surb_creds_active,
+  "number of SURB reply credentials currently held by the sender"
+
+declarePublicCounter mix_surb_creds_expired,
+  "number of SURB reply credentials reclaimed after TTL (replies never arrived)"
+
+declarePublicCounter mix_surb_creds_rejected,
+  "number of sends refused because the SURB credential store was at capacity"
+
+declarePublicCounter mix_reply_timeouts,
+  "number of sends whose reply did not arrive within the connection timeout"

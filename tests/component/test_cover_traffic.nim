@@ -109,6 +109,33 @@ suite "Cover Traffic - Integration":
     )
     check res4.isOk
 
+  asyncTest "a send that fails validation does not consume a slot":
+    ## The slot pool has no refund path, so the claim happens only once the
+    ## packet is about to be sent. A send rejected before that must leave the
+    ## pool untouched, otherwise repeated failures exhaust the epoch budget.
+    let nodes = await setupMixNodes(2)
+    let (destNode, _) = await setupDestNode(NoReplyProtocol.new())
+    await startNodes(nodes)
+    defer:
+      await stopNodes(nodes)
+      await stopDestNode(destNode)
+
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 4, useInternalEpochTimer = false)
+    ct.onEpochChange(1)
+    nodes[0].coverTraffic = Opt.some(CoverTraffic(ct))
+
+    let incoming = newAsyncQueue[seq[byte]]()
+    let before = ct.slotPool.availableSlots
+
+    # Only 2 nodes exist, so the pool cannot satisfy PathLength.
+    for _ in 0 ..< 3:
+      let res = await nodes[0].anonymizeLocalProtocolSend(
+        incoming, @[1.byte], "/test/1.0.0", destNode.toMixDestination(), 0
+      )
+      check res.isErr
+
+    check ct.slotPool.availableSlots == before
+
   asyncTest "MixProtocol wires SpamProtection epoch changes to cover traffic":
     let nodeInfos = MixNodeInfo.generateRandomMany(5, rng())
     let mixNodeInfo = nodeInfos[0]

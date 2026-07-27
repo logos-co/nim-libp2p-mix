@@ -7,7 +7,7 @@ import
   ./[
     curve25519, delay, fragmentation, mix_message, mix_node, sphinx, serialization,
     tag_manager, mix_metrics, exit_layer, multiaddr, exit_connection, spam_protection,
-    delay_strategy, pool, cover_traffic,
+    delay_strategy, pool, cover_traffic, surb_store,
   ]
 import libp2p/protocols/protocol
 import libp2p/stream/[connection, lpstream]
@@ -15,6 +15,7 @@ import libp2p/[switch, multicodec, peerinfo, varint]
 import libp2p/crypto/crypto
 
 export pool
+export SurbStore, SurbSession, release, new
 
 when defined(enable_mix_benchmarks):
   import ./benchmark
@@ -33,16 +34,6 @@ func isCoverTraffic*(msg: MixMessage): bool =
   ## Returns true if the message is a cover traffic packet.
   msg.codec == CoverTrafficCodec
 
-type
-  SURBIdentifierGroup = ref object
-    members: HashSet[SURBIdentifier]
-
-  ConnCreds = object
-    igroup: SURBIdentifierGroup
-    incoming: AsyncQueue[seq[byte]]
-    surbSecret: serialization.Secret
-    surbKey: serialization.Key
-
 ## Mix Protocol defines a decentralized anonymous message routing layer for libp2p networks.
 ## It enables sender anonymity by routing each message through a decentralized mix overlay
 ## network composed of participating libp2p nodes, known as mix nodes. Each message is
@@ -55,8 +46,9 @@ type MixProtocol* = ref object of LPProtocol
   tagManager: TagManager
   exitLayer: ExitLayer
   rng: Rng
-  # TODO: verify if this requires cleanup for cases in which response never arrives (and connection is closed)
-  connCreds: Table[SURBIdentifier, ConnCreds]
+  surbStore: SurbStore
+    ## Reply credentials for SURBs this node has issued. Expires entries whose
+    ## reply never arrives; see surb_store.nim.
   destReadBehaviors: TableRef[string, DestReadBehavior]
   connPool: Table[PeerId, Connection]
   spamProtection: Opt[SpamProtection]
@@ -88,6 +80,9 @@ proc setLocalMultiAddr*(
     return err("invalid local multiaddress: " & error)
   mixProto.mixNodeInfo.multiAddr = multiAddr
   ok()
+
+proc surbCredsLen*(mixProto: MixProtocol): int =
+  mixProto.surbStore.len
 
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
@@ -327,15 +322,10 @@ method handleMixMessages*(
   of Reply:
     trace "# Reply", id = processedSP.id
 
-    if not mixProto.connCreds.hasKey(processedSP.id):
+    # Expired credentials are invisible here even if no sweep has run yet.
+    let connCred = mixProto.surbStore.get(processedSP.id).valueOr:
       mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
       return
-
-    var connCred: ConnCreds
-    try:
-      connCred = mixProto.connCreds[processedSP.id]
-    except KeyError:
-      raiseAssert "checked with hasKey"
 
     let reply = processReply(
       connCred.surbKey, connCred.surbSecret, processedSP.delta_prime
@@ -344,9 +334,9 @@ method handleMixMessages*(
       mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
       return
 
-    # Deleting all other SURBs associated to this
-    for id in connCred.igroup.members:
-      mixProto.connCreds.del(id)
+    # The exit replies via every SURB in the group, so N replies race; the
+    # first one to arrive invalidates the rest.
+    mixProto.surbStore.release(connCred.igroup)
 
     let msgChunk = MessageChunk.deserialize(reply).valueOr:
       error "Deserialization failed", err = error
@@ -580,24 +570,39 @@ proc buildSurbs(
     numSurbs: uint8,
     destPeerId: PeerId,
     exitPeerId: PeerId,
-): Result[seq[SURB], string] =
+): Result[tuple[surbs: seq[SURB], session: Opt[SurbSession]], string] =
+  if numSurbs == 0:
+    # Fire-and-forget send: no reply expected, so nothing to register.
+    return ok((@[], Opt.none(SurbSession)))
+
   var response: seq[SURB]
-  var igroup = SURBIdentifierGroup(members: initHashSet[SURBIdentifier]())
+  let session = mixProto.surbStore.newSession()
 
   for _ in 0.uint8 ..< numSurbs:
     var id: SURBIdentifier
     mixProto.rng.generate(id)
-    let surb = ?mixProto.buildSurb(id, destPeerId, exitPeerId)
-    igroup.members.incl(id)
-    mixProto.connCreds[id] = ConnCreds(
-      igroup: igroup,
-      surbSecret: surb.secret.get(),
-      surbKey: surb.key,
-      incoming: incoming,
-    )
+
+    let surb = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
+      # Release whatever this group already registered; a partially built
+      # group can never receive a usable reply.
+      session.release()
+      return err(error)
+
+    mixProto.surbStore.add(
+      id,
+      ConnCreds(
+        igroup: session.igroup,
+        incoming: incoming,
+        surbSecret: surb.secret.get(),
+        surbKey: surb.key,
+      ),
+    ).isOkOr:
+      session.release()
+      return err(error)
+
     response.add(surb)
 
-  return ok(response)
+  return ok((response, Opt.some(session)))
 
 proc prepareMsgWithSurbs(
     mixProto: MixProtocol,
@@ -606,10 +611,13 @@ proc prepareMsgWithSurbs(
     numSurbs: uint8 = 0,
     destPeerId: PeerId,
     exitPeerId: PeerId,
-): Result[seq[byte], string] =
-  let surbs = mixProto.buildSurbs(incoming, numSurbs, destPeerId, exitPeerId).valueOr:
+): Result[tuple[msg: seq[byte], session: Opt[SurbSession]], string] =
+  let built = mixProto.buildSurbs(incoming, numSurbs, destPeerId, exitPeerId).valueOr:
     return err(error)
-  serializeMessageWithSURBs(msg, surbs)
+  let serialized = serializeMessageWithSURBs(msg, built.surbs).valueOr:
+    built.session.get(nil).release()
+    return err(error)
+  ok((serialized, built.session))
 
 type SendPacketLogType* = enum
   Entry
@@ -720,22 +728,20 @@ proc anonymizeLocalProtocolSend*(
     codec: string,
     destination: MixDestination,
     numSurbs: uint8,
-): Future[Result[void, string]] {.async: (raises: [CancelledError, LPStreamError]).} =
+): Future[Result[Opt[SurbSession], string]] {.
+    async: (raises: [CancelledError, LPStreamError])
+.} =
+  ## On success returns a handle to the reply credentials registered for this
+  ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
+  ## promptly when its connection closes.
   when not defined(libp2p_mix_experimental_exit_is_dest):
     doAssert destination.kind == ForwardAddr, "Only exit != destination is allowed"
 
   mix_messages_recvd.inc(labelValues = ["Entry"])
 
-  # Claim a slot for local origination (Mix Cover Traffic spec §6.3)
-  mixProto.coverTraffic.withValue(ct):
-    let claim = ct.slotPool.claimSlot()
-    if not claim.success:
-      mix_slot_claim_rejected.inc(labelValues = ["send"])
-      return err("No slots available in current epoch")
-    # Reclaim proof token from discarded cover packet for messageId reuse
-    if claim.reclaimedToken.len > 0:
-      mixProto.spamProtection.withValue(sp):
-        sp.reclaimProofToken(claim.reclaimedToken)
+  # Note: the cover-traffic slot is claimed further down, immediately before
+  # the packet is sent. Claiming here would consume a slot on every validation
+  # failure below, and the pool has no refund path.
 
   var logConfig = SendPacketLogConfig(logType: Entry)
   when defined(enable_mix_benchmarks):
@@ -856,22 +862,48 @@ proc anonymizeLocalProtocolSend*(
     else:
       Hop()
 
-  var msgWithSurbs = mixProto.prepareMsgWithSurbs(
+  var prepared = mixProto.prepareMsgWithSurbs(
     incoming, move(msg), numSurbs, destination.peerId, exitPeerId
   ).valueOr:
     return err(fmt"Could not prepend SURBs: {error}")
 
-  let message = buildMessage(move(msgWithSurbs), codec, mixProto.mixNodeInfo.peerId).valueOr:
+  let session = prepared.session
+
+  # Past this point the reply credentials are registered, so every failure
+  # must release them: the packet never left this process, so no reply can
+  # ever arrive to clean them up.
+  template releaseAndFail(msg: string): auto =
+    session.get(nil).release()
+    return err(msg)
+
+  let message = buildMessage(move(prepared.msg), codec, mixProto.mixNodeInfo.peerId).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", error[1]])
-    return err(fmt"Error building message: {error[0]}")
+    releaseAndFail(fmt"Error building message: {error[0]}")
 
   # Wrap in Sphinx packet
   let sphinxPacket = wrapInSphinxPacket(message, publicKeys, delays, hop, destHop).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", "NON_RECOVERABLE"])
-    return err(fmt"Failed to wrap in sphinx packet: {error}")
+    releaseAndFail(fmt"Failed to wrap in sphinx packet: {error}")
+
+  # Claim a slot for local origination (Mix Cover Traffic spec §6.3).
+  # Claimed here rather than on entry so that a slot is only consumed by a
+  # packet that is actually emitted -- the pool has no refund path, so an
+  # earlier claim would leak one on every validation failure above.
+  mixProto.coverTraffic.withValue(ct):
+    let claim = ct.slotPool.claimSlot()
+    if not claim.success:
+      mix_slot_claim_rejected.inc(labelValues = ["send"])
+      releaseAndFail("No slots available in current epoch")
+    # Reclaim proof token from discarded cover packet for messageId reuse
+    if claim.reclaimedToken.len > 0:
+      mixProto.spamProtection.withValue(sp):
+        sp.reclaimProofToken(claim.reclaimedToken)
 
   # Send the wrapped message to the first mix node in the selected path
-  return await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)
+  (await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)).isOkOr:
+    releaseAndFail(error)
+
+  return ok(session)
 
 proc reply(
     mixProto: MixProtocol, surb: SURB, msg: sink seq[byte]
@@ -1012,6 +1044,9 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
 
   await mixProto.tagManager.stop()
 
+  await mixProto.surbStore.stop()
+  mixProto.surbStore.clear()
+
   mixProto.coverTraffic.withValue(ct):
     await ct.stop()
 
@@ -1029,6 +1064,7 @@ proc init*(
     spamProtection: Opt[SpamProtection] = default(Opt[SpamProtection]),
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
+    surbStore: SurbStore = SurbStore.new(),
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
   ##
@@ -1041,11 +1077,17 @@ proc init*(
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
+  # A SURB reply is only accepted while its replay tag is still cached, so
+  # holding credentials longer than the tag TTL cannot buy anything.
+  doAssert surbStore.ttl <= tagManager.tagTTL,
+    "SURB credential TTL must not exceed the replay tag TTL"
+
   mixProto.mixNodeInfo = mixNodeInfo
   mixProto.switch = switch
   mixProto.rng = switch.rng
   mixProto.nodePool = MixNodePool.new(switch.peerStore)
   mixProto.tagManager = tagManager
+  mixProto.surbStore = surbStore
   mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
 
   mixProto.spamProtection = spamProtection
@@ -1110,6 +1152,7 @@ proc new*(
     spamProtection: Opt[SpamProtection] = default(Opt[SpamProtection]),
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
+    surbStore: SurbStore = SurbStore.new(),
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
   ##
@@ -1121,6 +1164,7 @@ proc new*(
   ## generation and short exponential delays.
   let mixProto = new(T)
   mixProto.init(
-    mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic
+    mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic,
+    surbStore,
   )
   mixProto
