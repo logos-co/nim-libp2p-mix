@@ -36,7 +36,8 @@ const
   MinSweepThreshold* = 1024
 
 type
-  SURBIdentifierGroup* = ref object ## All SURBs minted for a single send.
+  SURBIdentifierGroup* = ref object
+    ## All SURBs minted for a single send.
     ##
     ## `expiresAt` is stamped here rather than per credential, so a partially
     ## expired group is unrepresentable. The exit replies via *every* SURB in
@@ -123,10 +124,7 @@ proc newGroup*(s: SurbStore, now: Moment = Moment.now()): SURBIdentifierGroup =
   SURBIdentifierGroup(members: initHashSet[SURBIdentifier](), expiresAt: now + s.ttl)
 
 proc add*(
-    s: SurbStore,
-    id: SURBIdentifier,
-    creds: ConnCreds,
-    now: Moment = Moment.now(),
+    s: SurbStore, id: SURBIdentifier, creds: ConnCreds, now: Moment = Moment.now()
 ): Result[void, string] =
   ## Sweeps first if occupancy has crossed the threshold, which is then reset
   ## to twice the post-sweep size -- so each sweep requires at least that many

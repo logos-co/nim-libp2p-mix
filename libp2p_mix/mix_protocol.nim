@@ -15,7 +15,7 @@ import libp2p/[switch, multicodec, peerinfo, varint]
 import libp2p/crypto/crypto
 
 export pool
-export SurbStore, SurbSession, release, new
+export SurbStore, SurbSession
 
 when defined(enable_mix_benchmarks):
   import ./benchmark
@@ -1064,9 +1064,13 @@ proc init*(
     spamProtection: Opt[SpamProtection] = default(Opt[SpamProtection]),
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
-    surbStore: SurbStore = SurbStore.new(),
+    surbStore: SurbStore = nil,
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
+  ##
+  ## A nil `surbStore` gets a default one. Defaulting to nil rather than
+  ## `SurbStore.new()` keeps the constructor out of the parameter list, so
+  ## callers do not need `surb_store`'s `new` in scope.
   ##
   ## Mix node public keys should be populated via the nodePool after
   ## initialization using `mixProto.nodePool.add(mixPubInfo)`.
@@ -1077,9 +1081,15 @@ proc init*(
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
+  let store =
+    if surbStore.isNil:
+      SurbStore.new()
+    else:
+      surbStore
+
   # A SURB reply is only accepted while its replay tag is still cached, so
   # holding credentials longer than the tag TTL cannot buy anything.
-  doAssert surbStore.ttl <= tagManager.tagTTL,
+  doAssert store.ttl <= tagManager.tagTTL,
     "SURB credential TTL must not exceed the replay tag TTL"
 
   mixProto.mixNodeInfo = mixNodeInfo
@@ -1087,7 +1097,7 @@ proc init*(
   mixProto.rng = switch.rng
   mixProto.nodePool = MixNodePool.new(switch.peerStore)
   mixProto.tagManager = tagManager
-  mixProto.surbStore = surbStore
+  mixProto.surbStore = store
   mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
 
   mixProto.spamProtection = spamProtection
@@ -1152,7 +1162,7 @@ proc new*(
     spamProtection: Opt[SpamProtection] = default(Opt[SpamProtection]),
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
-    surbStore: SurbStore = SurbStore.new(),
+    surbStore: SurbStore = nil,
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
   ##

@@ -4,7 +4,7 @@
 import hashes, chronos, results, chronicles, metrics
 import libp2p/stream/connection
 import libp2p/varint
-import ./[mix_protocol, mix_metrics]
+import ./[mix_protocol, mix_metrics, surb_store]
 from fragmentation import DataSize
 
 const DefaultSurbs = uint8(4)

@@ -177,7 +177,9 @@ proc new*(T: typedesc[SilentProtocol], codec: string): SilentProtocol =
     receivedMessages: newAsyncQueue[ReceivedMessage](), hold: newFuture[void]()
   )
 
-  proc handler(conn: Connection, protoId: string) {.async: (raises: [CancelledError]).} =
+  proc handler(
+      conn: Connection, protoId: string
+  ) {.async: (raises: [CancelledError]).} =
     try:
       let buffer = await conn.readLp(1024)
       await proto.receivedMessages.put(
