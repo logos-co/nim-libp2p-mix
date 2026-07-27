@@ -579,6 +579,9 @@ proc buildSurbs(
   let session = mixProto.surbStore.newSession()
 
   for _ in 0.uint8 ..< numSurbs:
+    # Uniqueness rests on 128 bits of CSPRNG output, per spec Section 8.7.2
+    # Step 2. No collision check: a repeat would mean the RNG has failed, which
+    # compromises the SURB reply keys themselves, not just this index.
     var id: SURBIdentifier
     mixProto.rng.generate(id)
 

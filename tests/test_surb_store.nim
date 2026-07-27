@@ -11,7 +11,7 @@ proc makeId(seed: int): SURBIdentifier =
   for i in 0 ..< result.len:
     result[i] = byte((seed * 7 + i) mod 256)
 
-proc makeCreds(store: SurbStore, igroup: SURBIdentifierGroup): ConnCreds =
+proc makeCreds(igroup: SURBIdentifierGroup): ConnCreds =
   ConnCreds(
     igroup: igroup,
     incoming: newAsyncQueue[seq[byte]](),
@@ -37,7 +37,7 @@ suite "SURB Store":
     check store.len == 0
     check store.get(id, base).isNone()
 
-    check store.add(id, store.makeCreds(igroup), base).isOk()
+    check store.add(id, makeCreds(igroup), base).isOk()
     check store.len == 1
     check store.get(id, base).isSome()
 
@@ -48,7 +48,7 @@ suite "SURB Store":
   test "release evicts every member of the group":
     let igroup = store.newGroup(base)
     for i in 0 .. 3:
-      check store.add(makeId(i), store.makeCreds(igroup), base).isOk()
+      check store.add(makeId(i), makeCreds(igroup), base).isOk()
     check store.len == 4
 
     # Releasing via one member's group drops all siblings: the exit replies
@@ -63,7 +63,7 @@ suite "SURB Store":
 
   test "release is idempotent":
     let igroup = store.newGroup(base)
-    check store.add(makeId(1), store.makeCreds(igroup), base).isOk()
+    check store.add(makeId(1), makeCreds(igroup), base).isOk()
 
     store.release(igroup)
     store.release(igroup)
@@ -71,7 +71,7 @@ suite "SURB Store":
 
     # And after expiry has already removed the entries
     let expired = store.newGroup(base)
-    check store.add(makeId(2), store.makeCreds(expired), base).isOk()
+    check store.add(makeId(2), makeCreds(expired), base).isOk()
     discard store.purgeExpired(base + chronos.minutes(31))
     store.release(expired)
     check store.len == 0
@@ -79,7 +79,7 @@ suite "SURB Store":
   test "get hides expired entries before any sweep runs":
     let igroup = store.newGroup(base)
     let id = makeId(1)
-    check store.add(id, store.makeCreds(igroup), base).isOk()
+    check store.add(id, makeCreds(igroup), base).isOk()
 
     let justBefore = base + chronos.minutes(30) - chronos.milliseconds(1)
     check store.get(id, justBefore).isSome()
@@ -92,7 +92,7 @@ suite "SURB Store":
   test "all members of a group expire together":
     let igroup = store.newGroup(base)
     for i in 0 .. 4:
-      check store.add(makeId(i), store.makeCreds(igroup), base).isOk()
+      check store.add(makeId(i), makeCreds(igroup), base).isOk()
 
     check store.purgeExpired(base + chronos.minutes(29)) == 0
     check store.len == 5
@@ -102,10 +102,10 @@ suite "SURB Store":
 
   test "purge only removes groups past their own deadline":
     let old = store.newGroup(base)
-    check store.add(makeId(1), store.makeCreds(old), base).isOk()
+    check store.add(makeId(1), makeCreds(old), base).isOk()
 
     let fresh = store.newGroup(base + chronos.minutes(20))
-    check store.add(makeId(2), store.makeCreds(fresh), base).isOk()
+    check store.add(makeId(2), makeCreds(fresh), base).isOk()
 
     check store.purgeExpired(base + chronos.minutes(31)) == 1
     check store.len == 1
@@ -118,10 +118,10 @@ suite "SURB Store":
 
     let igroup = small.newGroup(base)
     for i in 0 .. 3:
-      check small.add(makeId(i), small.makeCreds(igroup), base).isOk()
+      check small.add(makeId(i), makeCreds(igroup), base).isOk()
     check small.len == 4
 
-    let rejected = small.add(makeId(99), small.makeCreds(small.newGroup(base)), base)
+    let rejected = small.add(makeId(99), makeCreds(small.newGroup(base)), base)
     check rejected.isErr()
 
     # The existing group is untouched: rejecting the new send is preferable to
@@ -136,19 +136,19 @@ suite "SURB Store":
       small.clear()
 
     let igroup = small.newGroup(base)
-    check small.add(makeId(1), small.makeCreds(igroup), base).isOk()
-    check small.add(makeId(2), small.makeCreds(igroup), base).isOk()
-    check small.add(makeId(3), small.makeCreds(small.newGroup(base)), base).isErr()
+    check small.add(makeId(1), makeCreds(igroup), base).isOk()
+    check small.add(makeId(2), makeCreds(igroup), base).isOk()
+    check small.add(makeId(3), makeCreds(small.newGroup(base)), base).isErr()
 
     # add() sweeps before rejecting, so a later attempt succeeds on its own.
     let later = base + chronos.minutes(31)
-    check small.add(makeId(3), small.makeCreds(small.newGroup(later)), later).isOk()
+    check small.add(makeId(3), makeCreds(small.newGroup(later)), later).isOk()
     check small.len == 1
 
   test "sweeps stay amortised across many inserts":
     let igroup = store.newGroup(base)
     for i in 0 ..< 20_000:
-      check store.add(makeId(i), store.makeCreds(igroup), base).isOk()
+      check store.add(makeId(i), makeCreds(igroup), base).isOk()
 
     # Doubling the threshold after each sweep keeps this logarithmic; a
     # per-insert sweep would be ~20_000.
@@ -157,7 +157,7 @@ suite "SURB Store":
   test "clear drops everything":
     let igroup = store.newGroup(base)
     for i in 0 .. 2:
-      check store.add(makeId(i), store.makeCreds(igroup), base).isOk()
+      check store.add(makeId(i), makeCreds(igroup), base).isOk()
 
     store.clear()
     check store.len == 0
