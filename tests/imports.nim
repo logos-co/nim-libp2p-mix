@@ -11,14 +11,18 @@ import std/[algorithm, macros, os, strutils]
 macro importTests*(dir: static string): untyped =
   ## Import every `test_*.nim` under `dir` (non-recursive), excluding
   ## `test_all.nim` itself. Sorted for deterministic compile order.
+  ##
+  ## Generates same-directory relative imports (`./test_foo`) so resolution
+  ## is independent of the absolute checkout path that `walkDir` returns.
+  ## Callers must live in `dir` (both `test_all.nim` entry points do).
   result = newStmtList()
-  var files: seq[string] = @[]
+  var names: seq[string] = @[]
   for kind, path in walkDir(dir):
     if kind != pcFile:
       continue
     let (_, name, ext) = splitFile(path)
     if ext == ".nim" and name.startsWith("test_") and name != "test_all":
-      files.add(path)
-  sort(files)
-  for file in files:
-    result.add nnkImportStmt.newTree(newLit(file))
+      names.add(name)
+  sort(names)
+  for name in names:
+    result.add nnkImportStmt.newTree(newLit("./" & name))
