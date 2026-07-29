@@ -23,6 +23,7 @@ export destReadBehaviorCb
 export DestReadBehavior
 export registerDestReadBehavior
 export localMixPubInfo
+export setLocalMultiAddr
 
 # Spam protection exports
 export SpamProtection

@@ -77,6 +77,18 @@ proc registerDestReadBehavior*(
 proc localMixPubInfo*(mixProto: MixProtocol): MixPubInfo =
   mixProto.mixNodeInfo.toMixPubInfo()
 
+proc setLocalMultiAddr*(
+    mixProto: MixProtocol, multiAddr: MultiAddress
+): Result[void, string] {.raises: [].} =
+  ## Update the multiaddr used as this node's self hop (SURBs, cover traffic)
+  ## and by ``localMixPubInfo``. Must be a mix-encodable transport address
+  ## without a trailing destination ``/p2p/<peerId>``; circuit-relay form is ok.
+  ## Already-issued SURBs are not updated.
+  discard multiAddrToBytes(mixProto.mixNodeInfo.peerId, multiAddr).valueOr:
+    return err("invalid local multiaddress: " & error)
+  mixProto.mixNodeInfo.multiAddr = multiAddr
+  ok()
+
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
     return err("Max cannot be zero.")
