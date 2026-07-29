@@ -16,9 +16,10 @@ env:
 
 jobs:
   test:
-    # Each linux matrix job builds + runs 14 unit tests and 6 component tests
-    # with `-f` (force recompile) per test, which is ~25-35 min total — too
-    # close to a 30-min cap, so we go to 60 to absorb runner variance.
+    # Each matrix job compiles one unit test binary + one component binary
+    # (tests/test_all.nim, tests/component/test_all.nim) then runs them.
+    # Previously each test_*.nim was its own entry point (~25-35 min). Keep 60
+    # until the combined-binary times are measured in CI (#17).
     timeout-minutes: 60
     strategy:
       fail-fast: false

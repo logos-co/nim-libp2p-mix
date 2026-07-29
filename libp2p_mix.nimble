@@ -45,17 +45,16 @@ proc buildExample(filename: string, moreoptions: string = "") =
   let exeName = filename.changeFileExt("").toExe
   rmFile "examples/" & exeName
 
+# Unit and component suites each compile as a single binary via test_all.nim
+# (imports every test_*.nim in that directory). That compiles the shared
+# libp2p/chronos/stew tree once per suite instead of once per file — the main
+# CI wall-clock win from #17. Individual test_*.nim files remain runnable
+# standalone for local debugging.
 task test, "Run unit tests":
-  for f in listFiles("tests"):
-    let (_, name, ext) = f.splitFile
-    if ext == ".nim" and name.startsWith("test_"):
-      runTest(name)
+  runTest("test_all")
 
 task testComponent, "Run component (integration) tests":
-  for f in listFiles("tests/component"):
-    let (_, name, ext) = f.splitFile
-    if ext == ".nim" and name.startsWith("test_"):
-      runTest("component/" & name)
+  runTest("component/test_all")
 
 task testAll, "Run unit + component tests":
   exec "nimble test"
