@@ -940,6 +940,18 @@ proc reply(
 
   let sphinxPacket = useSURB(surb, message)
 
+  # Claim a slot for reply origination (same R budget as local send / forward)
+  mixProto.coverTraffic.withValue(ct):
+    let claim = ct.slotPool.claimSlot()
+    if not claim.success:
+      warn "Slot exhaustion, dropping SURB reply"
+      mix_messages_error.inc(labelValues = ["Reply", "SLOT_EXHAUSTED"])
+      mix_slot_claim_rejected.inc(labelValues = ["reply"])
+      return
+    if claim.reclaimedToken.len > 0:
+      mixProto.spamProtection.withValue(sp):
+        sp.reclaimProofToken(claim.reclaimedToken)
+
   let sendRes = await mixProto.sendPacket(
     peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
   )
