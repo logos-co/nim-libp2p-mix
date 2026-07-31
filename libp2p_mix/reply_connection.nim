@@ -4,7 +4,7 @@
 import hashes, chronos, chronicles
 import libp2p/stream/connection
 import ./[serialization]
-from fragmentation import DataSize
+from padding import DataSize
 
 type MixReplyDialer* = proc(surbs: seq[SURB], msg: sink seq[byte]): Future[void] {.
   async: (raises: [CancelledError, LPStreamError])

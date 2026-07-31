@@ -3,7 +3,7 @@
 
 import hashes, chronos, chronicles
 import libp2p/stream/connection
-from fragmentation import DataSize
+from padding import DataSize
 
 type MixExitConnection* = ref object of Connection
   message: seq[byte]

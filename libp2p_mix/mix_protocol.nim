@@ -5,7 +5,7 @@ import chronicles, chronos, sequtils, results, sets
 import std/[strformat, tables], metrics
 import
   ./[
-    curve25519, delay, fragmentation, mix_message, mix_node, sphinx, serialization,
+    curve25519, delay, padding, mix_message, mix_node, sphinx, serialization,
     tag_manager, mix_metrics, exit_layer, multiaddr, exit_connection, spam_protection,
     delay_strategy, pool, cover_traffic, surb_store,
   ]
@@ -273,12 +273,7 @@ method handleMixMessages*(
     mix_messages_recvd.inc(labelValues = ["Exit"])
 
     # This is the exit node, forward to destination
-    let msgChunk = MessageChunk.deserialize(processedSP.messageChunk).valueOr:
-      error "Deserialization failed", err = error
-      mix_messages_error.inc(labelValues = ["Exit", "INVALID_SPHINX"])
-      return
-
-    let unpaddedMsg = msgChunk.removePadding().valueOr:
+    let unpaddedMsg = removePadding(processedSP.messageChunk).valueOr:
       error "Unpadding message failed", err = error
       mix_messages_error.inc(labelValues = ["Exit", "INVALID_SPHINX"])
       return
@@ -338,12 +333,7 @@ method handleMixMessages*(
     # first one to arrive invalidates the rest.
     mixProto.surbStore.release(connCred.igroup)
 
-    let msgChunk = MessageChunk.deserialize(reply).valueOr:
-      error "Deserialization failed", err = error
-      mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
-      return
-
-    let unpaddedMsg = msgChunk.removePadding().valueOr:
+    let unpaddedMsg = removePadding(reply).valueOr:
       error "Unpadding message failed", err = error
       mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
       return
@@ -677,20 +667,16 @@ proc sendPacket(
   return ok()
 
 proc buildMessage(
-    msg: sink seq[byte], codec: string, peerId: PeerId
+    msg: sink seq[byte], codec: string
 ): Result[Message, (string, string)] =
   let
     mixMsg = MixMessage.init(move(msg), codec)
     serialized = mixMsg.serialize()
 
-  if serialized.len > DataSize:
+  let padded = addPadding(serialized).valueOr:
     return err(("message size exceeds maximum payload size", "INVALID_SIZE"))
 
-  let
-    paddedMsg = addPadding(serialized, peerId)
-    serializedMsgChunk = paddedMsg.serialize()
-
-  ok(serializedMsgChunk)
+  ok(padded)
 
 type DestinationType* = enum
   ForwardAddr
@@ -879,7 +865,7 @@ proc anonymizeLocalProtocolSend*(
     session.get(nil).release()
     return err(msg)
 
-  let message = buildMessage(move(prepared.msg), codec, mixProto.mixNodeInfo.peerId).valueOr:
+  let message = buildMessage(move(prepared.msg), codec).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", error[1]])
     releaseAndFail(fmt"Error building message: {error[0]}")
 
@@ -916,7 +902,7 @@ proc reply(
       return
 
   # Reply messages don't require an application codec: routing is determined by the SURB.
-  let message = buildMessage(move(msg), "", peerId).valueOr:
+  let message = buildMessage(move(msg), "").valueOr:
     error "could not build reply message", err = error
     return
 
@@ -998,9 +984,7 @@ proc buildCoverPacket*(
   var randomPayload = newSeq[byte](maxMsgSize)
   mixProto.rng.generate(randomPayload)
 
-  let message = buildMessage(
-    move(randomPayload), CoverTrafficCodec, mixProto.mixNodeInfo.peerId
-  ).valueOr:
+  let message = buildMessage(move(randomPayload), CoverTrafficCodec).valueOr:
     return err("Error building cover message: " & error[0])
 
   let sphinxPacket = wrapInSphinxPacket(message, publicKeys, delays, hops, Hop()).valueOr:
