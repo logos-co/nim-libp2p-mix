@@ -7,6 +7,7 @@ description =
   "Mix protocol for nim-libp2p — anonymous routing with the Sphinx packet format"
 license = "MIT"
 skipDirs = @["examples", "tests"]
+entryPoints = @["examples/mix_ping.nim"]
 
 requires "nim >= 2.2.4",
   "libp2p == 2.2.1", "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
