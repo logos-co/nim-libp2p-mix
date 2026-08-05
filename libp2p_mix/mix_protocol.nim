@@ -565,9 +565,7 @@ method handleMixMessages*(
     defer:
       connCred.wipe()
 
-    let reply = processReply(
-      connCred.surbKey, connCred.surbSecret, processedSP.delta_prime
-    ).valueOr:
+    let reply = recoverReply(connCred.credential, processedSP.delta_prime).valueOr:
       error "could not process reply", id = processedSP.id
       mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
       return
@@ -823,6 +821,7 @@ proc drawHops(
 
 type SurbBuild* = object
   surb*: SURB
+  credential*: ReplyCredential
   credentialsExpireAt*: Opt[Moment]
     ## When the reply credentials must be unrecoverable: G - D after obtaining
     ## the oldest record of the other hops on the SURB's return path (Mix Key
@@ -876,16 +875,17 @@ method buildSurb*(
 
     delays.add(hopDelay)
 
-  var surb = ?createSURB(publicKeys, delays, hops, id, mixProto.rng)
+  var created = ?createSURB(publicKeys, delays, hops, id, mixProto.rng)
   let ring = mixProto.keyRing.valueOr:
-    return ok(SurbBuild(surb: move(surb)))
+    return ok(SurbBuild(surb: move(created.surb), credential: move(created.credential)))
   # The packet carrying the SURB is sent before the oldest of these records goes
   # stale, and the SURB's keys remain accepted for surbLifetime after sending,
   # so every reply arrives by then: G - D after obtaining that record (Mix Key
   # Rotation spec §5, §7).
   ok(
     SurbBuild(
-      surb: move(surb),
+      surb: move(created.surb),
+      credential: move(created.credential),
       credentialsExpireAt: mixProto.nodePool.staleAt(pathPeerIds).map(
           proc(staleAt: Moment): Moment =
             staleAt + ring.config.surbLifetime
@@ -928,8 +928,7 @@ proc buildSurbs(
     var creds = ConnCreds(
       igroup: session.igroup,
       incoming: incoming,
-      surbSecret: move(built.surb.secret.get()),
-      surbKey: built.surb.key,
+      credential: move(built.credential),
     )
     let added = mixProto.surbStore.add(id, creds)
     creds.wipe()

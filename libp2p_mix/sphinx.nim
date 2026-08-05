@@ -210,13 +210,27 @@ proc computeDelta(s: seq[seq[byte]], msg: Message): Result[seq[byte], string] =
 
   return ok(delta)
 
+type ReplyCredential* = object
+  identifier: SURBIdentifier
+  key: serialization.Key
+  secret: serialization.Secret
+
+func identifier*(credential: ReplyCredential): SURBIdentifier {.inline.} =
+  credential.identifier
+
+proc wipe*(credential: var ReplyCredential) =
+  ## Clear retained reply secrets when their owner retires the credential.
+  for secret in credential.secret.mitems:
+    burnMem(secret)
+  burnMem(credential.key)
+
 proc createSURB*(
     publicKeys: openArray[FieldElement],
     delay: openArray[Delay],
     hops: openArray[Hop],
     id: SURBIdentifier,
     rng: Rng,
-): Result[SURB, string] =
+): Result[tuple[surb: SURB, credential: ReplyCredential], string] =
   if rng.isNil:
     return err("rng must not be nil")
 
@@ -226,7 +240,7 @@ proc createSURB*(
   # Compute alpha and shared secrets
   var (alpha_0, s) = computeAlpha(publicKeys).valueOr:
     return err("Error in alpha generation: " & error)
-  # The secrets move into the SURB, or are wiped if it cannot be built.
+  # The secrets move into the reply credential, or are wiped on failure.
   defer:
     for hopSecret in s.mitems:
       burnMem(hopSecret)
@@ -240,11 +254,9 @@ proc createSURB*(
   rng.generate(key)
 
   return ok(
-    SURB(
-      hop: hops[0],
-      header: Header.init(alpha_0, beta_0, gamma_0),
-      secret: Opt.some(move(s)),
-      key: key,
+    (
+      surb: SURB(hop: hops[0], header: Header.init(alpha_0, beta_0, gamma_0), key: key),
+      credential: ReplyCredential(identifier: id, key: key, secret: move(s)),
     )
   )
 
@@ -261,16 +273,16 @@ proc useSURB*(surb: SURB, msg: Message): SphinxPacket =
 
   return SphinxPacket.init(surb.header, delta)
 
-proc processReply*(
-    key: seq[byte], s: seq[seq[byte]], delta_prime: seq[byte]
+proc recoverReply*(
+    credential: ReplyCredential, delta_prime: seq[byte]
 ): Result[seq[byte], string] =
   var delta = delta_prime # var: independent, mutable buffer for in-place LIONESS
 
   # LIP-183 §7.3 step 1: re-apply the §6.2.1 layered LIONESS *encryption* over the
   # return-path secrets (i = L-1 downto 0), reversing each return hop's
   # decryption so that only the reply sender's initial encryption remains.
-  for i in countdown(s.len - 1, 0):
-    var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+  for i in countdown(credential.secret.len - 1, 0):
+    var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, credential.secret[i])
     defer:
       burnMem(delta_key)
 
@@ -283,7 +295,7 @@ proc processReply*(
 
   # LIP-183 §7.3 step 2: remove the reply sender's initial encryption, which used
   # the reply key k~ as the LIONESS seed (LIP-183 §6.2.2).
-  var lion = Lioness.init(MixLionessScheme, key).valueOr:
+  var lion = Lioness.init(MixLionessScheme, credential.key).valueOr:
     return err("LIONESS init error: " & $error)
   defer:
     lion.clear()

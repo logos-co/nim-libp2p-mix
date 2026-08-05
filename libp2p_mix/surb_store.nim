@@ -26,7 +26,7 @@ import chronicles, chronos, metrics
 import libp2p/utils/[heartbeat, opt]
 import nimcrypto/utils # burnMem
 import results
-import ./[mix_metrics, serialization]
+import ./[mix_metrics, serialization, sphinx]
 
 export results
 
@@ -49,8 +49,7 @@ type
   ConnCreds* = object
     igroup*: SURBIdentifierGroup
     incoming*: AsyncQueue[seq[byte]]
-    surbSecret*: serialization.Secret
-    surbKey*: serialization.Key
+    credential*: ReplyCredential
 
   SurbStore* = ref object
     creds: Table[SURBIdentifier, ConnCreds]
@@ -71,9 +70,7 @@ type
 
 proc wipe*(creds: var ConnCreds) =
   ## Make the reply keys unrecoverable (Mix Key Rotation spec §7).
-  for secret in creds.surbSecret.mitems:
-    burnMem(secret)
-  burnMem(creds.surbKey)
+  creds.credential.wipe()
 
 proc wipeAndDel(s: SurbStore, id: SURBIdentifier) =
   s.creds.withValue(id, c):

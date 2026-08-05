@@ -9,6 +9,7 @@ import libp2p_mix
 import libp2p_mix/mix_protocol
 import libp2p_mix/pool
 import libp2p_mix/serialization
+import libp2p_mix/sphinx
 
 type MockMixProtocol* = ref object of MixProtocol
   surbCallIndex: int

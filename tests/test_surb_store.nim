@@ -5,7 +5,7 @@
 
 import std/sequtils
 import chronos
-import libp2p_mix/[serialization, surb_store]
+import libp2p_mix/[serialization, sphinx, surb_store]
 import ./tools/unittest
 
 proc makeId(seed: int): SURBIdentifier =
@@ -16,8 +16,7 @@ proc makeCreds(igroup: SURBIdentifierGroup): ConnCreds =
   ConnCreds(
     igroup: igroup,
     incoming: newAsyncQueue[seq[byte]](),
-    surbSecret: @[@[byte 1, 2, 3]],
-    surbKey: @[byte 4, 5, 6],
+    credential: default(ReplyCredential),
   )
 
 suite "SURB Store":
