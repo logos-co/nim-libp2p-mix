@@ -208,7 +208,6 @@ type
     hop*: Hop
     header*: Header
     key*: Key
-    secret*: Opt[Secret]
 
 proc serializeMessageWithSURBs*(
     msg: seq[byte], surbs: seq[SURB]

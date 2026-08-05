@@ -462,9 +462,9 @@ suite "Sphinx Tests":
   test "create and use surb":
     let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()
 
-    let surb =
+    let created =
       createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
-    let packetBytes = useSURB(surb, message).serialize()
+    let packetBytes = useSURB(created.surb, message).serialize()
 
     check packetBytes.len == PacketSize
 
@@ -498,7 +498,7 @@ suite "Sphinx Tests":
 
     check processedSP3.status == Reply
 
-    let msg = processReply(surb.key, surb.secret.get(), processedSP3.delta_prime).expect(
+    let msg = recoverReply(created.credential, processedSP3.delta_prime).expect(
         "Reply processing failed"
       )
 
@@ -507,14 +507,14 @@ suite "Sphinx Tests":
   test "surb reply rejects tampered payload":
     let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()
 
-    let surb =
+    let created =
       createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
-    var packetBytes = useSURB(surb, message).serialize()
+    var packetBytes = useSURB(created.surb, message).serialize()
     check packetBytes.len == PacketSize
 
     # Flip a byte in the reply payload (delta). Routing is unaffected, so the
     # packet still reaches Reply status; the integrity-prefix check in
-    # processReply must reject it after the return-path layers are removed.
+    # recoverReply must reject it after the return-path layers are removed.
     check packetBytes.len > HeaderSize + 500
     packetBytes[HeaderSize + 500] = packetBytes[HeaderSize + 500] xor 0x01
 
@@ -534,7 +534,7 @@ suite "Sphinx Tests":
     check sp3.status == Reply
 
     # The tampered reply must be rejected by the integrity check.
-    check processReply(surb.key, surb.secret.get(), sp3.delta_prime).isErr
+    check recoverReply(created.credential, sp3.delta_prime).isErr
 
   test "create surb empty public keys":
     let (_, _, _, delay, _, _) = createDummyData()
@@ -558,8 +558,8 @@ suite "Sphinx Tests":
   test "surb sphinx process invalid mac":
     let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()
 
-    let surb =
-      createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
+    let surb = createSURB(publicKeys, delay, hops, randomI(), rng())
+      .expect("Create SURB error").surb
 
     let packetBytes = useSURB(surb, message).serialize()
 
@@ -581,8 +581,8 @@ suite "Sphinx Tests":
   test "surb sphinx process duplicate tag":
     let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()
 
-    let surb =
-      createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
+    let surb = createSURB(publicKeys, delay, hops, randomI(), rng())
+      .expect("Create SURB error").surb
 
     let packetBytes = useSURB(surb, message).serialize()
 
@@ -611,11 +611,11 @@ suite "Sphinx Tests":
         message[i] = byte(rand(256))
       let paddedMessage = addPadding(message, MessageSize)
 
-      let surb = createSURB(publicKeys, delay, hops, randomI(), rng()).expect(
+      let created = createSURB(publicKeys, delay, hops, randomI(), rng()).expect(
           "Create SURB error"
         )
 
-      let packetBytes = useSURB(surb, Message(paddedMessage)).serialize()
+      let packetBytes = useSURB(created.surb, Message(paddedMessage)).serialize()
 
       check packetBytes.len == PacketSize
 
@@ -649,8 +649,9 @@ suite "Sphinx Tests":
 
       check processedSP3.status == Reply
 
-      let msg = processReply(surb.key, surb.secret.get(), processedSP3.delta_prime)
-        .expect("Reply processing failed")
+      let msg = recoverReply(created.credential, processedSP3.delta_prime).expect(
+          "Reply processing failed"
+        )
 
       check paddedMessage == msg
 
