@@ -346,9 +346,7 @@ method handleMixMessages*(
       mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
       return
 
-    let reply = processReply(
-      connCred.surbKey, connCred.surbSecret, processedSP.delta_prime
-    ).valueOr:
+    let reply = recoverReply(connCred.credential, processedSP.delta_prime).valueOr:
       error "could not process reply", id = processedSP.id
       mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
       return
@@ -563,7 +561,9 @@ proc getMaxMessageSizeForCodec*(
 
 method buildSurb*(
     mixProto: MixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
-): Result[SURB, string] {.base, gcsafe, raises: [].} =
+): Result[tuple[surb: SURB, credential: ReplyCredential], string] {.
+    base, gcsafe, raises: []
+.} =
   var
     publicKeys: seq[FieldElement] = @[]
     hops: seq[Hop] = @[]
@@ -634,7 +634,7 @@ proc buildSurbs(
     var id: SURBIdentifier
     mixProto.rng.generate(id)
 
-    let surb = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
+    let created = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
       # Release whatever this group already registered; a partially built
       # group can never receive a usable reply.
       session.release()
@@ -643,16 +643,13 @@ proc buildSurbs(
     mixProto.surbStore.add(
       id,
       ConnCreds(
-        igroup: session.igroup,
-        incoming: incoming,
-        surbSecret: surb.secret.get(),
-        surbKey: surb.key,
+        igroup: session.igroup, incoming: incoming, credential: created.credential
       ),
     ).isOkOr:
       session.release()
       return err(error)
 
-    response.add(surb)
+    response.add(created.surb)
 
   return ok((response, Opt.some(session)))
 

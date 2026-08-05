@@ -10,6 +10,7 @@ import libp2p_mix/mix_node
 import libp2p_mix/mix_protocol
 import libp2p_mix/pool
 import libp2p_mix/serialization
+import libp2p_mix/sphinx
 
 type MockMixProtocol* = ref object of MixProtocol
   surbCallIndex: int
@@ -36,7 +37,7 @@ type MockMixProtocol* = ref object of MixProtocol
 
 method buildSurb*(
     mock: MockMixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
-): Result[SURB, string] {.gcsafe, raises: [].} =
+): Result[tuple[surb: SURB, credential: ReplyCredential], string] {.gcsafe, raises: [].} =
   # No forced paths configured or all sets consumed — fall back to random selection
   if mock.surbPeerSets.len == 0 or mock.surbCallIndex >= mock.surbPeerSets.len:
     return procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId)
