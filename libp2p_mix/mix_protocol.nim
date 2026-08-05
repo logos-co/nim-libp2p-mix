@@ -558,14 +558,18 @@ method handleMixMessages*(
   of Reply:
     trace "# Reply", id = processedSP.id
 
+    let rawReply = RawSurbReply(
+      identifier: processedSP.id, encryptedPayload: processedSP.delta_prime
+    )
+
     # Expired credentials are invisible here even if no sweep has run yet.
-    var connCred = mixProto.surbStore.get(processedSP.id).valueOr:
+    var connCred = mixProto.surbStore.get(rawReply.identifier).valueOr:
       mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
       return
     defer:
       connCred.wipe()
 
-    let reply = recoverReply(connCred.credential, processedSP.delta_prime).valueOr:
+    let reply = recoverReply(connCred.credential, rawReply).valueOr:
       error "could not process reply", id = processedSP.id
       mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
       return
