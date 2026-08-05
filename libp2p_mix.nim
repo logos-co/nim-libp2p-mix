@@ -8,6 +8,8 @@ import
   ]
 import libp2p/stream/connection
 import chronos
+from ./libp2p_mix/serialization import SURB
+from ./libp2p_mix/sphinx import ReplyCredential, RawSurbReply, identifier, recoverReply
 
 export toConnection
 export MixProtocolID
@@ -17,6 +19,7 @@ export get
 export `new`
 export init
 export getMaxMessageSizeForCodec
+export createSurb
 export MixDestination
 export MixParameters
 export destReadBehaviorCb
@@ -24,6 +27,11 @@ export DestReadBehavior
 export registerDestReadBehavior
 export localMixPubInfo
 export setLocalMultiAddr
+export SURB
+export ReplyCredential
+export RawSurbReply
+export identifier
+export recoverReply
 
 # Spam protection exports
 export SpamProtection

@@ -743,6 +743,15 @@ proc forwardToAddr*(T: typedesc[MixDestination], p: PeerId, address: MultiAddres
 proc init*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
   MixDestination.forwardToAddr(p, address)
 
+proc createSurb*(
+    mixProto: MixProtocol, destination: MixDestination
+): Result[tuple[surb: SURB, credential: ReplyCredential], string] =
+  ## Create a reply block that returns to this Mix node. The destination is
+  ## excluded from the independently selected return path.
+  var id: SURBIdentifier
+  mixProto.rng.generate(id)
+  mixProto.buildSurb(id, destination.peerId, destination.peerId)
+
 proc anonymizeLocalProtocolSend*(
     mixProto: MixProtocol,
     incoming: AsyncQueue[seq[byte]],
