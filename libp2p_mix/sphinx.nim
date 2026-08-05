@@ -171,10 +171,15 @@ proc computeDelta(s: seq[seq[byte]], msg: Message): Result[seq[byte], string] =
 
   return ok(delta)
 
-type ReplyCredential* = object
-  identifier: SURBIdentifier
-  key: serialization.Key
-  secret: serialization.Secret
+type
+  ReplyCredential* = object
+    identifier: SURBIdentifier
+    key: serialization.Key
+    secret: serialization.Secret
+
+  RawSurbReply* = object
+    identifier*: SURBIdentifier
+    encryptedPayload*: seq[byte]
 
 func identifier*(credential: ReplyCredential): SURBIdentifier {.inline.} =
   credential.identifier
@@ -225,9 +230,13 @@ proc useSURB*(surb: SURB, msg: Message): SphinxPacket =
   return SphinxPacket.init(surb.header, delta)
 
 proc recoverReply*(
-    credential: ReplyCredential, delta_prime: seq[byte]
+    credential: ReplyCredential, reply: RawSurbReply
 ): Result[seq[byte], string] =
-  var delta = delta_prime # var: independent, mutable buffer for in-place LIONESS
+  if credential.identifier != reply.identifier:
+    return err("reply identifier does not match credential")
+
+  # Independent, mutable buffer for in-place LIONESS.
+  var delta = @(reply.encryptedPayload)
 
   # LIP-183 §7.3 step 1: re-apply the §6.2.1 layered LIONESS *encryption* over the
   # return-path secrets (i = L-1 downto 0), reversing each return hop's

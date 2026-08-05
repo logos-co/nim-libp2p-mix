@@ -498,9 +498,19 @@ suite "Sphinx Tests":
 
     check processedSP3.status == Reply
 
-    let msg = recoverReply(created.credential, processedSP3.delta_prime).expect(
-        "Reply processing failed"
-      )
+    let rawReply = RawSurbReply(
+      identifier: created.credential.identifier,
+      encryptedPayload: processedSP3.delta_prime,
+    )
+
+    var wrongId = rawReply.identifier
+    wrongId[0] = wrongId[0] xor 0x01
+    check recoverReply(
+      created.credential,
+      RawSurbReply(identifier: wrongId, encryptedPayload: rawReply.encryptedPayload),
+    ).isErr
+
+    let msg = recoverReply(created.credential, rawReply).expect("Reply processing failed")
 
     check msg == message
 
@@ -534,7 +544,12 @@ suite "Sphinx Tests":
     check sp3.status == Reply
 
     # The tampered reply must be rejected by the integrity check.
-    check recoverReply(created.credential, sp3.delta_prime).isErr
+    check recoverReply(
+      created.credential,
+      RawSurbReply(
+        identifier: created.credential.identifier, encryptedPayload: sp3.delta_prime
+      ),
+    ).isErr
 
   test "create surb empty public keys":
     let (_, _, _, delay, _, _) = createDummyData()
@@ -649,9 +664,13 @@ suite "Sphinx Tests":
 
       check processedSP3.status == Reply
 
-      let msg = recoverReply(created.credential, processedSP3.delta_prime).expect(
-          "Reply processing failed"
-        )
+      let msg = recoverReply(
+        created.credential,
+        RawSurbReply(
+          identifier: created.credential.identifier,
+          encryptedPayload: processedSP3.delta_prime,
+        ),
+      ).expect("Reply processing failed")
 
       check paddedMessage == msg
 
