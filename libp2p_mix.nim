@@ -20,6 +20,7 @@ export `new`
 export init
 export getMaxMessageSizeForCodec
 export createSurb
+export sendWithSurb
 export MixDestination
 export MixParameters
 export destReadBehaviorCb
