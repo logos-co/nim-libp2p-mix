@@ -16,6 +16,7 @@ export MixProtocolID
 export MixProtocol
 export MixDelivery
 export MixDeliveryHandler
+export RawSurbReplyDisposition
 export RawSurbReplyHandler
 
 export get
