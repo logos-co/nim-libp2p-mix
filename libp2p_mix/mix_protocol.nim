@@ -422,34 +422,13 @@ method handleMixMessages*(
       identifier: processedSP.id, encryptedPayload: processedSP.delta_prime
     )
 
-    # A registered consumer has sole ownership of raw replies. Keep a local
+    # The registered consumer has sole ownership of raw replies. Keep a local
     # copy so unregistering concurrently only affects subsequent deliveries.
     let rawReplyHandler = mixProto.rawSurbReplyHandler
-    if not rawReplyHandler.isNil:
-      await rawReplyHandler(rawReply)
+    if rawReplyHandler.isNil:
+      trace "Dropping raw SURB reply: no handler registered", id = processedSP.id
+      mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_HANDLER"])
       return
-
-    # Expired credentials are invisible here even if no sweep has run yet.
-    let connCred = mixProto.surbStore.get(rawReply.identifier).valueOr:
-      mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
-      return
-
-    let payload = recoverReply(connCred.credential, rawReply).valueOr:
-      case error.kind
-      of ReplyRecoveryErrorKind.SphinxRecoveryFailed:
-        error "could not recover Sphinx reply", id = processedSP.id, err = error.message
-        mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
-      of ReplyRecoveryErrorKind.PayloadDecodingFailed:
-        # Cryptographic recovery succeeded, so every redundant reply contains
-        # the same malformed payload and the group cannot provide a valid copy.
-        mixProto.surbStore.release(connCred.igroup)
-        error "could not decode reply payload", id = processedSP.id, err = error.message
-        mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
-      return
-
-    # The exit replies via every SURB in the group, so N replies race; the
-    # first valid reply invalidates the rest.
-    mixProto.surbStore.release(connCred.igroup)
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Reply",
@@ -459,7 +438,7 @@ method handleMixMessages*(
         Opt.some(fromPeerId),
         Opt.none(PeerId)
 
-    await connCred.incoming.put(payload)
+    await rawReplyHandler(rawReply)
   of Intermediate:
     trace "Intermediate node processing",
       peerId = mixProto.mixNodeInfo.peerId, multiAddr = mixProto.mixNodeInfo.multiAddr
