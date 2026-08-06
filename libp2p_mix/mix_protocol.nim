@@ -48,7 +48,13 @@ type
     async: (raises: [CancelledError])
   .}
 
-  RawSurbReplyHandler* = proc(reply: RawSurbReply): Future[void] {.
+  RawSurbReplyDisposition* {.pure.} = enum
+    Unhandled
+    Handled
+
+  RawSurbReplyHandler* = proc(
+    reply: RawSurbReply
+  ): Future[RawSurbReplyDisposition] {.
     async: (raises: [CancelledError])
   .}
 
@@ -422,13 +428,35 @@ method handleMixMessages*(
       identifier: processedSP.id, encryptedPayload: processedSP.delta_prime
     )
 
-    # The registered consumer has sole ownership of raw replies. Keep a local
-    # copy so unregistering concurrently only affects subsequent deliveries.
+    # Keep a local copy so unregistering concurrently only affects subsequent
+    # deliveries. A handler owns the reply only when it recognizes its id.
     let rawReplyHandler = mixProto.rawSurbReplyHandler
-    if rawReplyHandler.isNil:
-      trace "Dropping raw SURB reply: no handler registered", id = processedSP.id
-      mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_HANDLER"])
+    if not rawReplyHandler.isNil and
+        (await rawReplyHandler(rawReply)) == RawSurbReplyDisposition.Handled:
       return
+
+    # No plug-in recognized this reply, so preserve the embedded connection path.
+    # Expired credentials are invisible here even if no sweep has run yet.
+    let connCred = mixProto.surbStore.get(rawReply.identifier).valueOr:
+      mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
+      return
+
+    let payload = recoverReply(connCred.credential, rawReply).valueOr:
+      case error.kind
+      of ReplyRecoveryErrorKind.SphinxRecoveryFailed:
+        error "could not recover Sphinx reply", id = processedSP.id, err = error.message
+        mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
+      of ReplyRecoveryErrorKind.PayloadDecodingFailed:
+        # Cryptographic recovery succeeded, so every redundant reply contains
+        # the same malformed payload and the group cannot provide a valid copy.
+        mixProto.surbStore.release(connCred.igroup)
+        error "could not decode reply payload", id = processedSP.id, err = error.message
+        mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
+      return
+
+    # The exit replies via every SURB in the group, so N replies race; the
+    # first valid reply invalidates the rest.
+    mixProto.surbStore.release(connCred.igroup)
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Reply",
@@ -438,7 +466,7 @@ method handleMixMessages*(
         Opt.some(fromPeerId),
         Opt.none(PeerId)
 
-    await rawReplyHandler(rawReply)
+    await connCred.incoming.put(payload)
   of Intermediate:
     trace "Intermediate node processing",
       peerId = mixProto.mixNodeInfo.peerId, multiAddr = mixProto.mixNodeInfo.multiAddr
