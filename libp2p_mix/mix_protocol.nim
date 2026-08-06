@@ -58,42 +58,63 @@ func isCoverTraffic*(msg: MixMessage): bool =
 ## network composed of participating libp2p nodes, known as mix nodes. Each message is
 ## routed independently in a stateless manner, allowing other libp2p protocols to selectively
 ## anonymize messages without modifying their core protocol behavior.
-type MixProtocol* = ref object of LPProtocol
-  mixNodeInfo: MixNodeInfo
-  switch*: Switch
-  nodePool*: MixNodePool
-  tagManager: TagManager
-  exitLayer: ExitLayer
-  rng: Rng
-  surbStore: SurbStore
-    ## Reply credentials for SURBs this node has issued. Expires entries whose
-    ## reply never arrives; see surb_store.nim.
-  destReadBehaviors: TableRef[string, DestReadBehavior]
-  connPool: Table[PeerId, Connection]
-  dialing: Table[PeerId, tuple[dial: HopDial, addrs: seq[MultiAddress]]]
-    ## The dial in flight for each hop. Concurrent callers of getConn await
-    ## the same dial and share its result.
-    ## `addrs` are the addresses that the dial uses.
-    ## The library dials through the switch of libp2p.
-    ## The switch has one dial lock and one set of connections for each peer.
-    ## So a second dial of the peer at other addresses waits for the first dial.
-    ## A forward and a reply dial the address that the sender of the packet gave.
-    ## So a caller can wait for a dial of an address that it did not select.
-  backedOffUntil: Table[PeerId, Moment]
-    ## The moment until which a first hop that failed a dial is not the first hop.
-  hopBackoff: Duration
-  poolSizeLoop: Future[void] ## The timer that sets `mix_pool_size`.
-  spamProtection: Opt[SpamProtection]
-  delayStrategy: DelayStrategy
-  coverTraffic*: Opt[CoverTraffic]
-  keyRing: Opt[MixKeyRing]
-  ongoingMixMessages: Table[uint64, Future[void]]
-    ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
-    ## removal on completion is O(1).
-  nextMixMessageId: uint64
-  ongoingLocalSends: Table[uint64, FutureBase]
-    ## In-flight local sends, cancelled on stop.
-  nextLocalSendId: uint64
+type
+  RawSurbReplyHandler* = proc(reply: RawSurbReply): Future[void] {.
+    async: (raises: [CancelledError])
+  .}
+
+  MixProtocol* = ref object of LPProtocol
+    mixNodeInfo: MixNodeInfo
+    switch*: Switch
+    nodePool*: MixNodePool
+    tagManager: TagManager
+    exitLayer: ExitLayer
+    rng: Rng
+    surbStore: SurbStore
+      ## Reply credentials for SURBs this node has issued. Expires entries whose
+      ## reply never arrives; see surb_store.nim.
+    rawSurbReplyHandler: RawSurbReplyHandler
+    destReadBehaviors: TableRef[string, DestReadBehavior]
+    connPool: Table[PeerId, Connection]
+    dialing: Table[PeerId, tuple[dial: HopDial, addrs: seq[MultiAddress]]]
+      ## The dial in flight for each hop. Concurrent callers of getConn await
+      ## the same dial and share its result.
+      ## `addrs` are the addresses that the dial uses.
+      ## The library dials through the switch of libp2p.
+      ## The switch has one dial lock and one set of connections for each peer.
+      ## So a second dial of the peer at other addresses waits for the first dial.
+      ## A forward and a reply dial the address that the sender of the packet gave.
+      ## So a caller can wait for a dial of an address that it did not select.
+    backedOffUntil: Table[PeerId, Moment]
+      ## The moment until which a first hop that failed a dial is not the first hop.
+    hopBackoff: Duration
+    poolSizeLoop: Future[void] ## The timer that sets `mix_pool_size`.
+    spamProtection: Opt[SpamProtection]
+    delayStrategy: DelayStrategy
+    coverTraffic*: Opt[CoverTraffic]
+    keyRing: Opt[MixKeyRing]
+    ongoingMixMessages: Table[uint64, Future[void]]
+      ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
+      ## removal on completion is O(1).
+    nextMixMessageId: uint64
+    ongoingLocalSends: Table[uint64, FutureBase]
+      ## In-flight local sends, cancelled on stop.
+    nextLocalSendId: uint64
+
+proc registerRawSurbReplyHandler*(
+    mixProto: MixProtocol, handler: RawSurbReplyHandler
+): Result[void, string] =
+  if handler.isNil:
+    return err("raw SURB reply handler must not be nil")
+
+  if not mixProto.rawSurbReplyHandler.isNil:
+    return err("raw SURB reply handler is already registered")
+
+  mixProto.rawSurbReplyHandler = handler
+  ok()
+
+proc unregisterRawSurbReplyHandler*(mixProto: MixProtocol) =
+  mixProto.rawSurbReplyHandler = nil
 
 proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
   return mixProto.destReadBehaviors.hasKey(codec)
@@ -601,6 +622,13 @@ method handleMixMessages*(
     let rawReply = RawSurbReply(
       identifier: processedSP.id, encryptedPayload: processedSP.delta_prime
     )
+
+    # A registered consumer has sole ownership of raw replies. Keep a local
+    # copy so unregistering concurrently only affects subsequent deliveries.
+    let rawReplyHandler = mixProto.rawSurbReplyHandler
+    if not rawReplyHandler.isNil:
+      await rawReplyHandler(rawReply)
+      return
 
     # Expired credentials are invisible here even if no sweep has run yet.
     var connCred = mixProto.surbStore.get(rawReply.identifier).valueOr:
