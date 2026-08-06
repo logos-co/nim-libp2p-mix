@@ -9,7 +9,7 @@ import
 import libp2p/stream/connection
 import chronos
 from ./libp2p_mix/serialization import SURB
-from ./libp2p_mix/sphinx import ReplyCredential, RawSurbReply, identifier, recoverReply
+from ./libp2p_mix/sphinx import ReplyCredential, RawSurbReply, identifier
 
 export toConnection
 export MixProtocolID
@@ -32,6 +32,8 @@ export ReplyCredential
 export RawSurbReply
 export identifier
 export recoverReply
+export ReplyRecoveryErrorKind
+export ReplyRecoveryError
 
 # Spam protection exports
 export SpamProtection

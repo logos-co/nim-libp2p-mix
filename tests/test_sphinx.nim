@@ -505,12 +505,14 @@ suite "Sphinx Tests":
 
     var wrongId = rawReply.identifier
     wrongId[0] = wrongId[0] xor 0x01
-    check recoverReply(
+    check recoverSphinxReply(
       created.credential,
       RawSurbReply(identifier: wrongId, encryptedPayload: rawReply.encryptedPayload),
     ).isErr
 
-    let msg = recoverReply(created.credential, rawReply).expect("Reply processing failed")
+    let msg = recoverSphinxReply(created.credential, rawReply).expect(
+        "Reply processing failed"
+      )
 
     check msg == message
 
@@ -524,7 +526,7 @@ suite "Sphinx Tests":
 
     # Flip a byte in the reply payload (delta). Routing is unaffected, so the
     # packet still reaches Reply status; the integrity-prefix check in
-    # recoverReply must reject it after the return-path layers are removed.
+    # recoverSphinxReply must reject it after the return-path layers are removed.
     check packetBytes.len > HeaderSize + 500
     packetBytes[HeaderSize + 500] = packetBytes[HeaderSize + 500] xor 0x01
 
@@ -544,7 +546,7 @@ suite "Sphinx Tests":
     check sp3.status == Reply
 
     # The tampered reply must be rejected by the integrity check.
-    check recoverReply(
+    check recoverSphinxReply(
       created.credential,
       RawSurbReply(
         identifier: created.credential.identifier, encryptedPayload: sp3.delta_prime
@@ -664,7 +666,7 @@ suite "Sphinx Tests":
 
       check processedSP3.status == Reply
 
-      let msg = recoverReply(
+      let msg = recoverSphinxReply(
         created.credential,
         RawSurbReply(
           identifier: created.credential.identifier,

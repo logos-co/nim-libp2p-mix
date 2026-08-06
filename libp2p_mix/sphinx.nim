@@ -229,7 +229,7 @@ proc useSURB*(surb: SURB, msg: Message): SphinxPacket =
 
   return SphinxPacket.init(surb.header, delta)
 
-proc recoverReply*(
+proc recoverSphinxReply*(
     credential: ReplyCredential, reply: RawSurbReply
 ): Result[seq[byte], string] =
   if credential.identifier != reply.identifier:
