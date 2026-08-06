@@ -83,6 +83,5 @@ proc readExactly*(nBytes: int): DestReadBehavior =
 
   DestReadBehavior(callback: callback, usesLengthPrefix: false)
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  export exitNode
-  export forwardToAddr
+export exitNode
+export forwardToAddr
