@@ -29,8 +29,7 @@ let cxxRuntime =
 
 let cfg =
   " --styleCheck:usages --styleCheck:error" & (if verbose: "" else: " --verbosity:0") &
-  " --skipUserCfg -f --threads:on --opt:speed" &
-  " -d:libp2p_mix_experimental_exit_is_dest" & cxxRuntime
+  " --skipUserCfg -f --threads:on --opt:speed" & cxxRuntime
 
 proc runTest(filename: string, moreoptions: string = "") =
   var compileCmd = nimc & " " & lang & " " & cfg & " " & flags

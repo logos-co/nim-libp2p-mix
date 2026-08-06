@@ -23,9 +23,6 @@ when defined(enable_mix_benchmarks):
 logScope:
   topics = "mix_protocol"
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  {.warning: "experimental support for mix exit == destination is enabled!".}
-
 const MixProtocolID* = "/mix/1.0.0"
 
 const CoverTrafficCodec* = "/mix/cover/1.0.0"
@@ -411,18 +408,17 @@ method handleMixMessages*(
         ct.onCoverReceived()
       return
 
-    when defined(libp2p_mix_experimental_exit_is_dest):
-      if processedSP.destination == Hop():
-        # Keep a local copy so unregistering concurrently only affects later
-        # deliveries. A registered service owns the payload in its entirety;
-        # the legacy SURB envelope is not interpreted on this path.
-        let deliveryHandler = mixProto.deliveryHandlers.getOrDefault(deserialized.codec)
-        if not deliveryHandler.isNil:
-          await deliveryHandler(
-            MixDelivery(service: deserialized.codec, payload: deserialized.message)
-          )
-          mix_messages_forwarded.inc(labelValues = ["Exit"])
-          return
+    if processedSP.destination == Hop():
+      # Keep a local copy so unregistering concurrently only affects later
+      # deliveries. A registered service owns the payload in its entirety;
+      # the legacy SURB envelope is not interpreted on this path.
+      let deliveryHandler = mixProto.deliveryHandlers.getOrDefault(deserialized.codec)
+      if not deliveryHandler.isNil:
+        await deliveryHandler(
+          MixDelivery(service: deserialized.codec, payload: deserialized.message)
+        )
+        mix_messages_forwarded.inc(labelValues = ["Exit"])
+        return
 
     let (surbs, message) = extractSURBs(deserialized.message).valueOr:
       error "Extracting surbs from payload failed", err = error
@@ -938,9 +934,8 @@ proc `$`*(d: MixDestination): string =
   of MixNode:
     return "MixDestination[MixNode](" & $d.peerId & ")"
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  proc exitNode*(T: typedesc[MixDestination], p: PeerId): T =
-    T(kind: DestinationType.MixNode, peerId: p)
+proc exitNode*(T: typedesc[MixDestination], p: PeerId): T =
+  T(kind: DestinationType.MixNode, peerId: p)
 
 proc forwardToAddr*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
   T(kind: DestinationType.ForwardAddr, peerId: p, address: address)
@@ -971,9 +966,6 @@ proc sendInternal(
   ## On success returns a handle to the reply credentials registered for this
   ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
   ## promptly when its connection closes.
-  when not defined(libp2p_mix_experimental_exit_is_dest):
-    doAssert destination.kind == ForwardAddr, "Only exit != destination is allowed"
-
   mix_messages_recvd.inc(labelValues = ["Entry"])
   let capacity = getMaxMessageSizeForCodec(codec, numSurbs).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
@@ -1204,21 +1196,18 @@ proc send*(
   if service.len == 0:
     return err("Mix service must not be empty")
 
-  when defined(libp2p_mix_experimental_exit_is_dest):
-    if destination.kind != MixNode:
-      return err("Mix service delivery requires exit == destination")
+  if destination.kind != MixNode:
+    return err("Mix service delivery requires exit == destination")
 
-    try:
-      (await mixProto.sendInternal(
-        nil, move(payload), service, destination, 0, false
-      )).isOkOr:
-        return err(error)
-    except LPStreamError as exc:
-      return err("could not send Mix service payload: " & exc.msg)
+  try:
+    (await mixProto.sendInternal(
+      nil, move(payload), service, destination, 0, false
+    )).isOkOr:
+      return err(error)
+  except LPStreamError as exc:
+    return err("could not send Mix service payload: " & exc.msg)
 
-    ok()
-  else:
-    err("Mix service delivery requires exit == destination support")
+  ok()
 
 proc sendWithSurb*(
     mixProto: MixProtocol, surb: sink SURB, payload: sink seq[byte]
