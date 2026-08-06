@@ -39,24 +39,45 @@ func isCoverTraffic*(msg: MixMessage): bool =
 ## network composed of participating libp2p nodes, known as mix nodes. Each message is
 ## routed independently in a stateless manner, allowing other libp2p protocols to selectively
 ## anonymize messages without modifying their core protocol behavior.
-type MixProtocol* = ref object of LPProtocol
-  mixNodeInfo: MixNodeInfo
-  switch*: Switch
-  nodePool*: MixNodePool
-  tagManager: TagManager
-  exitLayer: ExitLayer
-  rng: Rng
-  surbStore: SurbStore
-    ## Reply credentials for SURBs this node has issued. Expires entries whose
-    ## reply never arrives; see surb_store.nim.
-  destReadBehaviors: TableRef[string, DestReadBehavior]
-  connPool: Table[PeerId, Connection]
-  spamProtection: Opt[SpamProtection]
-  delayStrategy: DelayStrategy
-  coverTraffic*: Opt[CoverTraffic]
-  ongoingMixMessages: seq[Future[void]]
-    ## Tracks all in-flight handleMixMessages futures so they can be
-    ## cancelled on stop and waited for during teardown.
+type
+  RawSurbReplyHandler* = proc(reply: RawSurbReply): Future[void] {.
+    async: (raises: [CancelledError])
+  .}
+
+  MixProtocol* = ref object of LPProtocol
+    mixNodeInfo: MixNodeInfo
+    switch*: Switch
+    nodePool*: MixNodePool
+    tagManager: TagManager
+    exitLayer: ExitLayer
+    rng: Rng
+    surbStore: SurbStore
+      ## Reply credentials for SURBs this node has issued. Expires entries whose
+      ## reply never arrives; see surb_store.nim.
+    rawSurbReplyHandler: RawSurbReplyHandler
+    destReadBehaviors: TableRef[string, DestReadBehavior]
+    connPool: Table[PeerId, Connection]
+    spamProtection: Opt[SpamProtection]
+    delayStrategy: DelayStrategy
+    coverTraffic*: Opt[CoverTraffic]
+    ongoingMixMessages: seq[Future[void]]
+      ## Tracks all in-flight handleMixMessages futures so they can be
+      ## cancelled on stop and waited for during teardown.
+
+proc registerRawSurbReplyHandler*(
+    mixProto: MixProtocol, handler: RawSurbReplyHandler
+): Result[void, string] =
+  if handler.isNil:
+    return err("raw SURB reply handler must not be nil")
+
+  if not mixProto.rawSurbReplyHandler.isNil:
+    return err("raw SURB reply handler is already registered")
+
+  mixProto.rawSurbReplyHandler = handler
+  ok()
+
+proc unregisterRawSurbReplyHandler*(mixProto: MixProtocol) =
+  mixProto.rawSurbReplyHandler = nil
 
 proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
   return mixProto.destReadBehaviors.hasKey(codec)
@@ -360,6 +381,13 @@ method handleMixMessages*(
     let rawReply = RawSurbReply(
       identifier: processedSP.id, encryptedPayload: processedSP.delta_prime
     )
+
+    # A registered consumer has sole ownership of raw replies. Keep a local
+    # copy so unregistering concurrently only affects subsequent deliveries.
+    let rawReplyHandler = mixProto.rawSurbReplyHandler
+    if not rawReplyHandler.isNil:
+      await rawReplyHandler(rawReply)
+      return
 
     # Expired credentials are invisible here even if no sweep has run yet.
     let connCred = mixProto.surbStore.get(rawReply.identifier).valueOr:
