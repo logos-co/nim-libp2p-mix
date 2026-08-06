@@ -1388,6 +1388,14 @@ proc sendSurbReply*(
     return err("could not send reply: " & error)
   return ok()
 
+proc sendWithSurb*(
+    mixProto: MixProtocol, surb: sink SURB, payload: sink seq[byte]
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Send one opaque payload through a caller-supplied SURB. The caller must
+  ## treat the SURB as consumed once it invokes this operation, including when
+  ## the result is an error.
+  return await mixProto.sendSurbReply(surb, move(payload))
+
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]
 ): Result[seq[MixHop], string] {.raises: [].} =
@@ -1718,9 +1726,9 @@ proc init*(
     # `message` is passed by value (the closure signature is fixed by
     # `ExitLayer.init`'s callback type). A full sink-through chain
     # would require updating the callback type in libp2p_mix.
-    # For now: sendSurbReply() takes `sink seq[byte]` and `move()`s into
+    # For now: sendWithSurb() takes `sink seq[byte]` and `move()`s into
     # buildMessage internally — the optimization stops at this boundary.
-    (await mixProto.sendSurbReply(surb, message)).isOkOr:
+    (await mixProto.sendWithSurb(surb, message)).isOkOr:
       error "could not send reply", err = error
 
   mixProto.exitLayer =
