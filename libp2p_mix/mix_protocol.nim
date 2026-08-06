@@ -59,6 +59,14 @@ func isCoverTraffic*(msg: MixMessage): bool =
 ## routed independently in a stateless manner, allowing other libp2p protocols to selectively
 ## anonymize messages without modifying their core protocol behavior.
 type
+  MixDelivery* = object
+    service*: string
+    payload*: seq[byte]
+
+  MixDeliveryHandler* = proc(delivery: MixDelivery): Future[void] {.
+    async: (raises: [CancelledError])
+  .}
+
   RawSurbReplyHandler* = proc(reply: RawSurbReply): Future[void] {.
     async: (raises: [CancelledError])
   .}
@@ -73,6 +81,7 @@ type
     surbStore: SurbStore
       ## Reply credentials for SURBs this node has issued. Expires entries whose
       ## reply never arrives; see surb_store.nim.
+    deliveryHandlers: Table[string, MixDeliveryHandler]
     rawSurbReplyHandler: RawSurbReplyHandler
     destReadBehaviors: TableRef[string, DestReadBehavior]
     connPool: Table[PeerId, Connection]
@@ -100,6 +109,24 @@ type
     ongoingLocalSends: Table[uint64, FutureBase]
       ## In-flight local sends, cancelled on stop.
     nextLocalSendId: uint64
+
+proc registerMixDeliveryHandler*(
+    mixProto: MixProtocol, service: string, handler: MixDeliveryHandler
+): Result[void, string] =
+  if service.len == 0:
+    return err("Mix delivery service must not be empty")
+
+  if handler.isNil:
+    return err("Mix delivery handler must not be nil")
+
+  if mixProto.deliveryHandlers.hasKey(service):
+    return err("Mix delivery handler is already registered for service: " & service)
+
+  mixProto.deliveryHandlers[service] = handler
+  ok()
+
+proc unregisterMixDeliveryHandler*(mixProto: MixProtocol, service: string) =
+  mixProto.deliveryHandlers.del(service)
 
 proc registerRawSurbReplyHandler*(
     mixProto: MixProtocol, handler: RawSurbReplyHandler
@@ -594,6 +621,19 @@ method handleMixMessages*(
       mixProto.coverTraffic.withValue(ct):
         ct.onCoverReceived()
       return
+
+    when defined(libp2p_mix_experimental_exit_is_dest):
+      if processedSP.destination == Hop():
+        # Keep a local copy so unregistering concurrently only affects later
+        # deliveries. A registered service owns the payload in its entirety;
+        # the legacy SURB envelope is not interpreted on this path.
+        let deliveryHandler = mixProto.deliveryHandlers.getOrDefault(deserialized.codec)
+        if not deliveryHandler.isNil:
+          await deliveryHandler(
+            MixDelivery(service: deserialized.codec, payload: deserialized.message)
+          )
+          mix_messages_forwarded.inc(labelValues = ["Exit"])
+          return
 
     let (surbs, message) = extractSURBs(deserialized.message).valueOr:
       error "Extracting surbs from payload failed", err = error
@@ -1698,6 +1738,7 @@ proc init*(
   mixProto.tagManager = tagManager
   mixProto.keyRing = keyRing
   mixProto.surbStore = store
+  mixProto.deliveryHandlers = initTable[string, MixDeliveryHandler]()
   mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
 
   mixProto.spamProtection = spamProtection

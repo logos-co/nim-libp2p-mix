@@ -14,6 +14,8 @@ from ./libp2p_mix/sphinx import ReplyCredential, RawSurbReply, identifier
 export toConnection
 export MixProtocolID
 export MixProtocol
+export MixDelivery
+export MixDeliveryHandler
 export RawSurbReplyHandler
 
 export get
@@ -22,6 +24,8 @@ export init
 export getMaxMessageSizeForCodec
 export createSurb
 export sendWithSurb
+export registerMixDeliveryHandler
+export unregisterMixDeliveryHandler
 export registerRawSurbReplyHandler
 export unregisterRawSurbReplyHandler
 export MixDestination
