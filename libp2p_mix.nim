@@ -22,6 +22,7 @@ export get
 export `new`
 export init
 export getMaxMessageSizeForCodec
+export send
 export createSurb
 export sendWithSurb
 export registerMixDeliveryHandler
