@@ -950,13 +950,14 @@ proc createSurb*(
   mixProto.rng.generate(id)
   mixProto.buildSurb(id, destination.peerId, destination.peerId)
 
-proc anonymizeLocalProtocolSend*(
+proc sendInternal(
     mixProto: MixProtocol,
     incoming: AsyncQueue[seq[byte]],
     msg: sink seq[byte],
     codec: string,
     destination: MixDestination,
     numSurbs: uint8,
+    useLegacySurbEnvelope: bool,
 ): Future[Result[Opt[SurbSession], string]] {.
     async: (raises: [CancelledError, LPStreamError])
 .} =
@@ -1080,10 +1081,14 @@ proc anonymizeLocalProtocolSend*(
     else:
       Hop()
 
-  var prepared = mixProto.prepareMsgWithSurbs(
-    incoming, move(msg), numSurbs, destination.peerId, exitPeerId
-  ).valueOr:
-    return err(fmt"Could not prepend SURBs: {error}")
+  var prepared =
+    if useLegacySurbEnvelope:
+      mixProto.prepareMsgWithSurbs(
+        incoming, move(msg), numSurbs, destination.peerId, exitPeerId
+      ).valueOr:
+        return err(fmt"Could not prepend SURBs: {error}")
+    else:
+      (msg: move(msg), session: Opt.none(SurbSession))
 
   let session = prepared.session
 
@@ -1164,6 +1169,49 @@ proc sendSurbReply*(
         ct.slotPool.unclaimSlot(claimEpoch)
     return err("could not send reply: " & error.msg)
   return ok()
+
+proc anonymizeLocalProtocolSend*(
+    mixProto: MixProtocol,
+    incoming: AsyncQueue[seq[byte]],
+    msg: sink seq[byte],
+    codec: string,
+    destination: MixDestination,
+    numSurbs: uint8,
+): Future[Result[Opt[SurbSession], string]] {.
+    async: (raises: [CancelledError, LPStreamError])
+.} =
+  ## Legacy request/reply send. New message-oriented consumers should use
+  ## `send`, supplying and owning their SURBs separately.
+  await mixProto.sendInternal(
+    incoming, move(msg), codec, destination, numSurbs, true
+  )
+
+proc send*(
+    mixProto: MixProtocol,
+    destination: MixDestination,
+    service: string,
+    payload: sink seq[byte],
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Send one opaque payload to a service at a Mix destination. This operation
+  ## creates no reply credentials and applies no legacy SURB envelope.
+  if service.len == 0:
+    return err("Mix service must not be empty")
+
+  when defined(libp2p_mix_experimental_exit_is_dest):
+    if destination.kind != MixNode:
+      return err("Mix service delivery requires exit == destination")
+
+    try:
+      (await mixProto.sendInternal(
+        nil, move(payload), service, destination, 0, false
+      )).isOkOr:
+        return err(error)
+    except LPStreamError as exc:
+      return err("could not send Mix service payload: " & exc.msg)
+
+    ok()
+  else:
+    err("Mix service delivery requires exit == destination support")
 
 proc sendWithSurb*(
     mixProto: MixProtocol, surb: sink SURB, payload: sink seq[byte]
