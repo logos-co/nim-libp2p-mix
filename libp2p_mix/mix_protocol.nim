@@ -453,6 +453,46 @@ proc refundCancelledHold(
     else:
       mixProto.refundUnwritten(claimEpoch)
 
+type
+  ReplyRecoveryErrorKind* {.pure.} = enum
+    SphinxRecoveryFailed
+    PayloadDecodingFailed
+
+  ReplyRecoveryError* = object
+    kind*: ReplyRecoveryErrorKind
+    message*: string
+
+proc decodeReplyPayload(recovered: seq[byte]): Result[seq[byte], string] =
+  let unpadded = removePadding(recovered).valueOr:
+    return err("invalid reply padding: " & error)
+
+  let mixMessage = MixMessage.deserialize(unpadded).valueOr:
+    return err("invalid reply message: " & error)
+
+  if mixMessage.codec.len > 0:
+    return err("unexpected codec in SURB reply")
+
+  ok(mixMessage.message)
+
+proc recoverReply*(
+    credential: ReplyCredential, reply: RawSurbReply
+): Result[seq[byte], ReplyRecoveryError] =
+  let recovered = recoverSphinxReply(credential, reply).valueOr:
+    return err(
+      ReplyRecoveryError(
+        kind: ReplyRecoveryErrorKind.SphinxRecoveryFailed, message: error
+      )
+    )
+
+  let payload = decodeReplyPayload(recovered).valueOr:
+    return err(
+      ReplyRecoveryError(
+        kind: ReplyRecoveryErrorKind.PayloadDecodingFailed, message: error
+      )
+    )
+
+  ok(payload)
+
 method handleMixMessages*(
     mixProto: MixProtocol,
     fromPeerId: PeerId,
@@ -569,23 +609,20 @@ method handleMixMessages*(
     defer:
       connCred.wipe()
 
-    let reply = recoverReply(connCred.credential, rawReply).valueOr:
-      error "could not process reply", id = processedSP.id
-      mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
+    let payload = recoverReply(connCred.credential, rawReply).valueOr:
+      case error.kind
+      of ReplyRecoveryErrorKind.SphinxRecoveryFailed:
+        error "could not recover Sphinx reply", id = processedSP.id, err = error.message
+        mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
+      of ReplyRecoveryErrorKind.PayloadDecodingFailed:
+        # Consume only this malformed reply; other SURBs are independent.
+        mixProto.surbStore.release(processedSP.id)
+        error "could not decode reply payload", id = processedSP.id, err = error.message
+        mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
       return
 
     # Each SURB is single-use; other blocks can still deliver their replies.
     mixProto.surbStore.release(processedSP.id)
-
-    let unpaddedMsg = removePadding(reply).valueOr:
-      error "Unpadding message failed", err = error
-      mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
-      return
-
-    let deserialized = MixMessage.deserialize(unpaddedMsg).valueOr:
-      error "Deserialization failed", err = error
-      mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
-      return
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Reply",
@@ -595,7 +632,7 @@ method handleMixMessages*(
         Opt.some(fromPeerId),
         Opt.none(PeerId)
 
-    await connCred.incoming.put(deserialized.message)
+    await connCred.incoming.put(payload)
   of Intermediate:
     trace "Intermediate node processing",
       peerId = mixProto.mixNodeInfo.peerId, multiAddr = mixProto.mixNodeInfo.multiAddr
