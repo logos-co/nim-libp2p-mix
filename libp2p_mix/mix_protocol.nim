@@ -54,9 +54,10 @@ type MixProtocol* = ref object of LPProtocol
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
   coverTraffic*: Opt[CoverTraffic]
-  ongoingMixMessages: seq[Future[void]]
-    ## Tracks all in-flight handleMixMessages futures so they can be
-    ## cancelled on stop and waited for during teardown.
+  ongoingMixMessages: Table[uint64, Future[void]]
+    ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
+    ## removal on completion is O(1).
+  nextMixMessageId: uint64
 
 proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
   return mixProto.destReadBehaviors.hasKey(codec)
@@ -471,11 +472,13 @@ proc spawnMixMessage(
   ## and removes it from the list when it finishes.
   if not mixProto.started:
     return
+  let id = mixProto.nextMixMessageId
+  mixProto.nextMixMessageId.inc()
   let fut = runMixMessage(mixProto, fromPeerId, receivedBytes, metadataBytes)
-  mixProto.ongoingMixMessages.add(fut)
+  mixProto.ongoingMixMessages[id] = fut
   fut.addCallback(
     proc(_: pointer) {.gcsafe, raises: [].} =
-      mixProto.ongoingMixMessages.keepItIf(not it.finished)
+      mixProto.ongoingMixMessages.del(id)
   )
 
 proc handleMixNodeConnection(
@@ -1069,9 +1072,9 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   mixProto.coverTraffic.withValue(ct):
     await ct.stop()
 
-  # Snapshot the list and clear it before cancelling.
-  let pending = mixProto.ongoingMixMessages
-  mixProto.ongoingMixMessages = @[]
+  # Cancelling fires the completion callback, which deletes from this table.
+  let pending = toSeq(mixProto.ongoingMixMessages.values)
+  mixProto.ongoingMixMessages.clear()
   if pending.len > 0:
     await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
 
@@ -1099,6 +1102,9 @@ proc init*(
   ## enabled the default is `SpamProtectionDelayStrategy` instead (same means,
   ## 100 ms delay floor) so proof generation time cannot dominate short sampled
   ## delays and set the send time.
+  ##
+  ## Cannot set a stream budget; `LPProtocol` only takes one at construction.
+  ## Use `MixProtocol.new` for that.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
@@ -1187,6 +1193,8 @@ proc new*(
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
+    maxIncomingStreamsTotal: Opt[int] = Opt.none(int),
+    maxIncomingStreamsPerPeer: Opt[int] = Opt.none(int),
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
   ##
@@ -1196,7 +1204,24 @@ proc new*(
   ## When `spamProtection` is enabled, callers should prefer
   ## `SpamProtectionDelayStrategy` to avoid timing correlation between proof
   ## generation and short exponential delays.
-  let mixProto = new(T)
+  ##
+  ## Both stream budgets default to unlimited, matching libp2p's opt-in design
+  ## (vacp2p/nim-libp2p#2522). Sensible values depend on deployment size, which
+  ## the library cannot know.
+  # `LPProtocol.new` rejects a nil handler and the real one closes over
+  # `mixProto`, so `init` installs it below.
+  proc placeholderHandler(
+      stream: Stream, proto: string
+  ): Future[void] {.async: (raises: [CancelledError]).} =
+    discard
+
+  let mixProto = protocol.new(
+    T,
+    @[MixProtocolID],
+    placeholderHandler,
+    maxIncomingStreamsTotal,
+    maxIncomingStreamsPerPeer,
+  )
   mixProto.init(
     mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic,
     surbStore,
