@@ -209,14 +209,28 @@ type
     header*: Header
     key*: Key
 
+proc serializeSurb*(surb: SURB): seq[byte] =
+  doAssert surb.key.len == k, "SURB key must be exactly " & $k & " bytes"
+  surb.hop.serialize() & surb.header.serialize() & surb.key
+
+proc deserializeSurb*(data: openArray[byte]): Result[SURB, string] =
+  if data.len != SurbSize:
+    return err("Serialized SURB must be exactly " & $SurbSize & " bytes")
+
+  var offset = 0
+  let
+    hop = ?Hop.deserialize(?data.readBytes(offset, Opt.some(AddrSize)))
+    header = ?Header.deserialize(?data.readBytes(offset, Opt.some(HeaderSize)))
+    key = ?data.readBytes(offset, Opt.some(k))
+  ok(SURB(hop: hop, header: header, key: key))
+
 proc serializeMessageWithSURBs*(
     msg: seq[byte], surbs: seq[SURB]
 ): Result[seq[byte], string] =
   if surbs.len > (MessageSize - SurbLenSize - 1) div SurbSize:
     return err("too many SURBs")
 
-  let surbBytes =
-    surbs.mapIt(it.hop.serialize() & it.header.serialize() & it.key).concat()
+  let surbBytes = surbs.mapIt(it.serializeSurb()).concat()
   ok(byte(surbs.len) & surbBytes & msg)
 
 proc extractSURBs*(msg: seq[byte]): Result[(seq[SURB], seq[byte]), string] =
@@ -229,10 +243,6 @@ proc extractSURBs*(msg: seq[byte]): Result[(seq[SURB], seq[byte]), string] =
 
   var surbs: seq[SURB] = newSeq[SURB](surbsLen)
   for i in 0 ..< surbsLen:
-    let hopBytes = ?readBytes(msg, offset, Opt.some(AddrSize))
-    let headerBytes = ?readBytes(msg, offset, Opt.some(HeaderSize))
-    surbs[i].hop = ?Hop.deserialize(hopBytes)
-    surbs[i].header = ?Header.deserialize(headerBytes)
-    surbs[i].key = ?readBytes(msg, offset, Opt.some(k))
+    surbs[i] = ?deserializeSurb(?readBytes(msg, offset, Opt.some(SurbSize)))
   let msg = ?readBytes(msg, offset)
   return ok((surbs, msg))
