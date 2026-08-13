@@ -7,7 +7,6 @@ import libp2p/stream/connection
 import libp2p/varint
 import ./[mix_metrics, reply_connection, serialization, multiaddr]
 
-import std/enumerate
 import ./exit_connection
 
 type OnReplyDialer* =
@@ -73,11 +72,13 @@ proc runHandler(
     await exitConn.close()
 
   var hasHandler: bool = false
-  for index, handler in enumerate(self.switch.ms.handlers):
+  for handler in self.switch.ms.handlers:
     if codec in handler.protos:
       try:
         hasHandler = true
         await handler.protocol.handler(exitConn, codec)
+      except CancelledError as exc:
+        raise exc
       except CatchableError as e:
         error "Error during execution of MixProtocol handler: ", err = e.msg
 
@@ -165,5 +166,5 @@ proc onMessage*(
     trace "onMessage - exit is destination", codec, message
     await self.runHandler(codec, message, surbs)
   else:
-    trace "onMessage - exist is not destination", codec, message
+    trace "onMessage - exit is not destination", codec, message
     await self.fwdRequest(codec, message, destination, surbs)
