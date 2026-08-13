@@ -8,7 +8,8 @@ import
   ]
 import libp2p/stream/connection
 import chronos
-from ./libp2p_mix/serialization import SURB, deserializeSurb, serializeSurb
+from ./libp2p_mix/serialization import
+  SURB, SURBIdentifier, deserializeSurb, serializeSurb
 from ./libp2p_mix/sphinx import ReplyCredential, RawSurbReply, identifier
 
 export toConnection
@@ -38,6 +39,7 @@ export registerDestReadBehavior
 export localMixPubInfo
 export setLocalMultiAddr
 export SURB
+export SURBIdentifier
 export deserializeSurb
 export serializeSurb
 export ReplyCredential
