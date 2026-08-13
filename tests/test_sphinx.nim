@@ -510,9 +510,8 @@ suite "Sphinx Tests":
       RawSurbReply(identifier: wrongId, encryptedPayload: rawReply.encryptedPayload),
     ).isErr
 
-    let msg = recoverSphinxReply(created.credential, rawReply).expect(
-        "Reply processing failed"
-      )
+    let msg =
+      recoverSphinxReply(created.credential, rawReply).expect("Reply processing failed")
 
     check msg == message
 
@@ -667,12 +666,13 @@ suite "Sphinx Tests":
       check processedSP3.status == Reply
 
       let msg = recoverSphinxReply(
-        created.credential,
-        RawSurbReply(
-          identifier: created.credential.identifier,
-          encryptedPayload: processedSP3.delta_prime,
-        ),
-      ).expect("Reply processing failed")
+          created.credential,
+          RawSurbReply(
+            identifier: created.credential.identifier,
+            encryptedPayload: processedSP3.delta_prime,
+          ),
+        )
+        .expect("Reply processing failed")
 
       check paddedMessage == msg
 
