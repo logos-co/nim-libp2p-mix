@@ -43,17 +43,14 @@ type
     service*: string
     payload*: seq[byte]
 
-  MixDeliveryHandler* = proc(delivery: MixDelivery): Future[void] {.
-    async: (raises: [CancelledError])
-  .}
+  MixDeliveryHandler* =
+    proc(delivery: MixDelivery): Future[void] {.async: (raises: [CancelledError]).}
 
   RawSurbReplyDisposition* {.pure.} = enum
     Unhandled
     Handled
 
-  RawSurbReplyHandler* = proc(
-    reply: RawSurbReply
-  ): Future[RawSurbReplyDisposition] {.
+  RawSurbReplyHandler* = proc(reply: RawSurbReply): Future[RawSurbReplyDisposition] {.
     async: (raises: [CancelledError])
   .}
 
@@ -1181,9 +1178,7 @@ proc anonymizeLocalProtocolSend*(
 .} =
   ## Legacy request/reply send. New message-oriented consumers should use
   ## `send`, supplying and owning their SURBs separately.
-  await mixProto.sendInternal(
-    incoming, move(msg), codec, destination, numSurbs, true
-  )
+  await mixProto.sendInternal(incoming, move(msg), codec, destination, numSurbs, true)
 
 proc send*(
     mixProto: MixProtocol,
@@ -1200,9 +1195,7 @@ proc send*(
     return err("Mix service delivery requires exit == destination")
 
   try:
-    (await mixProto.sendInternal(
-      nil, move(payload), service, destination, 0, false
-    )).isOkOr:
+    (await mixProto.sendInternal(nil, move(payload), service, destination, 0, false)).isOkOr:
       return err(error)
   except LPStreamError as exc:
     return err("could not send Mix service payload: " & exc.msg)

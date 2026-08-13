@@ -91,15 +91,13 @@ suite "setLocalMultiAddr":
     replacePool(
       mix,
       @[
-        infos[3].toMixPubInfo(), infos[4].toMixPubInfo(),
-        destinationInfo.toMixPubInfo(),
+        infos[3].toMixPubInfo(), infos[4].toMixPubInfo(), destinationInfo.toMixPubInfo()
       ],
     )
 
     let surb = mix
       .createSurb(MixDestination.exitNode(destinationInfo.peerId))
-      .expect("create SURB")
-      .surb
+      .expect("create SURB").surb
 
     let firstHopPeerId =
       bytesToMultiAddr(surb.hop.get()).expect("decode SURB first hop")[0]
