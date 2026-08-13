@@ -36,9 +36,11 @@ suite "Mix Protocol - Plug-in API":
     startAndDeferStop(nodes)
 
     let pluginPayload = @[1.byte, 2, 3]
-    (await sender.send(
-      MixDestination.exitNode(destinationId), fallbackProto.codec, pluginPayload
-    )).expect("could not send plug-in payload")
+    (
+      await sender.send(
+        MixDestination.exitNode(destinationId), fallbackProto.codec, pluginPayload
+      )
+    ).expect("could not send plug-in payload")
 
     let delivery = await deliveries.get().wait(2.seconds)
     check:
