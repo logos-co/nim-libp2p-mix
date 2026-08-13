@@ -853,6 +853,9 @@ proc createSurb*(
 ): Result[tuple[surb: SURB, credential: ReplyCredential], string] =
   ## Create a reply block that returns to this Mix node. The destination is
   ## excluded from the independently selected return path.
+  if destination.kind != MixNode:
+    return err("SURBs require exit == destination")
+
   var id: SURBIdentifier
   mixProto.rng.generate(id)
   mixProto.buildSurb(id, destination.peerId, destination.peerId)

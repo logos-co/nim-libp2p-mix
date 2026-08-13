@@ -15,6 +15,16 @@ suite "Mix Protocol - Plug-in API":
   asyncTeardown:
     checkTrackers()
 
+  asyncTest "SURB creation rejects a forwarding destination":
+    let nodes = await setupMixNodes(2)
+    let sender = nodes[0]
+    let destination = nodes[1]
+    let forwardDestination = MixDestination.forwardToAddr(
+      destination.switch.peerInfo.peerId, destination.localMixPubInfo().multiAddr
+    )
+
+    check sender.createSurb(forwardDestination).isErr
+
   asyncTest "registered service handles delivery and unregister restores fallback":
     let nodes = await setupMixNodes(5)
     let sender = nodes[0]
