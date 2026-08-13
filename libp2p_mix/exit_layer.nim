@@ -7,7 +7,6 @@ import libp2p/stream/connection
 import libp2p/varint
 import ./[mix_metrics, reply_connection, serialization, multiaddr]
 
-import std/enumerate
 import ./exit_connection
 logScope:
   topics = "exit_layer"
@@ -77,7 +76,7 @@ proc runHandler(
     await exitConn.close()
 
   var hasHandler: bool = false
-  for index, handler in enumerate(self.switch.ms.handlers):
+  for handler in self.switch.ms.handlers:
     if codec in handler.protos:
       try:
         hasHandler = true
