@@ -965,7 +965,8 @@ proc sendSurbReply*(
       peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
     )
   ).isOkOr:
-    # sendPacket reclaimed the proof, so the slot can be refunded too
+    # The packet never reached the wire; sendPacket reclaims the proof token
+    # when one was generated, so refunding the slot cannot double-spend a proof
     mixProto.coverTraffic.withValue(ct):
       ct.slotPool.unclaimSlot()
     return err("could not send reply: " & error)
