@@ -668,8 +668,16 @@ proc sendPacket(
         sampledDelay = initialDelay,
         hint = "Increase the minimum delay floor or reduce proof generation time"
 
-  let (packetToSend, _) = proofGenFut.value().valueOr:
+  let (packetToSend, proofToken) = proofGenFut.value().valueOr:
     return err(error)
+
+  # The packet never left this node on send failure, so its messageId can be
+  # reused; without this the proof budget drifts below the slot budget.
+  template reclaimAndFail(msg: string): untyped =
+    if proofToken.len > 0:
+      mixProto.spamProtection.withValue(sp):
+        sp.reclaimProofToken(proofToken)
+    return err(msg)
 
   when defined(enable_mix_benchmarks):
     if logConfig.logType == Entry:
@@ -688,10 +696,14 @@ proc sendPacket(
     await mixProto.writeLp(peerId, @[multiAddress], @[MixProtocolID], packetToSend)
   except DialFailedError as exc:
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
-    return err(fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}")
+    reclaimAndFail(
+      fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}"
+    )
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
-    return err(fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}")
+    reclaimAndFail(
+      fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}"
+    )
   except CancelledError as exc:
     raise exc
 
@@ -957,6 +969,9 @@ proc reply(
   )
   if sendRes.isErr:
     error "could not send reply", peerId, multiAddr, err = sendRes.error
+    # sendPacket reclaimed the proof, so the slot can be refunded too
+    mixProto.coverTraffic.withValue(ct):
+      ct.slotPool.unclaimSlot()
 
 type PathNode = object
   peerId: PeerId
