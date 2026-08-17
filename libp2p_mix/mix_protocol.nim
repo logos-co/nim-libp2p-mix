@@ -969,7 +969,8 @@ proc reply(
   )
   if sendRes.isErr:
     error "could not send reply", peerId, multiAddr, err = sendRes.error
-    # sendPacket reclaimed the proof, so the slot can be refunded too
+    # The packet never reached the wire; sendPacket reclaims the proof token
+    # when one was generated, so refunding the slot cannot double-spend a proof
     mixProto.coverTraffic.withValue(ct):
       ct.slotPool.unclaimSlot()
 
