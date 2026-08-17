@@ -379,6 +379,10 @@ method handleMixMessages*(
     let (nextPeerId, nextAddr) = bytesToMultiAddr(nextHopBytes).valueOr:
       trace "Failed to convert bytes to multiaddress", err = error
       mix_messages_error.inc(labelValues = ["Intermediate", "INVALID_DEST"])
+      # Refund the claim above: nothing will reach the wire and no proof
+      # has been generated yet
+      mixProto.coverTraffic.withValue(ct):
+        ct.slotPool.unclaimSlot()
       return
 
     when defined(enable_mix_benchmarks):
@@ -888,8 +892,8 @@ proc anonymizeLocalProtocolSend*(
 
   # Claim a slot for local origination (Mix Cover Traffic spec §6.3).
   # Claimed here rather than on entry so that a slot is only consumed by a
-  # packet that is actually emitted -- the pool has no refund path, so an
-  # earlier claim would leak one on every validation failure above.
+  # packet that is actually emitted -- an earlier claim would need a refund
+  # on every validation failure above.
   mixProto.coverTraffic.withValue(ct):
     let claim = ct.slotPool.claimSlot()
     if not claim.success:
@@ -902,6 +906,10 @@ proc anonymizeLocalProtocolSend*(
 
   # Send the wrapped message to the first mix node in the selected path
   (await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)).isOkOr:
+    # The packet never reached the wire; sendPacket reclaims the proof token
+    # when one was generated, so refunding the slot cannot double-spend a proof
+    mixProto.coverTraffic.withValue(ct):
+      ct.slotPool.unclaimSlot()
     releaseAndFail(error)
 
   return ok(session)
