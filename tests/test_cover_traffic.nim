@@ -211,6 +211,24 @@ suite "ConstantRateCoverTraffic":
     waitFor ct.emitCoverPacket()
     check ct.slotPool.coverClaimed == 1
 
+  asyncTest "pre-send delay is applied before emission":
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 10, epochDuration = 1.seconds)
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        Delay(60)
+    )
+    ct.onEpochChange(1)
+
+    let start = Moment.now()
+    await ct.emitCoverPacket()
+    check (Moment.now() - start) >= 60.milliseconds
+    check sentPackets[].len == 1
+
   asyncTest "start and stop":
     let ct = ConstantRateCoverTraffic.new(
       totalSlots = 10, epochDuration = 100.seconds, useInternalEpochTimer = false

@@ -1140,6 +1140,10 @@ proc init*(
       ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
         await mixProto.sendCoverPacket(peerId, multiAddr, packet)
     )
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        mixProto.delayStrategy.generateForSender()
+    )
     # Note: useInternalEpochTimer must be set to false when SpamProtection is
     # present, as SpamProtection provides epoch change notifications via
     # notifyEpochChange. Having both active would cause double epoch advances.

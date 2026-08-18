@@ -13,7 +13,8 @@ import std/deques
 import chronicles, chronos, results, metrics
 import libp2p/[multiaddress, peerid]
 import libp2p/utils/heartbeat
-import ./mix_metrics, ./sphinx
+import ./delay, ./mix_metrics, ./sphinx
+export delay
 
 logScope:
   topics = "libp2p mix covertraffic"
@@ -118,6 +119,12 @@ type
     ## Callback to return a proof token for reuse when a prebuilt cover packet
     ## is discarded (e.g., due to stale Merkle root).
 
+  SampleSendDelayProc* = proc(): Delay {.gcsafe, raises: [].}
+    ## Callback to sample the pre-send delay applied between claiming a cover
+    ## emission and its first-hop write (Mix Cover Traffic spec §6.2). Without
+    ## it, cover would be the only packet class departing exactly on the
+    ## emission schedule.
+
   CoverTraffic* = ref object of RootObj
     ## Abstract base to allow alternate emission strategies (e.g. Poisson-Rate).
     ## MixProtocol injects packet building and sending via callback procs.
@@ -126,6 +133,7 @@ type
     sendPacket: SendCoverPacketProc
     validateProofToken: ValidateProofTokenProc
     reclaimProofToken: ReclaimProofTokenProc
+    sampleSendDelay: SampleSendDelayProc
 
 method start*(ct: CoverTraffic) {.base, async: (raises: [CancelledError]).} =
   raiseAssert "start must be implemented by concrete cover traffic types"
@@ -151,6 +159,16 @@ proc setProofTokenReclaimer*(ct: CoverTraffic, reclaimer: ReclaimProofTokenProc)
 
 proc setCoverPacketSender*(ct: CoverTraffic, sender: SendCoverPacketProc) =
   ct.sendPacket = sender
+
+proc setSendDelaySampler*(ct: CoverTraffic, sampler: SampleSendDelayProc) =
+  ct.sampleSendDelay = sampler
+
+proc applySendDelay(ct: CoverTraffic) {.async: (raises: [CancelledError]).} =
+  ## Pre-send hold before a cover transmission (Mix Cover Traffic spec §6.2).
+  if ct.sampleSendDelay != nil:
+    let delay = ct.sampleSendDelay()
+    if delay > NoDelay:
+      await sleepAsync(delay.toDuration)
 
 type ConstantRateCoverTraffic* = ref object of CoverTraffic
   ## Emits cover packets at a fixed interval derived from
@@ -271,6 +289,9 @@ proc emitCoverPacket*(
       mix_slot_claim_rejected.inc(labelValues = ["cover"])
       return
     ct.slotPool.dequeue().withValue(pkt):
+      # Hold before transmit (§6.2); validate after the hold so the proof
+      # staleness window before the wire write stays minimal (§6.5).
+      await ct.applySendDelay()
       # Check if the prebuilt proof is still valid (e.g., Merkle root not stale)
       if ct.validateProofToken != nil and pkt.proofToken.len > 0 and
           not ct.validateProofToken(pkt.proofToken):
@@ -292,6 +313,7 @@ proc emitCoverPacket*(
         return
 
   if ct.slotPool.claimSlotForCover():
+    await ct.applySendDelay()
     await ct.buildAndSendOnDemand()
 
 proc runEmissionLoop(
