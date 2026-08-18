@@ -134,6 +134,10 @@ suite "Mix Protocol - Node Failures":
     checkUntilTimeout:
       mock.receivedPacketCount == 2
 
+    # The first reply released the whole group, so the second found nothing —
+    # group-atomic release, end to end.
+    check mock.surbCredsLen == 0
+
   asyncTest "sender receives empty response when destination is unreachable":
     ## Exit node gets DialFailedError, sends empty reply via SURB,
     ## sender receives an empty response from readLp().
@@ -162,6 +166,137 @@ suite "Mix Protocol - Node Failures":
 
     let response = await conn.readLp(1024).wait(10.seconds)
     check response.len == 0
+
+    # The reply, empty or not, releases the credentials it was issued against.
+    check nodes[0].surbCredsLen == 0
+
+  asyncTest "reply timeout releases the SURB credentials":
+    ## Destination never answers, so no reply can ever come back. readOnce
+    ## must give up and drop the credentials rather than hold them.
+    const TestCodec = "/silent/test/1.0.0"
+
+    let destProto = SilentProtocol.new(TestCodec)
+    let nodes = await setupMixNodes(
+      10,
+      destReadBehavior = Opt.some((codec: TestCodec, callback: readLp(1024))),
+      delayStrategy = Opt.some(DelayStrategy(FixedDelayStrategy(delay: 0))),
+    )
+    startAndDeferStop(nodes)
+
+    let (destNode, _) = await setupDestNode(destProto)
+    defer:
+      await stopDestNode(destNode)
+
+    let sender = nodes[0]
+    check sender.surbCredsLen == 0
+
+    let conn = sender
+      .toConnection(
+        destNode.toMixDestination(),
+        TestCodec,
+        MixParameters(
+          expectReply: Opt.some(true),
+          numSurbs: Opt.some(byte(2)),
+          replyTimeout: Opt.some(2.seconds),
+        ),
+      )
+      .expect("could not build connection")
+    defer:
+      await conn.close()
+
+    # Declared last so it runs first: the handler is parked, and stopDestNode
+    # would otherwise wait on it.
+    defer:
+      destProto.release()
+
+    await conn.writeLp(@[1.byte, 2, 3])
+    discard await destProto.receivedMessages.get().wait(10.seconds)
+    check sender.surbCredsLen == 2
+
+    # libp2p convention: a timeout surfaces as end-of-stream, not a distinct
+    # error type, so existing protocol code needs no mix-specific handling.
+    expect LPStreamEOFError:
+      discard await conn.readLp(1024).wait(10.seconds)
+
+    check sender.surbCredsLen == 0
+
+  asyncTest "closing the connection releases credentials, and a second write is refused":
+    ## Prompt reclamation well inside the store TTL, plus the single-exchange
+    ## guard — both properties of one live connection, so one setup covers them.
+    const TestCodec = "/silent-2/test/1.0.0"
+
+    let destProto = SilentProtocol.new(TestCodec)
+    let nodes = await setupMixNodes(
+      10,
+      destReadBehavior = Opt.some((codec: TestCodec, callback: readLp(1024))),
+      delayStrategy = Opt.some(DelayStrategy(FixedDelayStrategy(delay: 0))),
+    )
+    startAndDeferStop(nodes)
+
+    let (destNode, _) = await setupDestNode(destProto)
+    defer:
+      await stopDestNode(destNode)
+
+    let sender = nodes[0]
+
+    let conn = sender
+      .toConnection(
+        destNode.toMixDestination(),
+        TestCodec,
+        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(3))),
+      )
+      .expect("could not build connection")
+    defer:
+      destProto.release()
+
+    await conn.writeLp(@[1.byte, 2, 3])
+    discard await destProto.receivedMessages.get().wait(10.seconds)
+    check sender.surbCredsLen == 3
+
+    # A second reply would land in a queue nobody drains, so it is refused.
+    expect LPStreamError:
+      await conn.writeLp(@[4.byte, 5, 6])
+
+    await conn.close()
+    check sender.surbCredsLen == 0
+
+  asyncTest "a send that never leaves the node releases its credentials":
+    ## Every mix node is unreachable, so sendPacket fails after the reply
+    ## credentials were already registered. No reply can ever release them,
+    ## so the send path must.
+    let nodes = await setupMixNodes(
+      10, destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32)))
+    )
+
+    let (destNode, pingProto) = await setupDestNode(Ping.new(rng = rng()))
+    defer:
+      await stopDestNode(destNode)
+
+    await startNodes(nodes)
+    defer:
+      await stopNodes(nodes)
+
+    let sender = nodes[0]
+
+    # Stop every other node. They stay in the sender peerStore, so path
+    # selection still succeeds and the failure lands in sendPacket.
+    for node in nodes[1 ..^ 1]:
+      await node.switch.stop()
+
+    let conn = sender
+      .toConnection(
+        destNode.toMixDestination(),
+        pingProto.codec,
+        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(4))),
+      )
+      .expect("could not build connection")
+    defer:
+      await conn.close()
+
+    expect LPStreamError:
+      await conn.write(@[1.byte, 2, 3, 4, 5])
+
+    check sender.surbCredsLen == 0
 
   asyncTest "forward path node down - hop 2 or exit":
     ## With 4 mix nodes the sender (node 0) has a pool of exactly 3 nodes.

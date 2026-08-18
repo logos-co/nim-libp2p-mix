@@ -30,6 +30,12 @@ proc len*(tm: TagManager): int {.inline.} =
   ## Returns the number of tags currently stored.
   tm.cache.len
 
+func tagTTL*(tm: TagManager): Duration {.inline.} =
+  ## Exposed so callers can assert TTL orderings against other caches
+  ## (SURB credentials must expire no later than the replay tag that
+  ## protects the same reply).
+  tm.tagTTL
+
 proc purgeExpiredTags*(tm: TagManager, now: Moment = Moment.now()): int =
   ## Remove tags that have expired.
   ## Returns the number of tags purged.

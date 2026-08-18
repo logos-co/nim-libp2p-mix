@@ -4,7 +4,7 @@
 {.used.}
 
 import results, stew/byteutils
-import libp2p_mix/[fragmentation, mix_message, mix_protocol, serialization]
+import libp2p_mix/[padding, mix_message, mix_protocol, serialization]
 import ./tools/[unittest]
 
 # Define test cases

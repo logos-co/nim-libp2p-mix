@@ -162,6 +162,45 @@ proc new*(T: typedesc[NoReplyProtocol]): NoReplyProtocol =
   nrProto.codec = NoReplyProtocolCodec
   nrProto
 
+type SilentProtocol* = ref object of LPProtocol
+  ## Reads one message then holds the stream open without answering, so the
+  ## exit layer never gets a response to send back. Unlike NoReplyProtocol,
+  ## which closes and therefore makes the exit reply with an empty payload.
+  ##
+  ## Call `release` before stopping the destination node, otherwise shutdown
+  ## blocks on the parked handler.
+  receivedMessages*: AsyncQueue[ReceivedMessage]
+  hold: Future[void]
+
+proc new*(T: typedesc[SilentProtocol], codec: string): SilentProtocol =
+  let proto = SilentProtocol(
+    receivedMessages: newAsyncQueue[ReceivedMessage](), hold: newFuture[void]()
+  )
+
+  proc handler(
+      conn: Connection, protoId: string
+  ) {.async: (raises: [CancelledError]).} =
+    try:
+      let buffer = await conn.readLp(1024)
+      await proto.receivedMessages.put(
+        ReceivedMessage(connPeerId: conn.peerId, data: buffer)
+      )
+      await proto.hold
+    except CancelledError as e:
+      raise e
+    except CatchableError:
+      discard
+    finally:
+      await conn.close()
+
+  proto.handler = handler
+  proto.codec = codec
+  proto
+
+proc release*(proto: SilentProtocol) =
+  if not proto.hold.finished:
+    proto.hold.complete()
+
 const EchoCodec = "/echo/test/1.0.0"
 const EchoMaxReadLen* = 1024
 
