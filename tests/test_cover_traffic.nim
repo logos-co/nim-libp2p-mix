@@ -229,6 +229,25 @@ suite "ConstantRateCoverTraffic":
     check (Moment.now() - start) >= 60.milliseconds
     check sentPackets[].len == 1
 
+  asyncTest "packet held across epoch boundary is discarded":
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 10, epochDuration = 1.seconds)
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        Delay(100)
+    )
+    ct.onEpochChange(1)
+
+    let fut = ct.emitCoverPacket()
+    await sleepAsync(20.milliseconds)
+    ct.onEpochChange(2)
+    await fut
+    check sentPackets[].len == 0
+
   asyncTest "start and stop":
     let ct = ConstantRateCoverTraffic.new(
       totalSlots = 10, epochDuration = 100.seconds, useInternalEpochTimer = false

@@ -9,7 +9,7 @@
 ##
 ## See Mix Cover Traffic specification sections 3-7.
 
-import std/deques
+import std/[deques, sequtils]
 import chronicles, chronos, results, metrics
 import libp2p/[multiaddress, peerid]
 import libp2p/utils/heartbeat
@@ -170,6 +170,16 @@ proc applySendDelay(ct: CoverTraffic) {.async: (raises: [CancelledError]).} =
     if delay > NoDelay:
       await sleepAsync(delay.toDuration)
 
+proc heldAcrossEpochBoundary(ct: CoverTraffic, claimEpoch: uint64): bool =
+  ## §6.2 discard rule: a packet whose pre-send hold crossed the epoch
+  ## boundary claimed its slot from a pool that has since been discarded, so
+  ## transmitting it would exceed the new epoch's budget.
+  if ct.slotPool.epoch == claimEpoch:
+    return false
+  trace "Discarding cover packet held across epoch boundary"
+  mix_cover_error.inc(labelValues = ["EPOCH_CROSSED"])
+  true
+
 type ConstantRateCoverTraffic* = ref object of CoverTraffic
   ## Emits cover packets at a fixed interval derived from
   ## `scaledSlots = max(1, floor(f * R))`, giving `((1 + L) * P) / scaledSlots`
@@ -184,6 +194,7 @@ type ConstantRateCoverTraffic* = ref object of CoverTraffic
   emissionLoop: Future[void]
   precomputeLoop: Future[void]
   epochTimerLoop: Future[void]
+  pendingEmissions: seq[Future[void]]
   emissionEpochEvent: AsyncEvent
   precomputeEpochEvent: AsyncEvent
   useInternalEpochTimer: bool
@@ -289,9 +300,12 @@ proc emitCoverPacket*(
       mix_slot_claim_rejected.inc(labelValues = ["cover"])
       return
     ct.slotPool.dequeue().withValue(pkt):
+      let claimEpoch = ct.slotPool.epoch
       # Hold before transmit (§6.2); validate after the hold so the proof
       # staleness window before the wire write stays minimal (§6.5).
       await ct.applySendDelay()
+      if ct.heldAcrossEpochBoundary(claimEpoch):
+        return
       # Check if the prebuilt proof is still valid (e.g., Merkle root not stale)
       if ct.validateProofToken != nil and pkt.proofToken.len > 0 and
           not ct.validateProofToken(pkt.proofToken):
@@ -313,7 +327,10 @@ proc emitCoverPacket*(
         return
 
   if ct.slotPool.claimSlotForCover():
+    let claimEpoch = ct.slotPool.epoch
     await ct.applySendDelay()
+    if ct.heldAcrossEpochBoundary(claimEpoch):
+      return
     await ct.buildAndSendOnDemand()
 
 proc runEmissionLoop(
@@ -330,7 +347,15 @@ proc runEmissionLoop(
     if now < nextTick:
       await sleepAsync(nextTick - now)
 
-    await ct.emitCoverPacket()
+    # Run the emission (§6.2 hold included) without awaiting it, so a hold
+    # longer than the interval cannot compress the gap between consecutive
+    # transmits down to the hold itself.
+    let fut = ct.emitCoverPacket()
+    ct.pendingEmissions.add(fut)
+    fut.addCallback(
+      proc(_: pointer) {.gcsafe, raises: [].} =
+        ct.pendingEmissions.keepItIf(not it.finished)
+    )
     nextTick = nextTick + ct.emissionInterval
 
 proc runPrecomputeLoop(
@@ -443,6 +468,10 @@ method stop*(ct: ConstantRateCoverTraffic) {.async: (raises: []).} =
   ct.emissionLoop = nil
   ct.precomputeLoop = nil
   ct.epochTimerLoop = nil
+  let pending = ct.pendingEmissions
+  ct.pendingEmissions = @[]
+  if pending.len > 0:
+    await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
   trace "Cover traffic stopped"
 
 func emissionInterval*(ct: ConstantRateCoverTraffic): Duration =
