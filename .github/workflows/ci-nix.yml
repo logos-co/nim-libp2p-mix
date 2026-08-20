@@ -73,3 +73,40 @@ jobs:
 
       - name: Show build outputs
         run: find result -type f | head -50
+
+  # Failures on master (push) or the weekly cron have no PR author watching
+  # them — GitHub only emails the actor who last touched this workflow file.
+  # File (or bump) an issue instead so repo watchers get notified; closing
+  # the issue re-arms creation.
+  notify-failure:
+    needs: nix-build
+    if: failure() && github.event_name != 'pull_request'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Create or update failure issue
+        run: |
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --label nix-ci-failure --state open \
+            --limit 1 --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" \
+              --body "Still failing: $run_url (event: ${{ github.event_name }})"
+          else
+            gh label create nix-ci-failure \
+              --description "ci / nix failing on master or cron" \
+              --color d93f0b || true
+            gh issue create \
+              --title "ci / nix failing on master" \
+              --label nix-ci-failure \
+              --body-file - <<EOF
+          The \`ci / nix\` job failed on \`${{ github.event_name }}\`: $run_url
+
+          If the failure is the deps drift check, run \`nix develop --command make refresh-deps NIMBLE_FLAGS="-y"\` and commit the result.
+          EOF
+          fi
