@@ -52,6 +52,16 @@ proc sampleLowerBoundStats(
 
   (minimumDelayHits, sawDelayAboveMinimum)
 
+type EntryOnlyStrategy = ref object of DelayStrategy
+  ## Test-only: implements entry/intermediate only; relies on base generateForSender.
+  fixed: Delay
+
+method generateForEntry*(self: EntryOnlyStrategy): Delay =
+  self.fixed
+
+method generateForIntermediate*(self: EntryOnlyStrategy, encodedDelay: Delay): Delay =
+  encodedDelay + 1
+
 suite "DelayStrategy":
   test "NoSamplingDelayStrategy generateForEntry returns values in [0, 2]":
     let strategy = NoSamplingDelayStrategy.new(rng())
@@ -66,6 +76,16 @@ suite "DelayStrategy":
       strategy.generateForIntermediate(100) == 100
       strategy.generateForIntermediate(200) == 200
 
+  test "NoSamplingDelayStrategy generateForSender is in [0, 2]":
+    let strategy = NoSamplingDelayStrategy.new(rng())
+
+    for _ in 0 ..< NumIterations:
+      check strategy.generateForSender() <= 2
+
+  test "generateForSender default uses entry then intermediate":
+    let strategy = EntryOnlyStrategy(fixed: 10)
+    check strategy.generateForSender() == 11
+
   test "ExponentialDelayStrategy generateForEntry returns configured mean":
     let rng = rng()
 
@@ -77,6 +97,31 @@ suite "DelayStrategy":
     let strategy = ExponentialDelayStrategy.new(0, rng())
 
     check strategy.generateForIntermediate(0) == 0
+
+  test "ExponentialDelayStrategy generateForSender samples independently of hop mean":
+    let
+      hopMean: Delay = 100
+      initialMean: Delay = 50
+      strategy =
+        ExponentialDelayStrategy.new(hopMean, rng(), initialMeanDelay = initialMean)
+      numSamples = 1000
+    var sum: float64 = 0
+
+    for _ in 0 ..< numSamples:
+      sum += float64(strategy.generateForSender())
+
+    let empiricalMean = sum / float64(numSamples)
+    check:
+      strategy.generateForEntry() == hopMean
+      empiricalMean > float64(initialMean) * (1 - Tolerance)
+      empiricalMean < float64(initialMean) * (1 + Tolerance)
+
+  test "ExponentialDelayStrategy generateForSender is variable":
+    let strategy = ExponentialDelayStrategy.new(100, rng())
+    var delays = initHashSet[Delay]()
+    for _ in 0 ..< NumSamples:
+      delays.incl(strategy.generateForSender())
+    check delays.len > NumSamples div 2
 
   test "ExponentialDelayStrategy generateForIntermediate samples from exponential distribution":
     let

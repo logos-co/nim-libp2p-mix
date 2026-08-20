@@ -396,19 +396,23 @@ method handleMixMessages*(
     let proofGenStartTime = Moment.now()
     let delayFut = sleepAsync(actualDelay.toDuration)
 
+    # proofGenTimeMs is captured at proof completion, inside the closure, so it
+    # measures proof cost alone — not max(proof, delay) as after allFutures.
+    var proofGenTimeMs: int64
     let proofGenFut = (
       proc(): Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]] {.
           async
       .} =
-        return mixProto.generateAndAppendProof(
+        let res = mixProto.generateAndAppendProof(
           processedSP.serializedSphinxPacket, "Intermediate"
         )
+        proofGenTimeMs = (Moment.now() - proofGenStartTime).milliseconds
+        return res
     )()
 
     await allFutures(proofGenFut, delayFut)
 
     mixProto.spamProtection.withValue(sp):
-      let proofGenTimeMs = (Moment.now() - proofGenStartTime).milliseconds
       if proofGenTimeMs > actualDelay.int64:
         warn "Proof generation time exceeds sampled delay",
           proofGenTimeMs,
@@ -629,14 +633,42 @@ proc sendPacket(
     sphinxPacket: SphinxPacket,
     logConfig: SendPacketLogConfig,
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-  ## Send the wrapped message to the first mix node in the selected path
+  ## Send the wrapped message to the first mix node in the selected path.
+  ## Applies the sender pre-send delay (mix.md §8.5.2 step 3.f) before the
+  ## first-hop write to break burst timing correlation.
 
   let label = $logConfig.logType
+  let serialized = sphinxPacket.serialize()
 
-  # Per-hop spam protection: Generate initial proof and append to packet
-  let (packetToSend, _) = mixProto.generateAndAppendProof(
-    sphinxPacket.serialize(), label
-  ).valueOr:
+  # §8.5.2 step 3.f: hold before first-hop transmit (entry and SURB replies).
+  # Overlap proof generation with the hold, same as the intermediate path, so
+  # spam-proof work does not stack on top of the sampled delay.
+  let initialDelay = mixProto.delayStrategy.generateForSender()
+  let proofGenStartTime = Moment.now()
+  let delayFut = sleepAsync(initialDelay.toDuration)
+
+  # proofGenTimeMs is captured at proof completion, inside the closure, so it
+  # measures proof cost alone — not max(proof, delay) as after allFutures.
+  var proofGenTimeMs: int64
+  let proofGenFut = (
+    proc(): Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]] {.
+        async
+    .} =
+      let res = mixProto.generateAndAppendProof(serialized, label)
+      proofGenTimeMs = (Moment.now() - proofGenStartTime).milliseconds
+      return res
+  )()
+
+  await allFutures(proofGenFut, delayFut)
+
+  mixProto.spamProtection.withValue(sp):
+    if proofGenTimeMs > initialDelay.int64:
+      warn "Proof generation time exceeds sampled sender delay",
+        proofGenTimeMs,
+        sampledDelay = initialDelay,
+        hint = "Increase the minimum delay floor or reduce proof generation time"
+
+  let (packetToSend, _) = proofGenFut.value().valueOr:
     return err(error)
 
   when defined(enable_mix_benchmarks):
@@ -1062,9 +1094,11 @@ proc init*(
   ## Mix node public keys should be populated via the nodePool after
   ## initialization using `mixProto.nodePool.add(mixPubInfo)`.
   ##
-  ## When `spamProtection` is enabled, callers should prefer
-  ## `SpamProtectionDelayStrategy` to avoid timing correlation between proof
-  ## generation and short exponential delays.
+  ## Default delay strategy is `ExponentialDelayStrategy` (mean 100 ms for both
+  ## per-hop encoding and the sender pre-send hold). When `spamProtection` is
+  ## enabled the default is `SpamProtectionDelayStrategy` instead (same means,
+  ## 100 ms delay floor) so proof generation time cannot dominate short sampled
+  ## delays and set the send time.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
@@ -1089,7 +1123,10 @@ proc init*(
 
   mixProto.spamProtection = spamProtection
   mixProto.delayStrategy = delayStrategy.valueOr:
-    NoSamplingDelayStrategy.new(switch.rng)
+    if spamProtection.isSome:
+      DelayStrategy(SpamProtectionDelayStrategy.new(rng = switch.rng))
+    else:
+      DelayStrategy(ExponentialDelayStrategy.new(rng = switch.rng))
 
   mixProto.coverTraffic = coverTraffic
   coverTraffic.withValue(ct):

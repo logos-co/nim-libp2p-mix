@@ -6,8 +6,10 @@
 import chronos, results, sequtils
 import libp2p/[multiaddress, peerid, switch]
 import
-  libp2p_mix/
-    [mix_protocol, mix_node, sphinx, serialization, multiaddr, tag_manager, curve25519]
+  libp2p_mix/[
+    mix_protocol, mix_node, sphinx, serialization, multiaddr, tag_manager, curve25519,
+    delay_strategy,
+  ]
 import ./tools/[unittest, crypto, lifecycle]
 import ./utils
 
@@ -25,7 +27,12 @@ proc setupNodesWithInfos(
   var nodes: seq[MixProtocol] = @[]
   for info in infos:
     let switch = createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey))
-    let proto = MixProtocol.new(info, switch)
+    # Lab strategy: keep unit tests free of production exponential holds.
+    let proto = MixProtocol.new(
+      info,
+      switch,
+      delayStrategy = Opt.some(DelayStrategy(NoSamplingDelayStrategy.new(rng()))),
+    )
     proto.nodePool.add(infos.includeAllExcept(info))
     switch.mount(proto)
     nodes.add(proto)
