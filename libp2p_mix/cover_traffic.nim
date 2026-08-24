@@ -9,7 +9,7 @@
 ##
 ## See Mix Cover Traffic specification sections 3-7.
 
-import std/[deques, sequtils]
+import std/[deques, sequtils, tables]
 import chronicles, chronos, results, metrics
 import libp2p/[multiaddress, peerid]
 import libp2p/utils/heartbeat
@@ -194,7 +194,10 @@ type ConstantRateCoverTraffic* = ref object of CoverTraffic
   emissionLoop: Future[void]
   precomputeLoop: Future[void]
   epochTimerLoop: Future[void]
-  pendingEmissions: seq[Future[void]]
+  pendingEmissions: Table[uint64, Future[void]]
+    ## In-flight emitCoverPacket futures, cancelled on stop. Keyed so
+    ## removal on completion is O(1).
+  nextEmissionId: uint64
   emissionEpochEvent: AsyncEvent
   precomputeEpochEvent: AsyncEvent
   useInternalEpochTimer: bool
@@ -256,6 +259,7 @@ proc new*(
     precomputeTarget: precomputeTarget,
     enablePrecomputation: enablePrecomputation,
     precomputeBatchSize: batchSize,
+    pendingEmissions: initTable[uint64, Future[void]](),
     emissionEpochEvent: newAsyncEvent(),
     precomputeEpochEvent: newAsyncEvent(),
     useInternalEpochTimer: useInternalEpochTimer,
@@ -350,11 +354,13 @@ proc runEmissionLoop(
     # Run the emission (§6.2 hold included) without awaiting it, so a hold
     # longer than the interval cannot compress the gap between consecutive
     # transmits down to the hold itself.
+    let id = ct.nextEmissionId
+    ct.nextEmissionId.inc()
     let fut = ct.emitCoverPacket()
-    ct.pendingEmissions.add(fut)
+    ct.pendingEmissions[id] = fut
     fut.addCallback(
       proc(_: pointer) {.gcsafe, raises: [].} =
-        ct.pendingEmissions.keepItIf(not it.finished)
+        ct.pendingEmissions.del(id)
     )
     nextTick = nextTick + ct.emissionInterval
 
@@ -468,8 +474,8 @@ method stop*(ct: ConstantRateCoverTraffic) {.async: (raises: []).} =
   ct.emissionLoop = nil
   ct.precomputeLoop = nil
   ct.epochTimerLoop = nil
-  let pending = ct.pendingEmissions
-  ct.pendingEmissions = @[]
+  let pending = toSeq(ct.pendingEmissions.values)
+  ct.pendingEmissions.clear()
   if pending.len > 0:
     await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
   trace "Cover traffic stopped"
@@ -485,3 +491,6 @@ func coverRateFraction*(ct: ConstantRateCoverTraffic): float =
 
 func isRunning*(ct: ConstantRateCoverTraffic): bool =
   ct.running
+
+func pendingEmissionCount*(ct: ConstantRateCoverTraffic): int =
+  ct.pendingEmissions.len
