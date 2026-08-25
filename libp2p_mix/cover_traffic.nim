@@ -83,23 +83,30 @@ proc claimSlotForCover*(pool: SlotPool): bool =
   true
 
 proc claimSlot*(pool: SlotPool): ClaimResult =
-  ## Claim a slot for non-cover use. Discards one pre-built cover packet
-  ## and returns its proof token for potential reuse (Mix Cover Traffic spec §5.2).
+  ## Claim a slot for non-cover use. Free slots are taken first; a queued
+  ## cover packet is discarded only when every remaining slot is already
+  ## committed to the queue (Mix Cover Traffic spec §5.2). The discarded
+  ## packet's proof token is returned for reuse.
   if not pool.hasAvailableSlots():
     return ClaimResult(success: false)
 
-  pool.nonCoverClaimed += 1
   var token: seq[byte]
-  if pool.coverQueue.len > 0:
+  if pool.coverQueue.len > 0 and pool.availableSlots <= pool.coverQueue.len:
     let discarded = pool.coverQueue.popFirst()
     token = discarded.proofToken
+  pool.nonCoverClaimed += 1
   ClaimResult(success: true, reclaimedToken: token)
 
 func totalSlots*(pool: SlotPool): int {.inline.} =
   pool.totalSlots
 
-proc addPacket*(pool: SlotPool, pkt: CoverPacket) =
+proc addPacket*(pool: SlotPool, pkt: CoverPacket): bool {.discardable.} =
+  ## Enqueue a pre-built cover packet. Fails when no free slot remains to
+  ## back it, preserving the invariant availableSlots >= queuedCount.
+  if pool.availableSlots <= pool.coverQueue.len:
+    return false
   pool.coverQueue.addLast(pkt)
+  true
 
 func queuedCount*(pool: SlotPool): int {.inline.} =
   pool.coverQueue.len
@@ -342,7 +349,7 @@ proc runPrecomputeLoop(
           break
 
         let coverBuild = buildRes.get()
-        ct.slotPool.addPacket(
+        let added = ct.slotPool.addPacket(
           CoverPacket(
             packet: coverBuild.packet,
             firstHopPeerId: coverBuild.firstHopPeerId,
@@ -350,6 +357,12 @@ proc runPrecomputeLoop(
             proofToken: coverBuild.proofToken,
           )
         )
+        if not added:
+          trace "No free slot to back pre-built cover packet, pausing pre-computation"
+          if ct.reclaimProofToken != nil and coverBuild.proofToken.len > 0:
+            ct.reclaimProofToken(coverBuild.proofToken)
+          batchFailed = true
+          break
         built += 1
         mix_cover_precomputed.inc()
         # Yield per packet so other async tasks can proceed

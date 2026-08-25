@@ -70,8 +70,8 @@ suite "SlotPool":
       pool.nonCoverClaimed == 0
       pool.queuedCount == 0 # Stale packets cleared on epoch change
 
-  test "claimSlot discards a pre-built packet and returns its proof token":
-    let pool = SlotPool.new(10)
+  test "claimSlot takes free slots before reclaiming queued cover":
+    let pool = SlotPool.new(3)
     let (pid, ma) = makePeerInfo()
     pool.addPacket(
       CoverPacket(
@@ -89,11 +89,26 @@ suite "SlotPool":
         proofToken: @[0x02.byte],
       )
     )
-    let claim = pool.claimSlot()
-    check claim.success == true
-    check claim.reclaimedToken == @[0x01.byte]
+    # One free slot (3 available, 2 committed to the queue): no discard
+    let c1 = pool.claimSlot()
+    check c1.success == true
+    check c1.reclaimedToken.len == 0
+    check pool.queuedCount == 2
+    # No free slots left: the queue head is discarded and its token returned
+    let c2 = pool.claimSlot()
+    check c2.success == true
+    check c2.reclaimedToken == @[0x01.byte]
     check pool.queuedCount == 1
     check pool.dequeue().get().packet == @[0xBB.byte]
+
+  test "addPacket fails when no free slot backs it":
+    let pool = SlotPool.new(2)
+    let (pid, ma) = makePeerInfo()
+    let pkt = CoverPacket(packet: @[0xCC.byte], firstHopPeerId: pid, firstHopAddr: ma)
+    check pool.addPacket(pkt) == true
+    check pool.addPacket(pkt) == true
+    check pool.addPacket(pkt) == false # queue may not exceed available slots
+    check pool.queuedCount == 2
 
   test "mixed traffic draws from same pool":
     let pool = SlotPool.new(3)
