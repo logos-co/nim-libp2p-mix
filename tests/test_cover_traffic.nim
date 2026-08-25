@@ -302,6 +302,66 @@ suite "ConstantRateCoverTraffic":
     await ct.stop()
     check ct.isRunning == false
 
+  asyncTest "completed emission is removed from pendingEmissions":
+    # interval = 100ms * (1+3) / 4 = 100ms
+    let gate = newAsyncEvent()
+    var first = true
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 4,
+      epochDuration = 100.milliseconds,
+      coverRateFraction = 1.0,
+      useInternalEpochTimer = false,
+    )
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(
+      proc(
+          peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte]
+      ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+        if first:
+          first = false
+          await gate.wait()
+        return ok()
+    )
+    ct.onEpochChange(1)
+
+    await ct.start()
+    checkUntilTimeout:
+      ct.pendingEmissionCount == 1
+    gate.fire()
+    checkUntilTimeout:
+      ct.pendingEmissionCount == 0
+    await ct.stop()
+    check ct.isRunning == false
+
+  asyncTest "stop cancels in-flight emissions":
+    # interval = 100ms * (1+3) / 4 = 100ms
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 4,
+      epochDuration = 100.milliseconds,
+      coverRateFraction = 1.0,
+      useInternalEpochTimer = false,
+    )
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        Delay(10000)
+    )
+    ct.onEpochChange(1)
+
+    await ct.start()
+    checkUntilTimeout:
+      ct.pendingEmissionCount > 0
+    let t0 = Moment.now()
+    await ct.stop()
+    check:
+      ct.isRunning == false
+      ct.pendingEmissionCount == 0
+      sentPackets[].len == 0
+      (Moment.now() - t0) < 2.seconds
+
 suite "CoverTraffic Pre-computation":
   test "pre-built packets used before on-demand, falls back when empty":
     let sentPackets = new seq[seq[byte]]
