@@ -272,7 +272,8 @@ proc unclaimCoverSlot(ct: ConstantRateCoverTraffic) =
 proc buildAndSendOnDemand(
     ct: ConstantRateCoverTraffic
 ) {.async: (raises: [CancelledError]).} =
-  ## Build and send a cover packet on-demand. Assumes slot is already claimed.
+  ## Build and send a cover packet on-demand. Assumes slot is already claimed
+  ## and the pre-send hold has already elapsed (stale-prebuilt fallback).
   let buildRes = ct.buildPacket()
   if buildRes.isErr:
     trace "Failed to build cover packet", err = buildRes.error
@@ -281,6 +282,59 @@ proc buildAndSendOnDemand(
     return
 
   let built = buildRes.get()
+  let sendRes =
+    await ct.sendPacket(built.firstHopPeerId, built.firstHopAddr, built.packet)
+  if sendRes.isErr:
+    debug "Failed to send cover packet", err = sendRes.error
+    mix_cover_error.inc(labelValues = ["SEND_FAILED"])
+  else:
+    mix_cover_emitted.inc(labelValues = ["on_demand"])
+
+proc buildOnDemandOverlapped(
+    ct: ConstantRateCoverTraffic, claimEpoch: uint64
+) {.async: (raises: [CancelledError]).} =
+  ## On-demand Sphinx wrap + proof gen overlapped with the pre-send hold,
+  ## same as sendPacket. Start the timer first so it runs while buildPacket
+  ## (sync, includes GenerateProof) occupies the event loop.
+  let hold =
+    if ct.sampleSendDelay != nil:
+      let d = ct.sampleSendDelay()
+      if d > NoDelay: d.toDuration else: ZeroDuration
+    else:
+      ZeroDuration
+  let delayFut = sleepAsync(hold)
+  let proofGenStartTime = Moment.now()
+  var proofGenTimeMs: int64
+  let buildFut = (
+    proc(): Future[Result[CoverPacketBuild, string]] {.async.} =
+      let res = ct.buildPacket()
+      proofGenTimeMs = (Moment.now() - proofGenStartTime).milliseconds
+      return res
+  )()
+  await allFutures(buildFut, delayFut)
+
+  if hold > ZeroDuration and proofGenTimeMs > hold.milliseconds:
+    warn "Proof generation time exceeds sampled sender delay",
+      proofGenTimeMs,
+      sampledDelay = hold,
+      hint = "Increase the minimum delay floor or reduce proof generation time"
+
+  let builtRes = buildFut.value()
+  if ct.heldAcrossEpochBoundary(claimEpoch):
+    # beginEpoch already reset coverClaimed; do not unclaim into the new pool.
+    if builtRes.isOk:
+      let token = builtRes.get().proofToken
+      if token.len > 0 and ct.reclaimProofToken != nil:
+        ct.reclaimProofToken(token)
+    return
+
+  if builtRes.isErr:
+    trace "Failed to build cover packet", err = builtRes.error
+    mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
+    ct.unclaimCoverSlot()
+    return
+
+  let built = builtRes.get()
   let sendRes =
     await ct.sendPacket(built.firstHopPeerId, built.firstHopAddr, built.packet)
   if sendRes.isErr:
@@ -328,10 +382,7 @@ proc emitCoverPacket*(
 
   if ct.slotPool.claimSlotForCover():
     let claimEpoch = ct.slotPool.epoch
-    await ct.applySendDelay()
-    if ct.heldAcrossEpochBoundary(claimEpoch):
-      return
-    await ct.buildAndSendOnDemand()
+    await ct.buildOnDemandOverlapped(claimEpoch)
 
 proc runEmissionLoop(
     ct: ConstantRateCoverTraffic

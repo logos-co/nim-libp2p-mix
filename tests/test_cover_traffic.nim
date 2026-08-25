@@ -3,6 +3,7 @@
 
 {.used.}
 
+import std/os
 import chronos
 import results
 import libp2p_mix/[cover_traffic, serialization, spam_protection]
@@ -229,6 +230,38 @@ suite "ConstantRateCoverTraffic":
     check (Moment.now() - start) >= 60.milliseconds
     check sentPackets[].len == 1
 
+  asyncTest "on-demand hold overlaps proof generation":
+    ## Sequential hold+build would be ~160ms; overlapped is ~max(80,80).
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+    let (pid, ma) = makePeerInfo()
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 10, epochDuration = 1.seconds)
+    ct.setCoverPacketBuilder(
+      proc(): Result[CoverPacketBuild, string] {.gcsafe, raises: [].} =
+        os.sleep(80)
+        ok(
+          CoverPacketBuild(
+            packet: newSeq[byte](PacketSize),
+            firstHopPeerId: pid,
+            firstHopAddr: ma,
+            proofToken: @[0x42.byte],
+          )
+        )
+    )
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        Delay(80)
+    )
+    ct.onEpochChange(1)
+
+    let start = Moment.now()
+    await ct.emitCoverPacket()
+    let elapsed = Moment.now() - start
+    check elapsed >= 80.milliseconds
+    check elapsed < 140.milliseconds
+    check sentPackets[].len == 1
+
   asyncTest "packet held across epoch boundary is discarded":
     let sentPackets = new seq[seq[byte]]
     sentPackets[] = @[]
@@ -242,11 +275,18 @@ suite "ConstantRateCoverTraffic":
     )
     ct.onEpochChange(1)
 
+    var reclaimed: seq[seq[byte]]
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed.add(token)
+    )
+
     let fut = ct.emitCoverPacket()
     await sleepAsync(20.milliseconds)
     ct.onEpochChange(2)
     await fut
     check sentPackets[].len == 0
+    check reclaimed == @[@[0x42.byte]]
 
   asyncTest "start and stop":
     let ct = ConstantRateCoverTraffic.new(
