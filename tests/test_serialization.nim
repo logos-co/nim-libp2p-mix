@@ -84,6 +84,25 @@ suite "serialization_tests":
       header.Gamma == deserializedSP.Hdr.Gamma
       payload == deserializedSP.Payload
 
+  test "serializeSurb and deserializeSurb round-trip":
+    let
+      surb = makeSurb(0xAA)
+      serialized = surb.serializeSurb()
+      deserialized = deserializeSurb(serialized).expect("Failed to deserialize SURB")
+
+    check:
+      serialized.len == SurbSize
+      deserialized.hop.get() == surb.hop.get()
+      deserialized.header.Alpha == surb.header.Alpha
+      deserialized.header.Beta == surb.header.Beta
+      deserialized.header.Gamma == surb.header.Gamma
+      deserialized.key == surb.key
+
+  test "deserializeSurb rejects wrong-size input":
+    check:
+      deserializeSurb(newSeq[byte](SurbSize - 1)).isErr()
+      deserializeSurb(newSeq[byte](SurbSize + 1)).isErr()
+
   test "serializeMessageWithSURBs and extractSURBs round-trip":
     let
       msg = @[1'u8, 2, 3, 4, 5]

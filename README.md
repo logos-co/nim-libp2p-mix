@@ -294,7 +294,7 @@ INF Ping response received through mix network rtt=41ms…
 To build the binary without auto-cleanup:
 
 ```bash
-nim c -d:libp2p_mix_experimental_exit_is_dest -d:metrics -o:mix_ping examples/mix_ping.nim
+nim c -d:metrics -o:mix_ping examples/mix_ping.nim
 ./mix_ping
 ```
 
@@ -402,7 +402,6 @@ logos-co/nim-libp2p-mix#13 for the discussion behind this.
 
 | Flag | Purpose |
 |---|---|
-| `-d:libp2p_mix_experimental_exit_is_dest` | Allow exit nodes to also be the message destination (waku/lightpush usage). Enabled by default in `libp2p_mix.nimble`. |
 | `-d:metrics` | Enable Prometheus-style metric counters (test-time default). |
 | `-d:enable_mix_benchmarks` | Compile in benchmark/timing helpers from `libp2p_mix/benchmark.nim`. |
 

@@ -7,6 +7,7 @@ description =
   "Mix protocol for nim-libp2p — anonymous routing with the Sphinx packet format"
 license = "MIT"
 skipDirs = @["examples", "tests"]
+entryPoints = @["examples/mix_ping.nim"]
 
 requires "nim >= 2.2.4",
   "libp2p == 2.2.1", "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
@@ -28,8 +29,7 @@ let cxxRuntime =
 
 let cfg =
   " --styleCheck:usages --styleCheck:error" & (if verbose: "" else: " --verbosity:0") &
-  " --skipUserCfg -f --threads:on --opt:speed" &
-  " -d:libp2p_mix_experimental_exit_is_dest" & cxxRuntime
+  " --skipUserCfg -f --threads:on --opt:speed" & cxxRuntime
 
 proc runTest(filename: string, moreoptions: string = "") =
   var compileCmd = nimc & " " & lang & " " & cfg & " " & flags

@@ -86,16 +86,18 @@ suite "setLocalMultiAddr":
 
     # Force the SURB intermediate path onto infos[3] and infos[4] so we can
     # peel Sphinx layers with known private keys. Pool must still have
-    # PathLength entries (exit is filtered out by buildSurb).
-    let destInfo = infos[1]
-    let exitInfo = infos[2]
+    # PathLength entries (the destination is excluded from the return path).
+    let destinationInfo = infos[2]
     replacePool(
-      mix, @[infos[3].toMixPubInfo(), infos[4].toMixPubInfo(), exitInfo.toMixPubInfo()]
+      mix,
+      @[
+        infos[3].toMixPubInfo(), infos[4].toMixPubInfo(), destinationInfo.toMixPubInfo()
+      ],
     )
 
-    var id: SURBIdentifier
-    rng().generate(id)
-    let surb = mix.buildSurb(id, destInfo.peerId, exitInfo.peerId).expect("build SURB")
+    let surb = mix
+      .createSurb(MixDestination.exitNode(destinationInfo.peerId))
+      .expect("create SURB").surb
 
     let firstHopPeerId =
       bytesToMultiAddr(surb.hop.get()).expect("decode SURB first hop")[0]
