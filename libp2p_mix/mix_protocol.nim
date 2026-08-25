@@ -668,8 +668,16 @@ proc sendPacket(
         sampledDelay = initialDelay,
         hint = "Increase the minimum delay floor or reduce proof generation time"
 
-  let (packetToSend, _) = proofGenFut.value().valueOr:
+  let (packetToSend, proofToken) = proofGenFut.value().valueOr:
     return err(error)
+
+  # The packet never left this node on send failure, so its messageId can be
+  # reused; without this the proof budget drifts below the slot budget.
+  template reclaimAndFail(msg: string): untyped =
+    if proofToken.len > 0:
+      mixProto.spamProtection.withValue(sp):
+        sp.reclaimProofToken(proofToken)
+    return err(msg)
 
   when defined(enable_mix_benchmarks):
     if logConfig.logType == Entry:
@@ -688,10 +696,14 @@ proc sendPacket(
     await mixProto.writeLp(peerId, @[multiAddress], @[MixProtocolID], packetToSend)
   except DialFailedError as exc:
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
-    return err(fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}")
+    reclaimAndFail(
+      fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}"
+    )
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
-    return err(fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}")
+    reclaimAndFail(
+      fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}"
+    )
   except CancelledError as exc:
     raise exc
 
@@ -940,11 +952,27 @@ proc reply(
 
   let sphinxPacket = useSURB(surb, message)
 
+  # Claim a slot for reply origination (same R budget as local send / forward)
+  mixProto.coverTraffic.withValue(ct):
+    let claim = ct.slotPool.claimSlot()
+    if not claim.success:
+      warn "Slot exhaustion, dropping SURB reply"
+      mix_messages_error.inc(labelValues = ["Reply", "SLOT_EXHAUSTED"])
+      mix_slot_claim_rejected.inc(labelValues = ["reply"])
+      return
+    if claim.reclaimedToken.len > 0:
+      mixProto.spamProtection.withValue(sp):
+        sp.reclaimProofToken(claim.reclaimedToken)
+
   let sendRes = await mixProto.sendPacket(
     peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
   )
   if sendRes.isErr:
     error "could not send reply", peerId, multiAddr, err = sendRes.error
+    # The packet never reached the wire; sendPacket reclaims the proof token
+    # when one was generated, so refunding the slot cannot double-spend a proof
+    mixProto.coverTraffic.withValue(ct):
+      ct.slotPool.unclaimSlot()
 
 type PathNode = object
   peerId: PeerId
