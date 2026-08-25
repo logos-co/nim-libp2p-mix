@@ -288,6 +288,43 @@ suite "ConstantRateCoverTraffic":
     check sentPackets[].len == 0
     check reclaimed == @[@[0x42.byte]]
 
+  asyncTest "prebuilt packet held across epoch boundary reclaims its token":
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+    let (pid, ma) = makePeerInfo()
+
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 10, epochDuration = 1.seconds, enablePrecomputation = true
+    )
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        Delay(100)
+    )
+    ct.onEpochChange(1)
+    ct.slotPool.addPacket(
+      CoverPacket(
+        packet: @[0xAA.byte],
+        firstHopPeerId: pid,
+        firstHopAddr: ma,
+        proofToken: @[0x7A.byte],
+      )
+    )
+
+    var reclaimed: seq[seq[byte]]
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed.add(token)
+    )
+
+    let fut = ct.emitCoverPacket()
+    await sleepAsync(20.milliseconds)
+    ct.onEpochChange(2)
+    await fut
+    check sentPackets[].len == 0
+    check reclaimed == @[@[0x7A.byte]]
+
   asyncTest "start and stop":
     let ct = ConstantRateCoverTraffic.new(
       totalSlots = 10, epochDuration = 100.seconds, useInternalEpochTimer = false

@@ -359,6 +359,11 @@ proc emitCoverPacket*(
       # staleness window before the wire write stays minimal (§6.5).
       await ct.applySendDelay()
       if ct.heldAcrossEpochBoundary(claimEpoch):
+        # beginEpoch already reset coverClaimed; do not unclaim into the new
+        # pool. Offer the dequeued packet's token for reclaim, same as the
+        # on-demand path (epoch-scoped mechanisms drop cross-epoch tokens).
+        if pkt.proofToken.len > 0 and ct.reclaimProofToken != nil:
+          ct.reclaimProofToken(pkt.proofToken)
         return
       # Check if the prebuilt proof is still valid (e.g., Merkle root not stale)
       if ct.validateProofToken != nil and pkt.proofToken.len > 0 and
