@@ -894,17 +894,15 @@ proc anonymizeLocalProtocolSend*(
 
   return ok(session)
 
-proc reply(
+proc sendSurbReply*(
     mixProto: MixProtocol, surb: SURB, msg: sink seq[byte]
-) {.async: (raises: [CancelledError]).} =
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   let (peerId, multiAddr) = surb.hop.get().bytesToMultiAddr().valueOr:
-      error "could not obtain multiaddress from hop", err = error
-      return
+      return err("could not obtain multiaddress from hop: " & error)
 
   # Reply messages don't require an application codec: routing is determined by the SURB.
   let message = buildMessage(move(msg), "").valueOr:
-    error "could not build reply message", err = error
-    return
+    return err("could not build reply message: " & error[0])
 
   let sphinxPacket = useSURB(surb, message)
 
@@ -912,7 +910,8 @@ proc reply(
     peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
   )
   if sendRes.isErr:
-    error "could not send reply", peerId, multiAddr, err = sendRes.error
+    return err("could not send reply: " & sendRes.error)
+  return ok()
 
 type PathNode = object
   peerId: PeerId
@@ -1126,9 +1125,10 @@ proc init*(
     # `message` is passed by value (the closure signature is fixed by
     # `ExitLayer.init`'s callback type). A full sink-through chain
     # would require updating the callback type in libp2p_mix.
-    # For now: reply() takes `sink seq[byte]` and `move()`s into
+    # For now: sendSurbReply() takes `sink seq[byte]` and `move()`s into
     # buildMessage internally — the optimization stops at this boundary.
-    await mixProto.reply(surb, message)
+    (await mixProto.sendSurbReply(surb, message)).isOkOr:
+      error "could not send reply", err = error
 
   mixProto.exitLayer = ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehaviors)
 

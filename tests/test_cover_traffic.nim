@@ -161,6 +161,36 @@ suite "ConstantRateCoverTraffic cover_rate_fraction":
     check ct.emissionInterval == 16.seconds
 
 suite "ConstantRateCoverTraffic":
+  asyncTest "runtime rate update restarts a running scheduler":
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 100, epochDuration = 100.milliseconds, coverRateFraction = 1.0
+    )
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+
+    await ct.start()
+    defer:
+      await ct.stop()
+
+    (await ct.setCoverRateFraction(0.5)).expect("rate update failed")
+    check:
+      ct.isRunning
+      ct.coverRateFraction == 0.5
+      ct.emissionInterval == 8.milliseconds
+
+    await sleepAsync(20.milliseconds)
+    check sentPackets[].len > 0
+
+  asyncTest "invalid runtime rate leaves scheduler unchanged":
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 10, epochDuration = 10.seconds, coverRateFraction = 0.5
+    )
+    check (await ct.setCoverRateFraction(0.0)).isErr
+    check:
+      ct.coverRateFraction == 0.5
+      ct.emissionInterval == 8.seconds
   test "emission sends packet and claims slot":
     let sentPackets = new seq[seq[byte]]
     sentPackets[] = @[]
