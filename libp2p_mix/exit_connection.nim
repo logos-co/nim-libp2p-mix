@@ -4,10 +4,12 @@
 import hashes, chronos, chronicles
 import libp2p/stream/connection
 from padding import DataSize
+from serialization import SURB
 
 type MixExitConnection* = ref object of Connection
   message: seq[byte]
   response: seq[byte]
+  surbs: seq[SURB]
 
 method readOnce*(
     self: MixExitConnection, pbytes: pointer, nbytes: int
@@ -53,5 +55,12 @@ proc getResponse*(self: MixExitConnection): seq[byte] =
   self.response = @[]
   return r
 
-proc new*(T: typedesc[MixExitConnection], message: seq[byte]): T =
-  T(message: message)
+proc takeSURBs*(self: MixExitConnection): seq[SURB] =
+  let surbs = self.surbs
+  self.surbs = @[]
+  surbs
+
+proc new*(
+    T: typedesc[MixExitConnection], message: seq[byte], surbs: seq[SURB] = @[]
+): T =
+  T(message: message, surbs: surbs)

@@ -162,6 +162,7 @@ type ConstantRateCoverTraffic* = ref object of CoverTraffic
   coverRateFraction: float
   precomputeTarget: int
   enablePrecomputation: bool
+  autoPrecomputeBatchSize: bool
   precomputeBatchSize: int
   emissionLoop: Future[void]
   precomputeLoop: Future[void]
@@ -229,6 +230,7 @@ proc new*(
     precomputeBatchSize: batchSize,
     emissionEpochEvent: newAsyncEvent(),
     precomputeEpochEvent: newAsyncEvent(),
+    autoPrecomputeBatchSize: precomputeBatchSize <= 0,
     useInternalEpochTimer: useInternalEpochTimer,
     running: false,
   )
@@ -422,6 +424,33 @@ method stop*(ct: ConstantRateCoverTraffic) {.async: (raises: []).} =
   ct.precomputeLoop = nil
   ct.epochTimerLoop = nil
   trace "Cover traffic stopped"
+
+proc setCoverRateFraction*(
+    ct: ConstantRateCoverTraffic, coverRateFraction: float
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  if coverRateFraction <= 0.0 or coverRateFraction > 1.0:
+    return err("coverRateFraction (f) must be in (0.0, 1.0]")
+
+  let wasRunning = ct.running
+  if wasRunning:
+    await cancelIfNotNil(ct.emissionLoop)
+    await cancelIfNotNil(ct.precomputeLoop)
+    ct.emissionLoop = nil
+    ct.precomputeLoop = nil
+
+  let scaledSlots = max(1, (ct.slotPool.totalSlots.float * coverRateFraction).int)
+  ct.coverRateFraction = coverRateFraction
+  ct.emissionInterval =
+    max(1.milliseconds, ct.epochDuration * (1 + PathLength) div scaledSlots)
+  ct.precomputeTarget = max(1, scaledSlots div (1 + PathLength))
+  if ct.autoPrecomputeBatchSize:
+    ct.precomputeBatchSize = max(1, ct.precomputeTarget div 10)
+
+  if wasRunning:
+    ct.emissionLoop = ct.runEmissionLoop()
+    if ct.enablePrecomputation:
+      ct.precomputeLoop = ct.runPrecomputeLoop()
+  return ok()
 
 func emissionInterval*(ct: ConstantRateCoverTraffic): Duration =
   ct.emissionInterval
