@@ -7,6 +7,7 @@ import chronos, results
 import libp2p/[protocols/ping, peerid, switch, builders]
 import libp2p_mix
 import libp2p_mix/mix_protocol
+import libp2p_mix/pool
 
 import ../tools/[lifecycle, unittest, crypto]
 import ../utils
@@ -56,6 +57,19 @@ suite "Mix Protocol - Plug-in API":
     check:
       delivery.service == fallbackProto.codec
       delivery.payload == pluginPayload
+
+    # A provider learned outside relay discovery can be the exit node without
+    # joining the relay pool. The explicit send must deliver through that node
+    # while leaving it absent from the sender's pool.
+    let destinationInfo = destination.localMixPubInfo()
+    discard sender.nodePool.remove(destinationId)
+    let explicitPayload = @[9.byte, 8, 7]
+    (await sender.send(destinationInfo, fallbackProto.codec, explicitPayload)).expect(
+      "could not send to explicit destination"
+    )
+    check (await deliveries.get().wait(2.seconds)).payload == explicitPayload
+    check sender.nodePool.get(destinationId).isNone
+    sender.nodePool.add(destinationInfo)
 
     destination.unregisterMixDeliveryHandler(fallbackProto.codec)
 
