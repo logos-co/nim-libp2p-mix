@@ -25,7 +25,7 @@ import std/[sets, tables]
 import chronicles, chronos, metrics
 import libp2p/utils/[heartbeat, opt]
 import results
-import ./[mix_metrics, serialization]
+import ./[mix_metrics, serialization, sphinx]
 
 export results
 
@@ -48,8 +48,7 @@ type
   ConnCreds* = object
     igroup*: SURBIdentifierGroup
     incoming*: AsyncQueue[seq[byte]]
-    surbSecret*: serialization.Secret
-    surbKey*: serialization.Key
+    credential*: ReplyCredential
 
   SurbStore* = ref object
     creds: Table[SURBIdentifier, ConnCreds]

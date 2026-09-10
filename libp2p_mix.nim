@@ -8,15 +8,29 @@ import
   ]
 import libp2p/stream/connection
 import chronos
+from ./libp2p_mix/serialization import
+  SURB, SURBIdentifier, deserializeSurb, serializeSurb
+from ./libp2p_mix/sphinx import ReplyCredential, RawSurbReply, identifier
 
 export toConnection
 export MixProtocolID
 export MixProtocol
+export MixDelivery
+export MixDeliveryHandler
+export RawSurbReplyDisposition
+export RawSurbReplyHandler
 
 export get
 export `new`
 export init
 export getMaxMessageSizeForCodec
+export send
+export createSurb
+export sendWithSurb
+export registerMixDeliveryHandler
+export unregisterMixDeliveryHandler
+export registerRawSurbReplyHandler
+export unregisterRawSurbReplyHandler
 export MixDestination
 export MixParameters
 export destReadBehaviorCb
@@ -24,6 +38,16 @@ export DestReadBehavior
 export registerDestReadBehavior
 export localMixPubInfo
 export setLocalMultiAddr
+export SURB
+export SURBIdentifier
+export deserializeSurb
+export serializeSurb
+export ReplyCredential
+export RawSurbReply
+export identifier
+export recoverReply
+export ReplyRecoveryErrorKind
+export ReplyRecoveryError
 
 # Spam protection exports
 export SpamProtection
@@ -63,6 +87,5 @@ proc readExactly*(nBytes: int): DestReadBehavior =
 
   DestReadBehavior(callback: callback, usesLengthPrefix: false)
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  export exitNode
-  export forwardToAddr
+export exitNode
+export forwardToAddr
