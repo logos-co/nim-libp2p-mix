@@ -868,6 +868,7 @@ proc sendInternal(
     destination: MixDestination,
     numSurbs: uint8,
     useLegacySurbEnvelope: bool,
+    destinationInfo: Opt[MixPubInfo] = Opt.none(MixPubInfo),
 ): Future[Result[Opt[SurbSession], string]] {.
     async: (raises: [CancelledError, LPStreamError])
 .} =
@@ -902,10 +903,15 @@ proc sendInternal(
   if mixProto.nodePool.get(destination.peerId).isSome:
     numAvailableNodes = numMixNodes - 1
 
-  if numAvailableNodes < PathLength:
+  let requiredPoolNodes =
+    if destinationInfo.isSome:
+      PathLength - 1
+    else:
+      PathLength
+  if numAvailableNodes < requiredPoolNodes:
     mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
     return err(
-      fmt"No. of public mix nodes ({numAvailableNodes}) less than path length ({PathLength})."
+      fmt"No. of public mix nodes ({numAvailableNodes}) less than required pool nodes ({requiredPoolNodes})."
     )
 
   # Skip the destination peer
@@ -915,12 +921,24 @@ proc sendInternal(
   let index = poolPeerIds.find(destination.peerId)
   if index != -1:
     availableIndices.del(index)
-  elif destination.kind == MixNode:
+  elif destination.kind == MixNode and destinationInfo.isNone:
     return err("Destination does not support mix")
 
   var nextHopAddr: MultiAddress
   var nextHopPeerId: PeerId
   while hop.len < PathLength:
+    # An explicitly supplied destination is the final hop, independent of the
+    # relay pool. Do not select or consume another relay for this hop.
+    if hop.len == PathLength - 1 and destinationInfo.isSome:
+      let info = destinationInfo.get()
+      let addressBytes = multiAddrToBytes(info.peerId, info.multiAddr).valueOr:
+        return err("Invalid explicit Mix destination address: " & error)
+      exitPeerId = info.peerId
+      publicKeys.add(info.mixPubKey)
+      delays.add(NoDelay)
+      hop.add(Hop.init(addressBytes))
+      continue
+
     if availableIndices.len == 0:
       mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
       return err("Ran out of available mix nodes while constructing path")
@@ -1080,6 +1098,36 @@ proc send*(
   except LPStreamError as exc:
     return err("could not send Mix service payload: " & exc.msg)
 
+  ok()
+
+proc send*(
+    mixProto: MixProtocol,
+    destination: MixPubInfo,
+    service: string,
+    payload: sink seq[byte],
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Send to an explicit exit node without adding it to the relay pool or
+  ## changing its peer-store entries. Other hops come from the normal pool;
+  ## the destination is excluded from their selection even if already known.
+  if service.len == 0:
+    return err("Mix service must not be empty")
+  discard multiAddrToBytes(destination.peerId, destination.multiAddr).valueOr:
+    return err("Invalid explicit Mix destination address: " & error)
+  try:
+    (
+      await mixProto.sendInternal(
+        nil,
+        move(payload),
+        service,
+        MixDestination.exitNode(destination.peerId),
+        0,
+        false,
+        Opt.some(destination),
+      )
+    ).isOkOr:
+      return err(error)
+  except LPStreamError as exc:
+    return err("could not send Mix service payload: " & exc.msg)
   ok()
 
 proc sendWithSurb*(
