@@ -287,8 +287,8 @@ method handleMixMessages*(
       trace "Cover packet received (loop), discarding",
         peerId = mixProto.mixNodeInfo.peerId
       mix_cover_received.inc()
-      mixProto.coverTraffic.withValue(ct):
-        ct.onCoverReceived()
+      if mixProto.coverTraffic.isSome:
+        mixProto.coverTraffic.get().onCoverReceived()
       return
 
     let (surbs, message) = extractSURBs(deserialized.message).valueOr:
@@ -358,17 +358,16 @@ method handleMixMessages*(
     mix_messages_recvd.inc(labelValues = ["Intermediate"])
 
     # Claim a slot for forwarding (Mix Cover Traffic spec §6.4)
-    mixProto.coverTraffic.withValue(ct):
-      let claim = ct.slotPool.claimSlot()
+    if mixProto.coverTraffic.isSome:
+      let claim = mixProto.coverTraffic.get().slotPool.claimSlot()
       if not claim.success:
         warn "Slot exhaustion, dropping forwarded packet"
         mix_messages_error.inc(labelValues = ["Intermediate", "SLOT_EXHAUSTED"])
         mix_slot_claim_rejected.inc(labelValues = ["forward"])
         return
       # Reclaim proof token from discarded cover packet for messageId reuse
-      if claim.reclaimedToken.len > 0:
-        mixProto.spamProtection.withValue(sp):
-          sp.reclaimProofToken(claim.reclaimedToken)
+      if claim.reclaimedToken.len > 0 and mixProto.spamProtection.isSome:
+        mixProto.spamProtection.get().reclaimProofToken(claim.reclaimedToken)
 
     let actualDelay = mixProto.delayStrategy.generateForIntermediate(processedSP.delay)
     trace "Computed delay", encodedDelay = processedSP.delay, actualDelay
@@ -412,12 +411,11 @@ method handleMixMessages*(
 
     await allFutures(proofGenFut, delayFut)
 
-    mixProto.spamProtection.withValue(sp):
-      if proofGenTimeMs > actualDelay.int64:
-        warn "Proof generation time exceeds sampled delay",
-          proofGenTimeMs,
-          sampledDelay = actualDelay,
-          hint = "Increase the minimum delay floor or reduce proof generation time"
+    if mixProto.spamProtection.isSome and proofGenTimeMs > actualDelay.int64:
+      warn "Proof generation time exceeds sampled delay",
+        proofGenTimeMs,
+        sampledDelay = actualDelay,
+        hint = "Increase the minimum delay floor or reduce proof generation time"
 
     let (outgoingPacket, _) = proofGenFut.value().valueOr:
       error "Failed to generate spam protection proof for next hop", err = error
@@ -661,12 +659,11 @@ proc sendPacket(
 
   await allFutures(proofGenFut, delayFut)
 
-  mixProto.spamProtection.withValue(sp):
-    if proofGenTimeMs > initialDelay.int64:
-      warn "Proof generation time exceeds sampled sender delay",
-        proofGenTimeMs,
-        sampledDelay = initialDelay,
-        hint = "Increase the minimum delay floor or reduce proof generation time"
+  if mixProto.spamProtection.isSome and proofGenTimeMs > initialDelay.int64:
+    warn "Proof generation time exceeds sampled sender delay",
+      proofGenTimeMs,
+      sampledDelay = initialDelay,
+      hint = "Increase the minimum delay floor or reduce proof generation time"
 
   let (packetToSend, _) = proofGenFut.value().valueOr:
     return err(error)
@@ -910,15 +907,14 @@ proc anonymizeLocalProtocolSend*(
   # Claimed here rather than on entry so that a slot is only consumed by a
   # packet that is actually emitted -- the pool has no refund path, so an
   # earlier claim would leak one on every validation failure above.
-  mixProto.coverTraffic.withValue(ct):
-    let claim = ct.slotPool.claimSlot()
+  if mixProto.coverTraffic.isSome:
+    let claim = mixProto.coverTraffic.get().slotPool.claimSlot()
     if not claim.success:
       mix_slot_claim_rejected.inc(labelValues = ["send"])
       releaseAndFail("No slots available in current epoch")
     # Reclaim proof token from discarded cover packet for messageId reuse
-    if claim.reclaimedToken.len > 0:
-      mixProto.spamProtection.withValue(sp):
-        sp.reclaimProofToken(claim.reclaimedToken)
+    if claim.reclaimedToken.len > 0 and mixProto.spamProtection.isSome:
+      mixProto.spamProtection.get().reclaimProofToken(claim.reclaimedToken)
 
   # Send the wrapped message to the first mix node in the selected path
   (await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)).isOkOr:
@@ -1053,8 +1049,8 @@ proc sendCoverPacket*(
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
-  mixProto.coverTraffic.withValue(ct):
-    await ct.start()
+  if mixProto.coverTraffic.isSome:
+    await mixProto.coverTraffic.get().start()
 
 method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   ## Stop the MixProtocol background tasks and cancel all in-flight
@@ -1066,8 +1062,8 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   await mixProto.surbStore.stop()
   mixProto.surbStore.clear()
 
-  mixProto.coverTraffic.withValue(ct):
-    await ct.stop()
+  if mixProto.coverTraffic.isSome:
+    await mixProto.coverTraffic.get().stop()
 
   # Snapshot the list and clear it before cancelling.
   let pending = mixProto.ongoingMixMessages
@@ -1129,7 +1125,8 @@ proc init*(
       DelayStrategy(ExponentialDelayStrategy.new(rng = switch.rng))
 
   mixProto.coverTraffic = coverTraffic
-  coverTraffic.withValue(ct):
+  if coverTraffic.isSome:
+    let ct = coverTraffic.get()
     ct.setCoverPacketBuilder(
       proc(): Result[CoverPacketBuild, string] {.gcsafe, raises: [].} =
         mixProto.buildCoverPacket()
@@ -1143,7 +1140,8 @@ proc init*(
     # Note: useInternalEpochTimer must be set to false when SpamProtection is
     # present, as SpamProtection provides epoch change notifications via
     # notifyEpochChange. Having both active would cause double epoch advances.
-    spamProtection.withValue(sp):
+    if spamProtection.isSome:
+      let sp = spamProtection.get()
       sp.registerOnEpochChange(
         proc(epoch: uint64) {.gcsafe, raises: [].} =
           ct.onEpochChange(epoch)

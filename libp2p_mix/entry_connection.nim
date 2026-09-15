@@ -51,8 +51,8 @@ chronicles.formatIt(MixEntryConnection):
 
 proc releaseReplyCreds(self: MixEntryConnection) =
   ## Idempotent, so the timeout and close paths can both call it.
-  self.replySession.withValue(session):
-    session.release()
+  if self.replySession.isSome:
+    self.replySession.get().release()
   self.replySession = Opt.none(SurbSession)
 
 method readOnce*(

@@ -277,7 +277,9 @@ proc emitCoverPacket*(
     if not ct.slotPool.claimSlotForCover():
       mix_slot_claim_rejected.inc(labelValues = ["cover"])
       return
-    ct.slotPool.dequeue().withValue(pkt):
+    let pktOpt = ct.slotPool.dequeue()
+    if pktOpt.isSome:
+      let pkt = pktOpt.get()
       # Check if the prebuilt proof is still valid (e.g., Merkle root not stale)
       if ct.validateProofToken != nil and pkt.proofToken.len > 0 and
           not ct.validateProofToken(pkt.proofToken):
