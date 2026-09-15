@@ -23,7 +23,7 @@
 
 import std/[sets, tables]
 import chronicles, chronos, metrics
-import libp2p/utils/[heartbeat, opt]
+import libp2p/utils/heartbeat
 import results
 import ./[mix_metrics, serialization]
 

@@ -3,7 +3,6 @@
 
 import results
 import std/sequtils
-import libp2p/utils/opt
 import ./delay
 
 const
@@ -147,15 +146,15 @@ proc readBytes(
   if data.len < offset:
     return err("not enough data")
 
-  readSize.withValue(size):
-    if data.len < offset + size:
-      return err("not enough data")
-    let slice = data[offset ..< offset + size]
-    offset += size
+  let size = readSize.valueOr:
+    let slice = data[offset .. ^1]
+    offset = data.len
     return ok(slice)
 
-  let slice = data[offset .. ^1]
-  offset = data.len
+  if data.len < offset + size:
+    return err("not enough data")
+  let slice = data[offset ..< offset + size]
+  offset += size
   return ok(slice)
 
 proc deserialize*(T: typedesc[RoutingInfo], data: openArray[byte]): Result[T, string] =
