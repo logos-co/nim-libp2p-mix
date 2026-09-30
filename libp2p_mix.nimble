@@ -10,7 +10,7 @@ skipDirs = @["examples", "tests"]
 entryPoints = @["examples/mix_ping.nim"]
 
 requires "nim >= 2.2.4",
-  "libp2p == 2.2.1", "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
+  "libp2p == 2.3.5", "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
   "nimcrypto >= 0.6.0", "stew >= 0.4.2", "results", "unittest2"
 
 import os, strutils
