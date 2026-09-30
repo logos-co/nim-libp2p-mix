@@ -1047,22 +1047,23 @@ proc buildCoverPacket*(
     epoch = ct.slotPool.epoch
   return await mixProto.buildCoverPacket(epoch)
 
-proc sendCoverPacket*(
-    mixProto: MixProtocol,
-    peerId: PeerId,
-    multiAddr: MultiAddress,
-    packet: seq[byte],
-    epoch: Opt[uint64] = Opt.none(uint64),
+proc proveCoverPacket(
+    mixProto: MixProtocol, packet: seq[byte], epoch: Opt[uint64]
+): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+  if mixProto.spamProtection.isSome() and
+      not mixProto.spamProtection.get().precomputeCoverProofs():
+    let proved = await mixProto.generateAndAppendProof(packet, "Cover", epoch)
+    return proved.map(
+      proc(value: auto): seq[byte] =
+        value.packet
+    )
+  return ok(packet)
+
+proc writeCoverPacket(
+    mixProto: MixProtocol, peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte]
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-  let packetToSend =
-    if mixProto.spamProtection.isSome() and
-        not mixProto.spamProtection.get().precomputeCoverProofs():
-      (await mixProto.generateAndAppendProof(packet, "Cover", epoch)).valueOr:
-        return err(error)
-    else:
-      (packet, newSeq[byte]())
   try:
-    await mixProto.writeLp(peerId, @[multiAddr], @[MixProtocolID], packetToSend[0])
+    await mixProto.writeLp(peerId, @[multiAddr], @[MixProtocolID], packet)
     mix_messages_forwarded.inc(labelValues = ["Cover"])
     return ok()
   except DialFailedError as exc:
@@ -1071,6 +1072,17 @@ proc sendCoverPacket*(
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
     return err("Failed to write cover packet: " & exc.msg)
+
+proc sendCoverPacket*(
+    mixProto: MixProtocol,
+    peerId: PeerId,
+    multiAddr: MultiAddress,
+    packet: seq[byte],
+    epoch: Opt[uint64] = Opt.none(uint64),
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  let proved = (await mixProto.proveCoverPacket(packet, epoch)).valueOr:
+    return err(error)
+  return await mixProto.writeCoverPacket(peerId, multiAddr, proved)
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
@@ -1157,11 +1169,17 @@ proc init*(
       ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
         return await mixProto.buildCoverPacket(epoch)
     )
+    ct.setCoverPacketProver(
+      proc(
+          packet: seq[byte], epoch: uint64
+      ): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+        return await mixProto.proveCoverPacket(packet, Opt.some(epoch))
+    )
     ct.setCoverPacketSender(
       proc(
-          peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], epoch: uint64
+          peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], _: uint64
       ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-        await mixProto.sendCoverPacket(peerId, multiAddr, packet, Opt.some(epoch))
+        return await mixProto.writeCoverPacket(peerId, multiAddr, packet)
     )
     ct.setSendDelaySampler(
       proc(): Delay {.gcsafe, raises: [].} =

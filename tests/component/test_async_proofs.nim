@@ -12,6 +12,8 @@ import ../tools/[unittest, lifecycle, crypto]
 type AsyncProofs = ref object of SpamProtection
   generated, verified: int
   unavailable, blocked, pending, cancelled: bool
+  proofGate: AsyncEvent
+  coverEpochs: seq[uint64]
 
 method precomputeCoverProofs(sp: AsyncProofs): bool {.gcsafe, raises: [].} =
   false
@@ -19,7 +21,13 @@ method precomputeCoverProofs(sp: AsyncProofs): bool {.gcsafe, raises: [].} =
 method generateProofAsync(
     sp: AsyncProofs, packet: seq[byte]
 ): Future[Result[ProofResult, string]] {.async: (raises: [CancelledError]).} =
-  if sp.blocked:
+  if not sp.proofGate.isNil:
+    sp.pending = true
+    try:
+      await sp.proofGate.wait()
+    finally:
+      sp.pending = false
+  elif sp.blocked:
     sp.pending = true
     try:
       await sleepAsync(1.minutes)
@@ -34,6 +42,12 @@ method generateProofAsync(
   inc sp.generated
   return ok(ProofResult(proof: @[packet[0]]))
 
+method generateProofAsync(
+    sp: AsyncProofs, packet: seq[byte], epoch: uint64
+): Future[Result[ProofResult, string]] {.async: (raises: [CancelledError]).} =
+  sp.coverEpochs.add(epoch)
+  return await sp.generateProofAsync(packet)
+
 method verifyProofAsync(
     sp: AsyncProofs, proof, packet: seq[byte]
 ): Future[Result[bool, string]] {.async: (raises: [CancelledError]).} =
@@ -42,6 +56,71 @@ method verifyProofAsync(
   return ok(proof == @[packet[0]])
 
 suite "Asynchronous proof provider":
+  asyncTest "cover proofs overlap hold and epoch-crossed packets are discarded":
+    let infos = MixNodeInfo.generateRandomMany(3, rng())
+    let sw = createSwitch(infos[0].multiAddr, Opt.some(infos[0].libp2pPrivKey))
+    let provider = AsyncProofs(proofSize: 1, proofGate: newAsyncEvent())
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 2,
+      epochDuration = 1.seconds,
+      enablePrecomputation = true,
+      useInternalEpochTimer = false,
+    )
+    let node = MixProtocol.new(
+      infos[0],
+      sw,
+      spamProtection = Opt.some(SpamProtection(provider)),
+      delayStrategy = Opt.some(DelayStrategy(NoSamplingDelayStrategy.new(rng()))),
+      coverTraffic = Opt.some(CoverTraffic(ct)),
+    )
+    for info in infos[1 .. ^1]:
+      node.nodePool.add(info.toMixPubInfo())
+
+    var sent = 0
+    ct.setCoverPacketSender(
+      proc(
+          peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], epoch: uint64
+      ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+        inc sent
+        return ok()
+    )
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        Delay(200)
+    )
+    ct.onEpochChange(7)
+
+    let emission = ct.emitCoverPacket()
+    await sleepAsync(50.milliseconds)
+    check provider.pending
+    check provider.coverEpochs == @[7'u64]
+
+    ct.onEpochChange(8)
+    provider.proofGate.fire()
+    await emission
+    check sent == 0
+
+    let built = (await node.buildCoverPacket(9)).tryGet()
+    provider.proofGate = newAsyncEvent()
+    ct.onEpochChange(9)
+    ct.slotPool.addPacket(
+      CoverPacket(
+        packet: built.packet,
+        firstHopPeerId: built.firstHopPeerId,
+        firstHopAddr: built.firstHopAddr,
+      )
+    )
+
+    let prebuiltEmission = ct.emitCoverPacket()
+    await sleepAsync(50.milliseconds)
+    check provider.pending
+    check provider.coverEpochs == @[7'u64, 9'u64]
+
+    ct.onEpochChange(10)
+    provider.proofGate.fire()
+    await prebuiltEmission
+    check sent == 0
+
   asyncTest "cover precomputation spends no proofs; routing awaits per-hop proofs":
     let infos = MixNodeInfo.generateRandomMany(5, rng())
     var nodes: seq[MixProtocol]
