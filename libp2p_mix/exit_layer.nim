@@ -70,7 +70,7 @@ when defined(libp2p_mix_experimental_exit_is_dest):
   proc runHandler(
       self: ExitLayer, codec: string, message: seq[byte], surbs: seq[SURB]
   ) {.async: (raises: [CancelledError]).} =
-    let exitConn = MixExitConnection.new(message)
+    let exitConn = MixExitConnection.new(message, surbs)
     defer:
       await exitConn.close()
 
@@ -87,9 +87,10 @@ when defined(libp2p_mix_experimental_exit_is_dest):
       error "Handler doesn't exist", codec = codec
       return
 
-    if surbs.len != 0:
-      let response = exitConn.getResponse()
-      await self.reply(surbs, response)
+    let response = exitConn.getResponse()
+    let unclaimedSurbs = exitConn.takeSURBs()
+    if unclaimedSurbs.len != 0 and response.len != 0:
+      await self.reply(unclaimedSurbs, response)
 
 proc fwdRequest(
     self: ExitLayer,

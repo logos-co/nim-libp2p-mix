@@ -134,7 +134,7 @@ suite "setLocalMultiAddr":
     # Force intermediates onto a known PathLength-1 subset.
     replacePool(mix, infos[1 .. PathLength - 1].mapIt(it.toMixPubInfo()))
 
-    let built = mix.buildCoverPacket().expect("build cover packet")
+    let built = (await mix.buildCoverPacket()).expect("build cover packet")
     let selfMa = selfMultiAddrFromPath(built.packet, built.firstHopPeerId, infos)
 
     check selfMa == updated
