@@ -1047,7 +1047,7 @@ proc buildCoverPacket*(
     epoch = ct.slotPool.epoch
   return await mixProto.buildCoverPacket(epoch)
 
-proc proveCoverPacket(
+proc generateAndAppendCoverProof(
     mixProto: MixProtocol, packet: seq[byte], epoch: Opt[uint64]
 ): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
   if mixProto.spamProtection.isSome() and
@@ -1080,7 +1080,7 @@ proc sendCoverPacket*(
     packet: seq[byte],
     epoch: Opt[uint64] = Opt.none(uint64),
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-  let proved = (await mixProto.proveCoverPacket(packet, epoch)).valueOr:
+  let proved = (await mixProto.generateAndAppendCoverProof(packet, epoch)).valueOr:
     return err(error)
   return await mixProto.writeCoverPacket(peerId, multiAddr, proved)
 
@@ -1169,11 +1169,11 @@ proc init*(
       ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
         return await mixProto.buildCoverPacket(epoch)
     )
-    ct.setCoverPacketProver(
+    ct.setCoverProofGenerator(
       proc(
           packet: seq[byte], epoch: uint64
       ): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
-        return await mixProto.proveCoverPacket(packet, Opt.some(epoch))
+        return await mixProto.generateAndAppendCoverProof(packet, Opt.some(epoch))
     )
     ct.setCoverPacketSender(
       proc(

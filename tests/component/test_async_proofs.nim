@@ -25,6 +25,9 @@ method generateProofAsync(
     sp.pending = true
     try:
       await sp.proofGate.wait()
+    except CancelledError as exc:
+      sp.cancelled = true
+      raise exc
     finally:
       sp.pending = false
   elif sp.blocked:
@@ -62,7 +65,7 @@ suite "Asynchronous proof provider":
     let provider = AsyncProofs(proofSize: 1, proofGate: newAsyncEvent())
     let ct = ConstantRateCoverTraffic.new(
       totalSlots = 2,
-      epochDuration = 1.seconds,
+      epochDuration = 20.milliseconds,
       enablePrecomputation = true,
       useInternalEpochTimer = false,
     )
@@ -91,7 +94,7 @@ suite "Asynchronous proof provider":
     ct.onEpochChange(7)
 
     let emission = ct.emitCoverPacket()
-    await sleepAsync(50.milliseconds)
+    await sleepAsync(250.milliseconds)
     check provider.pending
     check provider.coverEpochs == @[7'u64]
 
@@ -112,7 +115,7 @@ suite "Asynchronous proof provider":
     )
 
     let prebuiltEmission = ct.emitCoverPacket()
-    await sleepAsync(50.milliseconds)
+    await sleepAsync(250.milliseconds)
     check provider.pending
     check provider.coverEpochs == @[7'u64, 9'u64]
 
@@ -120,6 +123,16 @@ suite "Asynchronous proof provider":
     provider.proofGate.fire()
     await prebuiltEmission
     check sent == 0
+
+    provider.cancelled = false
+    provider.proofGate = newAsyncEvent()
+    ct.onEpochChange(11)
+    await ct.start()
+    checkUntilTimeout:
+      provider.pending
+    await ct.stop()
+    check provider.cancelled
+    check not provider.pending
 
   asyncTest "cover precomputation spends no proofs; routing awaits per-hop proofs":
     let infos = MixNodeInfo.generateRandomMany(5, rng())

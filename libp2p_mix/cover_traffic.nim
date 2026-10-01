@@ -34,9 +34,11 @@ type
   BuildCoverPacketProc* = proc(epoch: uint64): Future[Result[CoverPacketBuild, string]] {.
     async: (raises: [CancelledError])
   .}
-  ProveCoverPacketProc* = proc(
+  GenerateAndAppendCoverProofProc* = proc(
     packet: seq[byte], epoch: uint64
   ): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).}
+    ## Generates and appends a cover proof when required. Providers that
+    ## precompute proofs may return the packet unchanged.
 
   SendCoverPacketProc* = proc(
     peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], epoch: uint64
@@ -141,7 +143,7 @@ type
     ## MixProtocol injects packet building and sending via callback procs.
     slotPool*: SlotPool
     buildPacket: BuildCoverPacketProc
-    provePacket: ProveCoverPacketProc
+    generateAndAppendProof: GenerateAndAppendCoverProofProc
     sendPacket: SendCoverPacketProc
     validateProofToken: ValidateProofTokenProc
     reclaimProofToken: ReclaimProofTokenProc
@@ -163,8 +165,10 @@ method onCoverReceived*(ct: CoverTraffic) {.base, gcsafe, raises: [].} =
 proc setCoverPacketBuilder*(ct: CoverTraffic, builder: BuildCoverPacketProc) =
   ct.buildPacket = builder
 
-proc setCoverPacketProver*(ct: CoverTraffic, prover: ProveCoverPacketProc) =
-  ct.provePacket = prover
+proc setCoverProofGenerator*(
+    ct: CoverTraffic, generator: GenerateAndAppendCoverProofProc
+) =
+  ct.generateAndAppendProof = generator
 
 proc setProofTokenValidator*(ct: CoverTraffic, validator: ValidateProofTokenProc) =
   ct.validateProofToken = validator
@@ -178,12 +182,12 @@ proc setCoverPacketSender*(ct: CoverTraffic, sender: SendCoverPacketProc) =
 proc setSendDelaySampler*(ct: CoverTraffic, sampler: SampleSendDelayProc) =
   ct.sampleSendDelay = sampler
 
-proc proveCoverPacket(
+proc generateAndAppendCoverProof(
     ct: CoverTraffic, packet: seq[byte], epoch: uint64
 ): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
-  if ct.provePacket.isNil:
+  if ct.generateAndAppendProof.isNil:
     return ok(packet)
-  return await ct.provePacket(packet, epoch)
+  return await ct.generateAndAppendProof(packet, epoch)
 
 proc applySendDelay(ct: CoverTraffic) {.async: (raises: [CancelledError]).} =
   ## Pre-send hold before a cover transmission (Mix Cover Traffic spec §6.2).
@@ -296,9 +300,10 @@ proc unclaimCoverSlot(ct: ConstantRateCoverTraffic) =
 proc buildAndSendOnDemand(
     ct: ConstantRateCoverTraffic, claimEpoch: uint64
 ) {.async: (raises: [CancelledError]).} =
-  ## Build and send a cover packet on-demand after a prebuilt proof goes stale.
+  ## Build and send on demand after a stale prebuilt proof. The hold has elapsed.
   let buildRes = await ct.buildPacket(claimEpoch)
   if buildRes.isErr:
+    # beginEpoch already reset coverClaimed when the epoch changed.
     if not ct.heldAcrossEpochBoundary(claimEpoch):
       trace "Failed to build cover packet", err = buildRes.error
       mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
@@ -306,7 +311,7 @@ proc buildAndSendOnDemand(
     return
 
   let built = buildRes.get()
-  let provedRes = await ct.proveCoverPacket(built.packet, claimEpoch)
+  let provedRes = await ct.generateAndAppendCoverProof(built.packet, claimEpoch)
   if ct.heldAcrossEpochBoundary(claimEpoch):
     if built.proofToken.len > 0 and ct.reclaimProofToken != nil:
       ct.reclaimProofToken(built.proofToken)
@@ -336,11 +341,15 @@ proc buildOnDemandOverlapped(
     else:
       ZeroDuration
   let delayFut = sleepAsync(hold)
+  let preparationStartTime = Moment.now()
   let buildFut = ct.buildPacket(claimEpoch)
+  defer:
+    await cancelAndWait(buildFut, delayFut)
   let builtRes = await buildFut
 
   if builtRes.isErr:
     await delayFut
+    # beginEpoch already reset coverClaimed when the epoch changed.
     if not ct.heldAcrossEpochBoundary(claimEpoch):
       trace "Failed to build cover packet", err = builtRes.error
       mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
@@ -348,19 +357,20 @@ proc buildOnDemandOverlapped(
     return
 
   let built = builtRes.get()
-  let proofGenStartTime = Moment.now()
-  var proofGenTimeMs: int64
+  var preparationTimeMs: int64
   let proofFut = (
     proc(): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
-      let res = await ct.proveCoverPacket(built.packet, claimEpoch)
-      proofGenTimeMs = (Moment.now() - proofGenStartTime).milliseconds
+      let res = await ct.generateAndAppendCoverProof(built.packet, claimEpoch)
+      preparationTimeMs = (Moment.now() - preparationStartTime).milliseconds
       return res
   )()
+  defer:
+    await proofFut.cancelAndWait()
   await allFutures(proofFut, delayFut)
 
-  if hold > ZeroDuration and proofGenTimeMs > hold.milliseconds:
-    warn "Proof generation time exceeds sampled sender delay",
-      proofGenTimeMs,
+  if hold > ZeroDuration and preparationTimeMs > hold.milliseconds:
+    warn "Cover packet preparation time exceeds sampled sender delay",
+      preparationTimeMs,
       sampledDelay = hold,
       hint = "Increase the minimum delay floor or reduce proof generation time"
 
@@ -397,7 +407,9 @@ proc emitCoverPacket*(
     ct.slotPool.dequeue().withValue(pkt):
       let claimEpoch = ct.slotPool.epoch
       let delayFut = ct.applySendDelay()
-      let proofFut = ct.proveCoverPacket(pkt.packet, claimEpoch)
+      let proofFut = ct.generateAndAppendCoverProof(pkt.packet, claimEpoch)
+      defer:
+        await cancelAndWait(proofFut, delayFut)
       await allFutures(proofFut, delayFut)
 
       if ct.heldAcrossEpochBoundary(claimEpoch):
