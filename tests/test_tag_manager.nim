@@ -109,22 +109,25 @@ suite "Tag Manager":
 
     check:
       bounded.len == 3
-      not bounded.isTagSeen(makeTag(0))
+      bounded.isTagSeen(makeTag(0))
       bounded.isTagSeen(makeTag(1))
       bounded.isTagSeen(makeTag(2))
-      bounded.isTagSeen(makeTag(3))
+      not bounded.isTagSeen(makeTag(3))
 
     bounded.clearTags()
 
-    for i in 10 ..< 14:
+    for i in 10 ..< 13:
       bounded.addTag(makeTag(byte(i)), baseTime + chronos.milliseconds(i))
 
     check:
       bounded.len == 3
-      not bounded.isTagSeen(makeTag(10))
+      bounded.isTagSeen(makeTag(10))
       bounded.isTagSeen(makeTag(11))
       bounded.isTagSeen(makeTag(12))
-      bounded.isTagSeen(makeTag(13))
+      bounded.checkAndAddTag(makeTag(13), baseTime + chronos.milliseconds(13))
+      bounded.len == 3
+      bounded.isTagSeen(makeTag(10))
+      not bounded.isTagSeen(makeTag(13))
 
   test "purge with no expired tags":
     tm.addTag(makeTag(1))

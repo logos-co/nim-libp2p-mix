@@ -10,6 +10,9 @@ import chronicles, chronos
 import ./timedcache
 import libp2p/utils/heartbeat
 
+logScope:
+  topics = "tagmanager"
+
 const
   DefaultTagTTL* = chronos.hours(1)
   DefaultPurgeInterval* = chronos.minutes(5)
@@ -87,6 +90,9 @@ proc new*(
 proc addTag*(tm: TagManager, tag: Tag, now: Moment = Moment.now()) =
   ## Add a tag to the manager. If already present, this is a no-op
   ## (does not refresh expiry - first seen time is what matters for replay protection).
+  tm.cache.expire(now)
+  if tag in tm.cache or (tm.maxTags > 0 and tm.cache.len >= tm.maxTags):
+    return
   discard tm.cache.put(tag, now)
 
 proc isTagSeen*(tm: TagManager, tag: Tag): bool {.inline.} =
@@ -95,9 +101,14 @@ proc isTagSeen*(tm: TagManager, tag: Tag): bool {.inline.} =
 
 proc checkAndAddTag*(tm: TagManager, tag: Tag, now: Moment = Moment.now()): bool =
   ## Atomically check if a tag exists and add it if not.
-  ## Returns true if the tag was already present (duplicate), false if newly added.
+  ## Returns true if the tag was already present or the cache is full, and false
+  ## if newly added. Treating capacity as seen preserves replay protection.
   ## This prevents race conditions in concurrent replay detection.
-  tm.cache.put(tag, now)
+  tm.cache.expire(now)
+  if tag in tm.cache or (tm.maxTags > 0 and tm.cache.len >= tm.maxTags):
+    return true
+  discard tm.cache.put(tag, now)
+  false
 
 proc removeTag*(tm: TagManager, tag: Tag) =
   ## Remove a specific tag.
