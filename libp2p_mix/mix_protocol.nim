@@ -948,9 +948,11 @@ proc sendSurbReply*(
       mixProto.spamProtection.withValue(sp):
         sp.reclaimProofToken(claim.reclaimedToken)
 
-  (await mixProto.sendPacket(
-    peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
-  )).isOkOr:
+  (
+    await mixProto.sendPacket(
+      peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
+    )
+  ).isOkOr:
     return err("could not send reply: " & error)
   return ok()
 

@@ -322,9 +322,11 @@ proc buildAndSendOnDemand(
     mix_cover_error.inc(labelValues = ["SEND_FAILED"])
     return
 
-  (await ct.sendPacket(
-    built.firstHopPeerId, built.firstHopAddr, provedRes.get(), claimEpoch
-  )).isOkOr:
+  (
+    await ct.sendPacket(
+      built.firstHopPeerId, built.firstHopAddr, provedRes.get(), claimEpoch
+    )
+  ).isOkOr:
     debug "Failed to send cover packet", err = error
     mix_cover_error.inc(labelValues = ["SEND_FAILED"])
     return
@@ -434,9 +436,11 @@ proc emitCoverPacket*(
         await ct.buildAndSendOnDemand(claimEpoch)
         return
 
-      (await ct.sendPacket(
-        pkt.firstHopPeerId, pkt.firstHopAddr, provedRes.get(), claimEpoch
-      )).isOkOr:
+      (
+        await ct.sendPacket(
+          pkt.firstHopPeerId, pkt.firstHopAddr, provedRes.get(), claimEpoch
+        )
+      ).isOkOr:
         debug "Failed to send pre-built cover packet", err = error
         mix_cover_error.inc(labelValues = ["SEND_FAILED"])
         return
