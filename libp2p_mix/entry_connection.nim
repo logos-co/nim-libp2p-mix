@@ -7,6 +7,9 @@ import libp2p/varint
 import ./[mix_protocol, mix_metrics, surb_store]
 from padding import DataSize
 
+logScope:
+  topics = "entry_connection"
+
 const DefaultSurbs = uint8(4)
 
 const DefaultReplyTimeout = chronos.seconds(30)
@@ -40,11 +43,8 @@ type MixEntryConnection* = ref object of Connection
   sent: bool
   replySession: Opt[SurbSession]
 
-func shortLog*(conn: MixEntryConnection): string =
-  if conn == nil:
-    "MixEntryConnection(nil)"
-  else:
-    "MixEntryConnection(" & $conn.destination & ")"
+func shortLog*(conn: MixEntryConnection): string {.raises: [].} =
+  "MixEntryConnection"
 
 chronicles.formatIt(MixEntryConnection):
   shortLog(it)
@@ -127,13 +127,12 @@ method write*(
   await self.mixDialer(move(msg), self.codec, self.destination)
   self.sent = true
 
-proc shortLog*(self: MixEntryConnection): string {.raises: [].} =
-  "[MixEntryConnection] Destination: " & $self.destination
-
 method closeImpl*(self: MixEntryConnection): Future[void] {.async: (raises: []).} =
   self.releaseReplyCreds()
   if not self.incomingFut.isNil:
-    self.incomingFut.cancelSoon()
+    await self.incomingFut.cancelAndWait()
+  if not self.replyReceivedFut.isNil and not self.replyReceivedFut.finished:
+    self.replyReceivedFut.complete()
 
 method getWrapped*(self: MixEntryConnection): Connection =
   nil
@@ -162,7 +161,7 @@ proc new*(
 
   if expectReply:
     instance.incoming = newAsyncQueue[seq[byte]]()
-    instance.replyReceivedFut = newFuture[void]()
+    instance.replyReceivedFut = newFuture[void]("MixEntryConnection.replyReceived")
     let checkForIncoming = proc(): Future[void] {.async: (raises: [CancelledError]).} =
       instance.cached = await instance.incoming.get()
       instance.replyReceivedFut.complete()

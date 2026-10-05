@@ -20,6 +20,8 @@ export SurbStore, SurbSession
 when defined(enable_mix_benchmarks):
   import ./benchmark
   from times import getTime, toUnixFloat, `-`, initTime, `$`, inMilliseconds, Time
+logScope:
+  topics = "mix_protocol"
 
 when defined(libp2p_mix_experimental_exit_is_dest):
   {.warning: "experimental support for mix exit == destination is enabled!".}
@@ -311,9 +313,7 @@ method handleMixMessages*(
       return
 
     trace "Exit node - Received mix message",
-      peerId = mixProto.mixNodeInfo.peerId,
-      message = deserialized.message,
-      codec = deserialized.codec
+      peerId = mixProto.mixNodeInfo.peerId, codec = deserialized.codec
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Exit",
@@ -797,8 +797,6 @@ proc anonymizeLocalProtocolSend*(
 
   let numMixNodes = mixProto.nodePool.len
   var numAvailableNodes = numMixNodes
-
-  debug "Destination data", destination
 
   if mixProto.nodePool.get(destination.peerId).isSome:
     numAvailableNodes = numMixNodes - 1

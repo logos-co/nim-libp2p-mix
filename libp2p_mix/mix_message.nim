@@ -31,14 +31,12 @@ proc deserialize*(
   if data.len == 0:
     return err("deserialization failed: data is empty")
 
-  var codecLen: int
-  var varintLen: int
-  for i in 0 ..< min(data.len, 2):
-    let parsed = uint16.fromBytes(data[0 ..< i], Leb128)
-    if parsed.len < 0 or (i == 1 and parsed.len == 0):
-      return err("deserialization failed: invalid codec length")
+  let parsed = uint16.fromBytes(data.toOpenArray(0, min(data.len, 2) - 1), Leb128)
+  if parsed.len <= 0 or parsed.len != Leb128.len(parsed.val):
+    return err("deserialization failed: invalid codec length")
 
-    varintLen = parsed.len
+  let
+    varintLen = parsed.len.int
     codecLen = parsed.val.int
 
   if data.len < varintLen + codecLen:

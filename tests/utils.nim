@@ -12,7 +12,7 @@ import libp2p_mix/mix_protocol
 import libp2p_mix/curve25519
 import libp2p_mix/delay_strategy
 
-import ./tools/[unittest, crypto]
+import ./tools/crypto
 import ./[mock_mix, spam_protection_impl]
 
 proc createSwitch*(
