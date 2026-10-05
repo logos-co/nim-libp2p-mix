@@ -305,16 +305,13 @@ proc buildAndSendOnDemand(
     ct: ConstantRateCoverTraffic, claimEpoch: uint64
 ) {.async: (raises: [CancelledError]).} =
   ## Build and send on demand after a stale prebuilt proof. The hold has elapsed.
-  let buildRes = await ct.buildPacket(claimEpoch)
-  if buildRes.isErr:
+  let built = (await ct.buildPacket(claimEpoch)).valueOr:
     # beginEpoch already reset coverClaimed when the epoch changed.
     if not ct.heldAcrossEpochBoundary(claimEpoch):
-      trace "Failed to build cover packet", err = buildRes.error
+      trace "Failed to build cover packet", err = error
       mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
       ct.unclaimCoverSlot()
     return
-
-  let built = buildRes.get()
   let provedRes = await ct.generateAndAppendCoverProof(built.packet, claimEpoch)
   if ct.heldAcrossEpochBoundary(claimEpoch):
     if built.proofToken.len > 0 and ct.reclaimProofToken != nil:
@@ -325,14 +322,14 @@ proc buildAndSendOnDemand(
     mix_cover_error.inc(labelValues = ["SEND_FAILED"])
     return
 
-  let sendRes = await ct.sendPacket(
+  (await ct.sendPacket(
     built.firstHopPeerId, built.firstHopAddr, provedRes.get(), claimEpoch
-  )
-  if sendRes.isErr:
-    debug "Failed to send cover packet", err = sendRes.error
+  )).isOkOr:
+    debug "Failed to send cover packet", err = error
     mix_cover_error.inc(labelValues = ["SEND_FAILED"])
-  else:
-    mix_cover_emitted.inc(labelValues = ["on_demand"])
+    return
+
+  mix_cover_emitted.inc(labelValues = ["on_demand"])
 
 proc buildOnDemandOverlapped(
     ct: ConstantRateCoverTraffic, claimEpoch: uint64
@@ -437,14 +434,13 @@ proc emitCoverPacket*(
         await ct.buildAndSendOnDemand(claimEpoch)
         return
 
-      let sendRes = await ct.sendPacket(
+      (await ct.sendPacket(
         pkt.firstHopPeerId, pkt.firstHopAddr, provedRes.get(), claimEpoch
-      )
-      if sendRes.isErr:
-        debug "Failed to send pre-built cover packet", err = sendRes.error
+      )).isOkOr:
+        debug "Failed to send pre-built cover packet", err = error
         mix_cover_error.inc(labelValues = ["SEND_FAILED"])
-      else:
-        mix_cover_emitted.inc(labelValues = ["prebuilt"])
+        return
+      mix_cover_emitted.inc(labelValues = ["prebuilt"])
       return
 
   if ct.slotPool.claimSlotForCover():
@@ -503,14 +499,11 @@ proc runPrecomputeLoop(
         min(built + ct.precomputeBatchSize, targetCount - ct.slotPool.queuedCount)
       var batchFailed = false
       while built < batchEnd:
-        let buildRes = await ct.buildPacket(currentEpoch)
-        if buildRes.isErr:
-          debug "Pre-computation: failed to build cover packet", err = buildRes.error
+        let coverBuild = (await ct.buildPacket(currentEpoch)).valueOr:
+          debug "Pre-computation: failed to build cover packet", err = error
           mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
           batchFailed = true
           break
-
-        let coverBuild = buildRes.get()
         if not ct.running or ct.slotPool.epoch != currentEpoch:
           if ct.reclaimProofToken != nil and coverBuild.proofToken.len > 0:
             ct.reclaimProofToken(coverBuild.proofToken)

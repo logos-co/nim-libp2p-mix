@@ -460,9 +460,9 @@ method handleMixMessages*(
 proc proofSize(sp: Opt[SpamProtection]): int =
   ## Helper to get proof size from optional spam protection.
   ## Returns 0 if spam protection is None.
-  if sp.isNone:
+  let spamProtection = sp.valueOr:
     return 0
-  return sp.get().proofSize
+  return spamProtection.proofSize
 
 proc runMixMessage(
     mixProto: MixProtocol,
@@ -845,14 +845,13 @@ proc anonymizeLocalProtocolSend*(
 
     debug "Selected mix node: ", indexInPath = hop.len, peerId = randPeerId
 
-    let mixPubInfoOpt = mixProto.nodePool.get(randPeerId)
-    if mixPubInfoOpt.isNone:
+    let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
       mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
       trace "Failed to get mix pub info for peer, skipping and removing node from pool",
         peerId = randPeerId
       discard mixProto.nodePool.remove(randPeerId)
       continue
-    let (peerId, multiAddr, mixPubKey, _) = mixPubInfoOpt.get().get()
+    let (peerId, multiAddr, mixPubKey, _) = mixPubInfo.get()
 
     let multiAddrBytes = multiAddrToBytes(peerId, multiAddr).valueOr:
       mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
@@ -949,11 +948,10 @@ proc sendSurbReply*(
       mixProto.spamProtection.withValue(sp):
         sp.reclaimProofToken(claim.reclaimedToken)
 
-  let sendRes = await mixProto.sendPacket(
+  (await mixProto.sendPacket(
     peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
-  )
-  if sendRes.isErr:
-    return err("could not send reply: " & sendRes.error)
+  )).isOkOr:
+    return err("could not send reply: " & error)
   return ok()
 
 type PathNode = object
