@@ -2,6 +2,7 @@
 # Copyright (c) Status Research & Development GmbH
 
 import results, sequtils
+import stew/ctops
 import ./[crypto, curve25519, delay, lioness, serialization, tag_manager]
 import libp2p/crypto/crypto
 
@@ -374,7 +375,8 @@ proc processSphinxPacket*(
   # Compute MAC
   let mac_key = deriveKeyMaterial(MacKeyLabel, sBytes).kdf()
 
-  if not (hmac(mac_key, beta).toSeq() == gamma):
+  let expectedMac = hmac(mac_key, beta).toSeq()
+  if gamma.len != expectedMac.len or not CT.isEqual(expectedMac, gamma):
     # If MAC not verified
     return ok(ProcessedSphinxPacket(status: InvalidMAC))
 
