@@ -87,7 +87,7 @@ proc new*(
     tm.start()
   tm
 
-proc addTag*(tm: TagManager, tag: Tag, now: Moment = Moment.now()) =
+proc addTag*(tm: TagManager, tag: Tag, now: Moment = Moment.now()) {.raises: [].} =
   ## Add a tag to the manager. If already present, this is a no-op
   ## (does not refresh expiry - first seen time is what matters for replay protection).
   tm.cache.expire(now)
@@ -99,7 +99,9 @@ proc isTagSeen*(tm: TagManager, tag: Tag): bool {.inline.} =
   ## Check if a tag has been seen (and hasn't expired).
   tag in tm.cache
 
-proc checkAndAddTag*(tm: TagManager, tag: Tag, now: Moment = Moment.now()): bool =
+proc checkAndAddTag*(
+    tm: TagManager, tag: Tag, now: Moment = Moment.now()
+): bool {.raises: [].} =
   ## Atomically check if a tag exists and add it if not.
   ## Returns true if the tag was already present or the cache is full, and false
   ## if newly added. Treating capacity as seen preserves replay protection.
