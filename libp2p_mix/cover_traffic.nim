@@ -156,6 +156,10 @@ method stop*(ct: CoverTraffic) {.base, async: (raises: []).} =
   raiseAssert "stop must be implemented by concrete cover traffic types"
 
 method onEpochChange*(ct: CoverTraffic, epoch: uint64) {.base, gcsafe, raises: [].} =
+  while ct.slotPool.coverQueue.len > 0:
+    let packet = ct.slotPool.coverQueue.popFirst()
+    if packet.proofToken.len > 0 and ct.reclaimProofToken != nil:
+      ct.reclaimProofToken(packet.proofToken)
   ct.slotPool.beginEpoch(epoch)
 
 method onCoverReceived*(ct: CoverTraffic) {.base, gcsafe, raises: [].} =

@@ -285,12 +285,14 @@ suite "ConstantRateCoverTraffic":
   asyncTest "packet held across epoch boundary is discarded":
     let sentPackets = new seq[seq[byte]]
     sentPackets[] = @[]
+    let holdStarted = newAsyncEvent()
 
     let ct = ConstantRateCoverTraffic.new(totalSlots = 10, epochDuration = 1.seconds)
     ct.setCoverPacketBuilder(mockBuildCoverPacket())
     ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
     ct.setSendDelaySampler(
       proc(): Delay {.gcsafe, raises: [].} =
+        holdStarted.fire()
         Delay(100)
     )
     ct.onEpochChange(1)
@@ -302,7 +304,7 @@ suite "ConstantRateCoverTraffic":
     )
 
     let fut = ct.emitCoverPacket()
-    await sleepAsync(20.milliseconds)
+    await holdStarted.wait()
     ct.onEpochChange(2)
     await fut
     check sentPackets[].len == 0
@@ -311,6 +313,7 @@ suite "ConstantRateCoverTraffic":
   asyncTest "prebuilt packet held across epoch boundary reclaims its token":
     let sentPackets = new seq[seq[byte]]
     sentPackets[] = @[]
+    let holdStarted = newAsyncEvent()
     let (pid, ma) = makePeerInfo()
 
     let ct = ConstantRateCoverTraffic.new(
@@ -320,6 +323,7 @@ suite "ConstantRateCoverTraffic":
     ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
     ct.setSendDelaySampler(
       proc(): Delay {.gcsafe, raises: [].} =
+        holdStarted.fire()
         Delay(100)
     )
     ct.onEpochChange(1)
@@ -339,11 +343,41 @@ suite "ConstantRateCoverTraffic":
     )
 
     let fut = ct.emitCoverPacket()
-    await sleepAsync(20.milliseconds)
+    await holdStarted.wait()
     ct.onEpochChange(2)
     await fut
     check sentPackets[].len == 0
     check reclaimed == @[@[0x7A.byte]]
+
+  test "epoch change reclaims all queued proof tokens":
+    let (pid, ma) = makePeerInfo()
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 10, enablePrecomputation = true)
+    var reclaimed: seq[seq[byte]]
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed.add(token)
+    )
+    ct.slotPool.addPacket(
+      CoverPacket(
+        packet: @[1.byte],
+        firstHopPeerId: pid,
+        firstHopAddr: ma,
+        proofToken: @[0x71.byte],
+      )
+    )
+    ct.slotPool.addPacket(
+      CoverPacket(
+        packet: @[2.byte],
+        firstHopPeerId: pid,
+        firstHopAddr: ma,
+        proofToken: @[0x72.byte],
+      )
+    )
+
+    ct.onEpochChange(2)
+
+    check reclaimed == @[@[0x71.byte], @[0x72.byte]]
+    check ct.slotPool.queuedCount == 0
 
   asyncTest "precompute epoch race reclaims the built proof token":
     let buildGate = newAsyncEvent()

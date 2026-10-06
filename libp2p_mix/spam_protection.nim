@@ -62,7 +62,10 @@ method generateProofAsync*(
   return await self.generateProofAsync(bindingData)
 
 method precomputeCoverProofs*(self: SpamProtection): bool {.base, gcsafe, raises: [].} =
-  ## Providers with durable, non-reclaimable allocations prove at transmission.
+  ## Return true when cover proofs are safe to generate during packet
+  ## precomputation. Providers with durable, non-reclaimable allocations must
+  ## override this method and return false so proofs are generated at
+  ## transmission. The default preserves existing provider behavior.
   true
 
 method reclaimProofToken*(
