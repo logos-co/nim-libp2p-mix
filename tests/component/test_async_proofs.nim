@@ -134,6 +134,44 @@ suite "Asynchronous proof provider":
     check provider.cancelled
     check not provider.pending
 
+  asyncTest "cover proof completed within the epoch is sent":
+    let infos = MixNodeInfo.generateRandomMany(3, rng())
+    let sw = createSwitch(infos[0].multiAddr, Opt.some(infos[0].libp2pPrivKey))
+    let provider = AsyncProofs(proofSize: 1)
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 2,
+      epochDuration = 1.seconds,
+      enablePrecomputation = false,
+      useInternalEpochTimer = false,
+    )
+    let node = MixProtocol.new(
+      infos[0],
+      sw,
+      spamProtection = Opt.some(SpamProtection(provider)),
+      delayStrategy = Opt.some(DelayStrategy(NoSamplingDelayStrategy.new(rng()))),
+      coverTraffic = Opt.some(CoverTraffic(ct)),
+    )
+    for info in infos[1 .. ^1]:
+      node.nodePool.add(info.toMixPubInfo())
+
+    var sentPacket: seq[byte]
+    ct.setCoverPacketSender(
+      proc(
+          peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], epoch: uint64
+      ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+        sentPacket = packet
+        return ok()
+    )
+    ct.onEpochChange(7)
+
+    await ct.emitCoverPacket()
+
+    check provider.coverEpochs == @[7'u64]
+    check provider.generated == 1
+    let (packet, proof) =
+      extractProofFromPacket(sentPacket, SpamProtection(provider)).tryGet()
+    check proof == @[packet[0]]
+
   asyncTest "cover precomputation spends no proofs; routing awaits per-hop proofs":
     let infos = MixNodeInfo.generateRandomMany(5, rng())
     var nodes: seq[MixProtocol]

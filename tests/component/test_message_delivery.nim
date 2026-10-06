@@ -4,9 +4,9 @@
 {.used.}
 
 import algorithm, chronos, results, stew/byteutils, sequtils, tables
-import libp2p/[protocols/ping, peerid, switch, builders]
+import libp2p/[protocols/ping, protocols/protocol, peerid, switch, builders, varint]
 import libp2p_mix
-import libp2p_mix/mix_protocol
+import libp2p_mix/[exit_connection, mix_protocol, serialization]
 import libp2p_mix/delay_strategy
 
 import ../tools/[lifecycle, unittest, crypto]
@@ -149,6 +149,49 @@ suite "Mix Protocol - Message Delivery":
       await conn.close()
 
       check response != 0.seconds
+
+    asyncTest "deferred SURB reply, exit == destination":
+      let nodes = await setupMixNodes(10)
+      let destNode = nodes[^1]
+      let claimedSurbs = newAsyncQueue[SURB]()
+      const codec = "/mix/test/deferred-surb/1.0.0"
+      destNode.switch.mount(
+        LPProtocol.new(
+          codecs = @[codec],
+          handler = proc(
+              conn: Connection, proto: string
+          ) {.async: (raises: [CancelledError]).} =
+            try:
+              discard await conn.readLp(1024)
+              let surbs = MixExitConnection(conn).takeSURBs()
+              check surbs.len == 1
+              await claimedSurbs.put(surbs[0])
+            except LPStreamError:
+              check false
+          ,
+        )
+      )
+      startAndDeferStop(nodes)
+
+      let conn = nodes[0]
+        .toConnection(
+          MixDestination.exitNode(destNode.switch.peerInfo.peerId),
+          codec,
+          MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
+        )
+        .expect("could not build connection")
+      defer:
+        await conn.close()
+
+      await conn.writeLp(@[1.byte])
+      let surb = await claimedSurbs.get().wait(2.seconds)
+      let payload = @[2.byte, 3, 4]
+      let prefix = PB.toBytes(payload.len.uint64)
+      var reply = newSeqUninit[byte](prefix.len + payload.len)
+      reply[0 ..< prefix.len] = prefix.toOpenArray()
+      reply[prefix.len ..< reply.len] = payload
+      check (await destNode.sendSurbReply(surb, reply)).isOk
+      check (await conn.readLp(1024)) == payload
 
   asyncTest "length-prefixed protocol - verify readLp fix":
     ## This test verifies the fix for the length prefix bug where responses

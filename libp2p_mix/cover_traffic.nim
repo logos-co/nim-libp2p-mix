@@ -508,6 +508,8 @@ proc runPrecomputeLoop(
 
         let coverBuild = buildRes.get()
         if not ct.running or ct.slotPool.epoch != currentEpoch:
+          if ct.reclaimProofToken != nil and coverBuild.proofToken.len > 0:
+            ct.reclaimProofToken(coverBuild.proofToken)
           break
         let added = ct.slotPool.addPacket(
           CoverPacket(

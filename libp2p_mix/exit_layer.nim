@@ -89,7 +89,7 @@ when defined(libp2p_mix_experimental_exit_is_dest):
 
     let response = exitConn.getResponse()
     let unclaimedSurbs = exitConn.takeSURBs()
-    if unclaimedSurbs.len != 0 and response.len != 0:
+    if unclaimedSurbs.len != 0:
       await self.reply(unclaimedSurbs, response)
 
 proc fwdRequest(

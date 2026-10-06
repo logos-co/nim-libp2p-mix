@@ -14,14 +14,15 @@ import ../tools/unittest
 when defined(libp2p_mix_experimental_exit_is_dest):
   suite "Exit SURB ownership":
     asyncTest "automatic replies only use unclaimed SURBs":
-      for claim in [false, true]:
+      for (claim, writeResponse) in [(false, true), (true, true), (false, false)]:
         var replies = 0
+        var response: seq[byte]
         let sw = SwitchBuilder.new().withTcpTransport().withMplex().withNoise().build()
         let layer = ExitLayer.init(
           sw,
           proc(surb: SURB, message: seq[byte]) {.async: (raises: [CancelledError]).} =
             inc replies
-          ,
+            response = message,
           newTable[string, DestReadBehavior](),
         )
         sw.mount(
@@ -32,10 +33,11 @@ when defined(libp2p_mix_experimental_exit_is_dest):
             ) {.async: (raises: [CancelledError]).} =
               if claim:
                 check MixExitConnection(conn).takeSURBs().len == 1
-              try:
-                await conn.write(@[3.byte])
-              except LPStreamError:
-                check false
+              if writeResponse:
+                try:
+                  await conn.write(@[3.byte])
+                except LPStreamError:
+                  check false
             ,
           )
         )
@@ -43,4 +45,7 @@ when defined(libp2p_mix_experimental_exit_is_dest):
           "/mix/test/surb-ownership", @[1.byte], Hop(), @[SURB(key: @[2.byte])]
         )
         check replies == (if claim: 0 else: 1)
+        if not claim:
+          check response == (if writeResponse: @[3.byte]
+          else: newSeq[byte]())
         await sw.stop()

@@ -345,6 +345,50 @@ suite "ConstantRateCoverTraffic":
     check sentPackets[].len == 0
     check reclaimed == @[@[0x7A.byte]]
 
+  asyncTest "precompute epoch race reclaims the built proof token":
+    let buildGate = newAsyncEvent()
+    var buildPending = false
+    var reclaimed: seq[seq[byte]]
+    let (pid, ma) = makePeerInfo()
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 10,
+      epochDuration = 1.seconds,
+      enablePrecomputation = true,
+      useInternalEpochTimer = false,
+    )
+    ct.setCoverPacketBuilder(
+      proc(
+          epoch: uint64
+      ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+        buildPending = true
+        await buildGate.wait()
+        return ok(
+          CoverPacketBuild(
+            packet: newSeq[byte](PacketSize),
+            firstHopPeerId: pid,
+            firstHopAddr: ma,
+            proofToken: @[0x7B.byte],
+          )
+        )
+    )
+    ct.setCoverPacketSender(mockSendCoverPacket(new seq[seq[byte]]))
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed.add(token)
+    )
+    ct.onEpochChange(1)
+
+    await ct.start()
+    checkUntilTimeout:
+      buildPending
+    ct.onEpochChange(2)
+    buildGate.fire()
+    checkUntilTimeout:
+      reclaimed.len == 1
+    await ct.stop()
+
+    check reclaimed == @[@[0x7B.byte]]
+
   asyncTest "start and stop":
     let ct = ConstantRateCoverTraffic.new(
       totalSlots = 10, epochDuration = 100.seconds, useInternalEpochTimer = false
