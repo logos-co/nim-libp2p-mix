@@ -7,6 +7,7 @@ import algorithm, chronos, results, stew/byteutils, sequtils, tables
 import libp2p/[protocols/ping, protocols/protocol, peerid, switch, builders, varint]
 import libp2p_mix
 import libp2p_mix/[exit_connection, mix_protocol, serialization]
+import libp2p_mix/cover_traffic
 import libp2p_mix/delay_strategy
 
 import ../tools/[lifecycle, unittest, crypto]
@@ -151,10 +152,12 @@ suite "Mix Protocol - Message Delivery":
       check response != 0.seconds
 
     asyncTest "deferred SURB reply, exit == destination":
-      let nodes = await setupMixNodes(10)
+      const codec = "/mix/test/deferred-surb/1.0.0"
+      let nodes = await setupMixNodes(
+        10, destReadBehavior = Opt.some((codec: codec, callback: readLp(1024)))
+      )
       let destNode = nodes[^1]
       let claimedSurbs = newAsyncQueue[SURB]()
-      const codec = "/mix/test/deferred-surb/1.0.0"
       destNode.switch.mount(
         LPProtocol.new(
           codecs = @[codec],
@@ -190,7 +193,20 @@ suite "Mix Protocol - Message Delivery":
       var reply = newSeqUninit[byte](prefix.len + payload.len)
       reply[0 ..< prefix.len] = prefix.toOpenArray()
       reply[prefix.len ..< reply.len] = payload
+
+      let ct =
+        ConstantRateCoverTraffic.new(totalSlots = 1, useInternalEpochTimer = false)
+      ct.onEpochChange(1)
+      destNode.coverTraffic = Opt.some(CoverTraffic(ct))
+      discard ct.slotPool.claimSlot()
+
+      let blocked = await destNode.sendSurbReply(surb, reply)
+      check blocked.isErr
+      check blocked.error == "No slots available in current epoch"
+
+      ct.onEpochChange(2)
       check (await destNode.sendSurbReply(surb, reply)).isOk
+      check ct.slotPool.nonCoverClaimed == 1
       check (await conn.readLp(1024)) == payload
 
   asyncTest "length-prefixed protocol - verify readLp fix":

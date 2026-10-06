@@ -940,6 +940,15 @@ proc sendSurbReply*(
 
   let sphinxPacket = useSURB(surb, message)
 
+  mixProto.coverTraffic.withValue(ct):
+    let claim = ct.slotPool.claimSlot()
+    if not claim.success:
+      mix_slot_claim_rejected.inc(labelValues = ["reply"])
+      return err("No slots available in current epoch")
+    if claim.reclaimedToken.len > 0:
+      mixProto.spamProtection.withValue(sp):
+        sp.reclaimProofToken(claim.reclaimedToken)
+
   let sendRes = await mixProto.sendPacket(
     peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
   )
