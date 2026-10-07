@@ -138,8 +138,13 @@ proc writeLp(
     await c.writeLp(payload)
 
 proc generateAndAppendProof(
-    mixProto: MixProtocol, packet: seq[byte], label: string
-): Result[tuple[packet: seq[byte], proofToken: seq[byte]], string] =
+    mixProto: MixProtocol,
+    packet: seq[byte],
+    label: string,
+    epoch: Opt[uint64] = Opt.none(uint64),
+): Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]] {.
+    async: (raises: [CancelledError])
+.} =
   ## Generate spam protection proof and append it to the packet.
   ## Returns the packet with proof appended and an opaque proof token
   ## for proof slot tracking.
@@ -147,14 +152,23 @@ proc generateAndAppendProof(
     return ok((packet, newSeq[byte]()))
 
   let bindingData = packet
-  let proofResult = spamProtection
-    .generateProof(bindingData)
-    .mapErr(
-      proc(e: string): string =
-        mix_messages_error.inc(labelValues = [label, "SPAM_PROOF_GEN_FAILED"])
-        fmt"Failed to generate spam protection proof: {e}"
-    ).valueOr:
-      return err(error)
+  let generated =
+    if epoch.isSome:
+      await spamProtection.generateProofAsync(bindingData, epoch.get())
+    else:
+      await spamProtection.generateProofAsync(bindingData)
+  let proofResult = generated.mapErr(
+    proc(e: string): string =
+      mix_messages_error.inc(labelValues = [label, "SPAM_PROOF_GEN_FAILED"])
+      fmt"Failed to generate spam protection proof: {e}"
+  ).valueOr:
+    return err(error)
+
+  if proofResult.proof.len != spamProtection.proofSize:
+    return err(
+      "Spam protection provider returned proof size " & $proofResult.proof.len &
+        ", expected " & $spamProtection.proofSize
+    )
 
   let packetWithProof = appendProofToPacket(packet, proofResult.proof)
     .mapErr(
@@ -164,7 +178,7 @@ proc generateAndAppendProof(
     ).valueOr:
       return err(error)
 
-  ok((packetWithProof, proofResult.token))
+  return ok((packetWithProof, proofResult.token))
 
 proc extractProof(
     mixProto: MixProtocol, packetWithProof: var seq[byte], label: string
@@ -187,14 +201,14 @@ proc extractProof(
 
 proc verifyProof(
     mixProto: MixProtocol, sphinxPacket: seq[byte], proof: seq[byte], label: string
-): Result[void, string] =
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   ## Verify a previously extracted spam protection proof.
   let spamProtection = mixProto.spamProtection.valueOr:
     return ok()
 
   let bindingData = sphinxPacket
 
-  let verifyResult = spamProtection.verifyProof(proof, bindingData).valueOr:
+  let verifyResult = (await spamProtection.verifyProofAsync(proof, bindingData)).valueOr:
     mix_messages_error.inc(labelValues = [label, "SPAM_PROOF_VERIFY_ERROR"])
     return err(fmt"Spam protection proof verification error: {error}")
 
@@ -203,7 +217,7 @@ proc verifyProof(
     return err("Spam protection proof verification failed")
 
   trace "Spam protection proof verified successfully"
-  ok()
+  return ok()
 
 method handleMixMessages*(
     mixProto: MixProtocol,
@@ -249,7 +263,7 @@ method handleMixMessages*(
 
   # Step 3: Verify spam proof
   # Only done after replay check passes to avoid wasting cycles on duplicates
-  mixProto.verifyProof(sphinxBytes, spamProof, "Intermediate/Exit").isOkOr:
+  (await mixProto.verifyProof(sphinxBytes, spamProof, "Intermediate/Exit")).isOkOr:
     error "Spam protection verification failed", err = error
     return
 
@@ -401,15 +415,17 @@ method handleMixMessages*(
     var proofGenTimeMs: int64
     let proofGenFut = (
       proc(): Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]] {.
-          async
+          async: (raises: [CancelledError])
       .} =
-        let res = mixProto.generateAndAppendProof(
+        let res = await mixProto.generateAndAppendProof(
           processedSP.serializedSphinxPacket, "Intermediate"
         )
         proofGenTimeMs = (Moment.now() - proofGenStartTime).milliseconds
         return res
     )()
 
+    defer:
+      await cancelAndWait(proofGenFut, delayFut)
     await allFutures(proofGenFut, delayFut)
 
     mixProto.spamProtection.withValue(sp):
@@ -419,7 +435,7 @@ method handleMixMessages*(
           sampledDelay = actualDelay,
           hint = "Increase the minimum delay floor or reduce proof generation time"
 
-    let (outgoingPacket, _) = proofGenFut.value().valueOr:
+    let (outgoingPacket, _) = (await proofGenFut).valueOr:
       error "Failed to generate spam protection proof for next hop", err = error
       return
 
@@ -652,13 +668,15 @@ proc sendPacket(
   var proofGenTimeMs: int64
   let proofGenFut = (
     proc(): Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]] {.
-        async
+        async: (raises: [CancelledError])
     .} =
-      let res = mixProto.generateAndAppendProof(serialized, label)
+      let res = await mixProto.generateAndAppendProof(serialized, label)
       proofGenTimeMs = (Moment.now() - proofGenStartTime).milliseconds
       return res
   )()
 
+  defer:
+    await cancelAndWait(proofGenFut, delayFut)
   await allFutures(proofGenFut, delayFut)
 
   mixProto.spamProtection.withValue(sp):
@@ -668,7 +686,7 @@ proc sendPacket(
         sampledDelay = initialDelay,
         hint = "Increase the minimum delay floor or reduce proof generation time"
 
-  let (packetToSend, _) = proofGenFut.value().valueOr:
+  let (packetToSend, _) = (await proofGenFut).valueOr:
     return err(error)
 
   when defined(enable_mix_benchmarks):
@@ -777,7 +795,6 @@ proc anonymizeLocalProtocolSend*(
     delays: seq[Delay] = @[]
     exitPeerId: PeerId
 
-  # Select L mix nodes at random
   let numMixNodes = mixProto.nodePool.len
   var numAvailableNodes = numMixNodes
 
@@ -792,7 +809,6 @@ proc anonymizeLocalProtocolSend*(
       fmt"No. of public mix nodes ({numAvailableNodes}) less than path length ({PathLength})."
     )
 
-  # Skip the destination peer
   var poolPeerIds = mixProto.nodePool.peerIds()
   var availableIndices = toSeq(0 ..< poolPeerIds.len)
 
@@ -817,60 +833,46 @@ proc anonymizeLocalProtocolSend*(
     availableIndices.del(randomIndexPosition)
 
     if destination.kind == ForwardAddr and randPeerId == destination.peerId:
-      # Skip the destination peer
       continue
 
-    # Last hop will be the exit node that will forward the request
     if hop.len == PathLength - 1:
       case destination.kind
       of ForwardAddr:
-        # Last hop will be the exit node that will fwd the request
         exitPeerId = randPeerId
       of MixNode:
-        # Exist node will be the destination
         exitPeerId = destination.peerId
         randPeerId = destination.peerId
 
     debug "Selected mix node: ", indexInPath = hop.len, peerId = randPeerId
 
-    # Extract multiaddress, mix public key, and hop
     let mixPubInfoOpt = mixProto.nodePool.get(randPeerId)
     if mixPubInfoOpt.isNone:
       mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
       trace "Failed to get mix pub info for peer, skipping and removing node from pool",
         peerId = randPeerId
-      # Remove this node from the pool to prevent future selection
       discard mixProto.nodePool.remove(randPeerId)
-      # Skip this node and try another
       continue
     let (peerId, multiAddr, mixPubKey, _) = mixPubInfoOpt.get().get()
 
-    # Validate multiaddr before committing this node to the path
     let multiAddrBytes = multiAddrToBytes(peerId, multiAddr).valueOr:
       mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
       trace "Failed to convert multiaddress to bytes, skipping and removing node from pool",
         error = error, peerId = peerId, multiAddr = multiAddr
-      # Remove this node from the pool to prevent future selection
       discard mixProto.nodePool.remove(randPeerId)
-      # Skip this node with invalid multiaddr and try another
-      # in future lookup in peerStore to see if there is any other valid multiaddr for this peer and use that.
       continue
 
-    # Only add to path after validation succeeds
     publicKeys.add(mixPubKey)
 
     if hop.len == 0:
       nextHopAddr = multiAddr
       nextHopPeerId = peerId
 
-    let hopDelay =
+    delays.add(
       if hop.len != PathLength - 1:
         mixProto.delayStrategy.generateForEntry()
       else:
-        NoDelay # No delay for exit node
-
-    delays.add(hopDelay)
-
+        NoDelay
+    )
     hop.add(Hop.init(multiAddrBytes))
 
   # Encode destination
@@ -926,25 +928,33 @@ proc anonymizeLocalProtocolSend*(
 
   return ok(session)
 
-proc reply(
+proc sendSurbReply*(
     mixProto: MixProtocol, surb: SURB, msg: sink seq[byte]
-) {.async: (raises: [CancelledError]).} =
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   let (peerId, multiAddr) = surb.hop.get().bytesToMultiAddr().valueOr:
-      error "could not obtain multiaddress from hop", err = error
-      return
+      return err("could not obtain multiaddress from hop: " & error)
 
   # Reply messages don't require an application codec: routing is determined by the SURB.
   let message = buildMessage(move(msg), "").valueOr:
-    error "could not build reply message", err = error
-    return
+    return err("could not build reply message: " & error[0])
 
   let sphinxPacket = useSURB(surb, message)
+
+  mixProto.coverTraffic.withValue(ct):
+    let claim = ct.slotPool.claimSlot()
+    if not claim.success:
+      mix_slot_claim_rejected.inc(labelValues = ["reply"])
+      return err("No slots available in current epoch")
+    if claim.reclaimedToken.len > 0:
+      mixProto.spamProtection.withValue(sp):
+        sp.reclaimProofToken(claim.reclaimedToken)
 
   let sendRes = await mixProto.sendPacket(
     peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
   )
   if sendRes.isErr:
-    error "could not send reply", peerId, multiAddr, err = sendRes.error
+    return err("could not send reply: " & sendRes.error)
+  return ok()
 
 type PathNode = object
   peerId: PeerId
@@ -954,9 +964,7 @@ type PathNode = object
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]
 ): Result[seq[PathNode], string] {.raises: [].} =
-  ## Select `count` random mix nodes from the pool, excluding specified peers.
   let available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
-
   if available.len < count:
     return err(
       "Not enough mix nodes in pool (available=" & $available.len & ", needed=" & $count &
@@ -966,7 +974,7 @@ proc selectRandomNodes(
   let selectedPeerIds = mixProto.rng.pick(available, count).valueOr:
     return err("No mix nodes available in pool")
 
-  var selected: seq[PathNode] = @[]
+  var selected: seq[PathNode]
   for peerId in selectedPeerIds:
     let mixPubInfo = mixProto.nodePool.get(peerId).valueOr:
       return err("Could not get mix pub info for peer: " & $peerId)
@@ -977,12 +985,11 @@ proc selectRandomNodes(
         mixPubKey: mixPubInfo.mixPubKey,
       )
     )
-
   ok(selected)
 
 proc buildCoverPacket*(
-    mixProto: MixProtocol
-): Result[CoverPacketBuild, string] {.raises: [].} =
+    mixProto: MixProtocol, epoch: uint64
+): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
   ## Build a cover Sphinx packet with a loop path (self = exit node),
   ## random payload .
   let nodes = mixProto.selectRandomNodes(
@@ -1022,13 +1029,17 @@ proc buildCoverPacket*(
   let sphinxPacket = wrapInSphinxPacket(message, publicKeys, delays, hops, Hop()).valueOr:
     return err("Failed to wrap cover sphinx packet: " & error)
 
-  let (packetToSend, proofToken) = mixProto.generateAndAppendProof(
-    sphinxPacket.serialize(), "Cover"
-  ).valueOr:
-    return err("Failed to generate proof for cover packet: " & error)
+  let serialized = sphinxPacket.serialize()
+  let (packetToSend, proofToken) =
+    if mixProto.spamProtection.isSome() and
+        not mixProto.spamProtection.get().precomputeCoverProofs():
+      (serialized, newSeq[byte]())
+    else:
+      (await mixProto.generateAndAppendProof(serialized, "Cover", Opt.some(epoch))).valueOr:
+        return err("Failed to generate proof for cover packet: " & error)
 
   let firstNode = nodes[0]
-  ok(
+  return ok(
     CoverPacketBuild(
       packet: packetToSend,
       firstHopPeerId: firstNode.peerId,
@@ -1037,7 +1048,27 @@ proc buildCoverPacket*(
     )
   )
 
-proc sendCoverPacket*(
+proc buildCoverPacket*(
+    mixProto: MixProtocol
+): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+  var epoch: uint64
+  mixProto.coverTraffic.withValue(ct):
+    epoch = ct.slotPool.epoch
+  return await mixProto.buildCoverPacket(epoch)
+
+proc generateAndAppendCoverProof(
+    mixProto: MixProtocol, packet: seq[byte], epoch: Opt[uint64]
+): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+  if mixProto.spamProtection.isSome() and
+      not mixProto.spamProtection.get().precomputeCoverProofs():
+    let proved = await mixProto.generateAndAppendProof(packet, "Cover", epoch)
+    return proved.map(
+      proc(value: auto): seq[byte] =
+        value.packet
+    )
+  return ok(packet)
+
+proc writeCoverPacket(
     mixProto: MixProtocol, peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte]
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   try:
@@ -1050,6 +1081,17 @@ proc sendCoverPacket*(
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
     return err("Failed to write cover packet: " & exc.msg)
+
+proc sendCoverPacket*(
+    mixProto: MixProtocol,
+    peerId: PeerId,
+    multiAddr: MultiAddress,
+    packet: seq[byte],
+    epoch: Opt[uint64] = Opt.none(uint64),
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  let proved = (await mixProto.generateAndAppendCoverProof(packet, epoch)).valueOr:
+    return err(error)
+  return await mixProto.writeCoverPacket(peerId, multiAddr, proved)
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
@@ -1131,14 +1173,26 @@ proc init*(
   mixProto.coverTraffic = coverTraffic
   coverTraffic.withValue(ct):
     ct.setCoverPacketBuilder(
-      proc(): Result[CoverPacketBuild, string] {.gcsafe, raises: [].} =
-        mixProto.buildCoverPacket()
+      proc(
+          epoch: uint64
+      ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+        return await mixProto.buildCoverPacket(epoch)
+    )
+    ct.setCoverProofGenerator(
+      proc(
+          packet: seq[byte], epoch: uint64
+      ): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+        return await mixProto.generateAndAppendCoverProof(packet, Opt.some(epoch))
     )
     ct.setCoverPacketSender(
       proc(
-          peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte]
+          peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], _: uint64
       ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-        await mixProto.sendCoverPacket(peerId, multiAddr, packet)
+        return await mixProto.writeCoverPacket(peerId, multiAddr, packet)
+    )
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        mixProto.delayStrategy.generateForSender()
     )
     # Note: useInternalEpochTimer must be set to false when SpamProtection is
     # present, as SpamProtection provides epoch change notifications via
@@ -1163,9 +1217,10 @@ proc init*(
     # `message` is passed by value (the closure signature is fixed by
     # `ExitLayer.init`'s callback type). A full sink-through chain
     # would require updating the callback type in libp2p_mix.
-    # For now: reply() takes `sink seq[byte]` and `move()`s into
+    # For now: sendSurbReply() takes `sink seq[byte]` and `move()`s into
     # buildMessage internally — the optimization stops at this boundary.
-    await mixProto.reply(surb, message)
+    (await mixProto.sendSurbReply(surb, message)).isOkOr:
+      error "could not send reply", err = error
 
   mixProto.exitLayer = ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehaviors)
 

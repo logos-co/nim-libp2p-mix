@@ -19,8 +19,10 @@ proc makePeerInfo(): (PeerId, MultiAddress) =
 
 proc mockBuildCoverPacket(): BuildCoverPacketProc =
   let (pid, ma) = makePeerInfo()
-  return proc(): Result[CoverPacketBuild, string] {.gcsafe, raises: [].} =
-    ok(
+  return proc(
+      epoch: uint64
+  ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+    return ok(
       CoverPacketBuild(
         packet: newSeq[byte](PacketSize),
         firstHopPeerId: pid,
@@ -30,19 +32,21 @@ proc mockBuildCoverPacket(): BuildCoverPacketProc =
     )
 
 proc mockBuildCoverPacketFailing(): BuildCoverPacketProc =
-  return proc(): Result[CoverPacketBuild, string] {.gcsafe, raises: [].} =
-    err("mock build failure")
+  return proc(
+      epoch: uint64
+  ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+    return err("mock build failure")
 
 proc mockSendCoverPacket(sentPackets: ref seq[seq[byte]]): SendCoverPacketProc =
   return proc(
-      peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte]
+      peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], epoch: uint64
   ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
     sentPackets[].add(packet)
     return ok()
 
 proc mockSendCoverPacketFailing(): SendCoverPacketProc =
   return proc(
-      peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte]
+      peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], epoch: uint64
   ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
     return err("mock send failure")
 
@@ -225,6 +229,199 @@ suite "ConstantRateCoverTraffic":
 
     waitFor ct.emitCoverPacket()
     check ct.slotPool.coverClaimed == 1
+
+  asyncTest "pre-send delay is applied before emission":
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 10, epochDuration = 1.seconds)
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        Delay(60)
+    )
+    ct.onEpochChange(1)
+
+    let start = Moment.now()
+    await ct.emitCoverPacket()
+    check (Moment.now() - start) >= 60.milliseconds
+    check sentPackets[].len == 1
+
+  asyncTest "on-demand hold overlaps proof generation":
+    ## Sequential hold+build would be ~160ms; overlapped is ~max(80,80).
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+    let (pid, ma) = makePeerInfo()
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 10, epochDuration = 1.seconds)
+    ct.setCoverPacketBuilder(
+      proc(
+          epoch: uint64
+      ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+        await sleepAsync(80.milliseconds)
+        return ok(
+          CoverPacketBuild(
+            packet: newSeq[byte](PacketSize),
+            firstHopPeerId: pid,
+            firstHopAddr: ma,
+            proofToken: @[0x42.byte],
+          )
+        )
+    )
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        Delay(80)
+    )
+    ct.onEpochChange(1)
+
+    let start = Moment.now()
+    await ct.emitCoverPacket()
+    let elapsed = Moment.now() - start
+    check elapsed >= 80.milliseconds
+    check elapsed < 140.milliseconds
+    check sentPackets[].len == 1
+
+  asyncTest "packet held across epoch boundary is discarded":
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+    let holdStarted = newAsyncEvent()
+
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 10, epochDuration = 1.seconds)
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        holdStarted.fire()
+        Delay(100)
+    )
+    ct.onEpochChange(1)
+
+    var reclaimed: seq[seq[byte]]
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed.add(token)
+    )
+
+    let fut = ct.emitCoverPacket()
+    await holdStarted.wait()
+    ct.onEpochChange(2)
+    await fut
+    check sentPackets[].len == 0
+    check reclaimed == @[@[0x42.byte]]
+
+  asyncTest "prebuilt packet held across epoch boundary reclaims its token":
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+    let holdStarted = newAsyncEvent()
+    let (pid, ma) = makePeerInfo()
+
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 10, epochDuration = 1.seconds, enablePrecomputation = true
+    )
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setSendDelaySampler(
+      proc(): Delay {.gcsafe, raises: [].} =
+        holdStarted.fire()
+        Delay(100)
+    )
+    ct.onEpochChange(1)
+    ct.slotPool.addPacket(
+      CoverPacket(
+        packet: @[0xAA.byte],
+        firstHopPeerId: pid,
+        firstHopAddr: ma,
+        proofToken: @[0x7A.byte],
+      )
+    )
+
+    var reclaimed: seq[seq[byte]]
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed.add(token)
+    )
+
+    let fut = ct.emitCoverPacket()
+    await holdStarted.wait()
+    ct.onEpochChange(2)
+    await fut
+    check sentPackets[].len == 0
+    check reclaimed == @[@[0x7A.byte]]
+
+  test "epoch change reclaims all queued proof tokens":
+    let (pid, ma) = makePeerInfo()
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 10, enablePrecomputation = true)
+    var reclaimed: seq[seq[byte]]
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed.add(token)
+    )
+    ct.slotPool.addPacket(
+      CoverPacket(
+        packet: @[1.byte],
+        firstHopPeerId: pid,
+        firstHopAddr: ma,
+        proofToken: @[0x71.byte],
+      )
+    )
+    ct.slotPool.addPacket(
+      CoverPacket(
+        packet: @[2.byte],
+        firstHopPeerId: pid,
+        firstHopAddr: ma,
+        proofToken: @[0x72.byte],
+      )
+    )
+
+    ct.onEpochChange(2)
+
+    check reclaimed == @[@[0x71.byte], @[0x72.byte]]
+    check ct.slotPool.queuedCount == 0
+
+  asyncTest "precompute epoch race reclaims the built proof token":
+    let buildGate = newAsyncEvent()
+    var buildPending = false
+    var reclaimed: seq[seq[byte]]
+    let (pid, ma) = makePeerInfo()
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 10,
+      epochDuration = 1.seconds,
+      enablePrecomputation = true,
+      useInternalEpochTimer = false,
+    )
+    ct.setCoverPacketBuilder(
+      proc(
+          epoch: uint64
+      ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+        buildPending = true
+        await buildGate.wait()
+        return ok(
+          CoverPacketBuild(
+            packet: newSeq[byte](PacketSize),
+            firstHopPeerId: pid,
+            firstHopAddr: ma,
+            proofToken: @[0x7B.byte],
+          )
+        )
+    )
+    ct.setCoverPacketSender(mockSendCoverPacket(new seq[seq[byte]]))
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed.add(token)
+    )
+    ct.onEpochChange(1)
+
+    await ct.start()
+    checkUntilTimeout:
+      buildPending
+    ct.onEpochChange(2)
+    buildGate.fire()
+    checkUntilTimeout:
+      reclaimed.len == 1
+    await ct.stop()
+
+    check reclaimed == @[@[0x7B.byte]]
 
   asyncTest "start and stop":
     let ct = ConstantRateCoverTraffic.new(

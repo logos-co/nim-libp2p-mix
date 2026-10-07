@@ -84,8 +84,7 @@ proc add*(pool: MixNodePool, infos: seq[MixPubInfo]) =
 proc remove*(pool: MixNodePool, peerId: PeerId): bool =
   ## Remove a mix node from the pool. Returns true if the node was present.
   pool.peerStore[MixPubKeyBook].del(peerId)
-  # Note: We only delete from MixPubKeyBook. The peer may still have
-  # entries in AddressBook/KeyBook for other protocols.
+  # Preserve AddressBook/KeyBook entries used by other protocols.
 
 proc get*(pool: MixNodePool, peerId: PeerId): Opt[MixPubInfo] =
   ## Get MixPubInfo for a peer. Returns none if peer is not in the pool
