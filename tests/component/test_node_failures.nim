@@ -140,8 +140,10 @@ suite "Mix Protocol - Node Failures":
 
   asyncTest "sender times out when destination is unreachable":
     ## Exit node gets DialFailedError and must not fabricate an empty SURB reply.
-    let nodes = await setupMixNodes(
-      10, destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32)))
+    let (nodes, mock) = await setupMixNodesWithMock(
+      10,
+      destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32))),
+      delayStrategy = Opt.some(DelayStrategy(FixedDelayStrategy(delay: 0))),
     )
 
     let (destNode, pingProto) = await setupDestNode(Ping.new(rng = rng()))
@@ -151,14 +153,14 @@ suite "Mix Protocol - Node Failures":
 
     startAndDeferStop(nodes)
 
-    let conn = nodes[0]
+    let conn = mock
       .toConnection(
         MixDestination.init(destPeerId, destAddr),
         pingProto.codec,
         MixParameters(
           expectReply: Opt.some(true),
           numSurbs: Opt.some(byte(1)),
-          replyTimeout: Opt.some(100.milliseconds),
+          replyTimeout: Opt.some(1.seconds),
         ),
       )
       .expect("could not build connection")
@@ -170,8 +172,9 @@ suite "Mix Protocol - Node Failures":
     expect LPStreamEOFError:
       discard await conn.readLp(1024).wait(10.seconds)
 
-    # The timeout releases the credentials it was issued against.
-    check nodes[0].surbCredsLen == 0
+    check:
+      mock.receivedPacketCount == 0
+      mock.surbCredsLen == 0
 
   asyncTest "reply timeout releases the SURB credentials":
     ## Destination never answers, so no reply can ever come back. readOnce

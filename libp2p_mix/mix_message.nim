@@ -27,7 +27,7 @@ proc serialize*(mixMsg: MixMessage): seq[byte] =
 
 proc deserialize*(
     T: typedesc[MixMessage], data: openArray[byte]
-): Result[MixMessage, string] =
+): Result[MixMessage, string] {.raises: [].} =
   if data.len == 0:
     return err("deserialization failed: data is empty")
 

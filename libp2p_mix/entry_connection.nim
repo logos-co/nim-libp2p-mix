@@ -37,7 +37,7 @@ type MixEntryConnection* = ref object of Connection
   params: MixParameters
   incoming: AsyncQueue[seq[byte]]
   incomingFut: Future[void]
-  replyReceivedFut: Future[void]
+  replyReceivedFut: Future[void].Raising([CancelledError])
   cached: seq[byte]
   replyTimeout: Duration
   sent: bool
@@ -161,7 +161,8 @@ proc new*(
 
   if expectReply:
     instance.incoming = newAsyncQueue[seq[byte]]()
-    instance.replyReceivedFut = newFuture[void]("MixEntryConnection.replyReceived")
+    instance.replyReceivedFut =
+      Future[void].Raising([CancelledError]).init("MixEntryConnection.replyReceived")
     let checkForIncoming = proc(): Future[void] {.async: (raises: [CancelledError]).} =
       instance.cached = await instance.incoming.get()
       instance.replyReceivedFut.complete()
