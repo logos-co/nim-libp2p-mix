@@ -21,24 +21,22 @@ proc serialize*(mixMsg: MixMessage): seq[byte] =
 
   var buf = newSeqUninit[byte](vbytes.len + mixMsg.codec.len + mixMsg.message.len)
   buf[0 ..< vbytes.len] = vbytes.toOpenArray()
-  buf[vbytes.len ..< mixMsg.codec.len] = mixMsg.codec.toBytes()
+  buf[vbytes.len ..< vbytes.len + mixMsg.codec.len] = mixMsg.codec.toBytes()
   buf[vbytes.len + mixMsg.codec.len ..< buf.len] = mixMsg.message
   buf
 
 proc deserialize*(
     T: typedesc[MixMessage], data: openArray[byte]
-): Result[MixMessage, string] =
+): Result[MixMessage, string] {.raises: [].} =
   if data.len == 0:
     return err("deserialization failed: data is empty")
 
-  var codecLen: int
-  var varintLen: int
-  for i in 0 ..< min(data.len, 2):
-    let parsed = uint16.fromBytes(data[0 ..< i], Leb128)
-    if parsed.len < 0 or (i == 1 and parsed.len == 0):
-      return err("deserialization failed: invalid codec length")
+  let parsed = uint16.fromBytes(data.toOpenArray(0, min(data.len, 2) - 1), Leb128)
+  if parsed.len <= 0 or parsed.len != Leb128.len(parsed.val):
+    return err("deserialization failed: invalid codec length")
 
-    varintLen = parsed.len
+  let
+    varintLen = parsed.len.int
     codecLen = parsed.val.int
 
   if data.len < varintLen + codecLen:
