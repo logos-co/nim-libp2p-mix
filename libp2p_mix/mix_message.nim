@@ -21,7 +21,7 @@ proc serialize*(mixMsg: MixMessage): seq[byte] =
 
   var buf = newSeqUninit[byte](vbytes.len + mixMsg.codec.len + mixMsg.message.len)
   buf[0 ..< vbytes.len] = vbytes.toOpenArray()
-  buf[vbytes.len ..< mixMsg.codec.len] = mixMsg.codec.toBytes()
+  buf[vbytes.len ..< vbytes.len + mixMsg.codec.len] = mixMsg.codec.toBytes()
   buf[vbytes.len + mixMsg.codec.len ..< buf.len] = mixMsg.message
   buf
 
