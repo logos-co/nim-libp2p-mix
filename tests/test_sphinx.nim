@@ -351,6 +351,20 @@ suite "Sphinx Tests":
 
     check processedSP2.status == Duplicate
 
+  test "sphinx reports replay cache capacity separately from duplicates":
+    let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()
+    let packet = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "Sphinx wrap error"
+      )
+    var bounded = TagManager.new(maxTags = 1, autoStart = false)
+    bounded.addTag(default(Tag))
+
+    let processed = processSphinxPacket(packet, privateKeys[0], bounded).expect(
+        "Sphinx processing error"
+      )
+
+    check processed.status == ReplayCacheFull
+
   test "alpha high-bit malleability is rejected as non-canonical":
     # Flipping α's RFC 7748-masked top bit yields different α bytes but the same
     # shared secret s. It used to slip through and be caught later by the H(s)

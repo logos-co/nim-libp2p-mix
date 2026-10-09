@@ -71,6 +71,15 @@ suite "Tag Manager":
       tm.checkAndAddTag(tag)
       tm.len == 1
 
+  test "tryAddTag distinguishes duplicates from capacity rejection":
+    let bounded = TagManager.new(maxTags = 1, autoStart = false)
+
+    check:
+      bounded.tryAddTag(makeTag(1)) == TagAdded
+      bounded.tryAddTag(makeTag(1)) == TagAlreadyPresent
+      bounded.tryAddTag(makeTag(2)) == TagCacheFull
+      bounded.len == 1
+
   test "tag expiration and purge":
     let shortTTL = chronos.milliseconds(30)
     let tmShort = TagManager.new(tagTTL = shortTTL, autoStart = false)

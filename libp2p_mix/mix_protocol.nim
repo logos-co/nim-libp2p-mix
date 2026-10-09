@@ -454,6 +454,8 @@ method handleMixMessages*(
       mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
   of Duplicate:
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "DUPLICATE"])
+  of ReplayCacheFull:
+    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "REPLAY_CACHE_FULL"])
   of InvalidMAC:
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_MAC"])
 
