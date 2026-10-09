@@ -24,6 +24,9 @@ export DestReadBehavior
 export registerDestReadBehavior
 export localMixPubInfo
 export setLocalMultiAddr
+export buildCoverPacket
+export sendCoverPacket
+export sendSurbReply
 
 # Spam protection exports
 export SpamProtection
