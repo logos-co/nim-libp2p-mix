@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 # Copyright (c) Status Research & Development GmbH
 
-import results, sequtils
+import results
+import stew/ctops
 import ./[crypto, curve25519, delay, lioness, serialization, tag_manager]
 import libp2p/crypto/crypto
 
@@ -145,7 +146,7 @@ proc computeBetaGamma(
 
       beta = aes_ctr(beta_aes_key, beta_iv, serializedRoutingInfo)
 
-    gamma = hmac(mac_key, beta).toSeq()
+    gamma = hmac(mac_key, beta)
 
   return ok((beta: beta, gamma: gamma))
 
@@ -374,7 +375,8 @@ proc processSphinxPacket*(
   # Compute MAC
   let mac_key = deriveKeyMaterial(MacKeyLabel, sBytes).kdf()
 
-  if not (hmac(mac_key, beta).toSeq() == gamma):
+  let expectedMac = hmac(mac_key, beta)
+  if gamma.len != expectedMac.len or not CT.isEqual(expectedMac, gamma):
     # If MAC not verified
     return ok(ProcessedSphinxPacket(status: InvalidMAC))
 
