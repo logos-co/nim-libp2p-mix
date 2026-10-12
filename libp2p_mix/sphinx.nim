@@ -376,6 +376,7 @@ proc processSphinxPacket*(
   let mac_key = deriveKeyMaterial(MacKeyLabel, sBytes).kdf()
 
   let expectedMac = hmac(mac_key, beta)
+  # CT.isEqual compares only the shared prefix, so reject unequal lengths first.
   if gamma.len != expectedMac.len or not CT.isEqual(expectedMac, gamma):
     # If MAC not verified
     return ok(ProcessedSphinxPacket(status: InvalidMAC))
