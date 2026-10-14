@@ -10,6 +10,9 @@ import chronicles, chronos
 import ./timedcache
 import libp2p/utils/heartbeat
 
+logScope:
+  topics = "tag_manager"
+
 const
   DefaultTagTTL* = chronos.hours(1)
   DefaultPurgeInterval* = chronos.minutes(5)
@@ -19,12 +22,18 @@ type
   ## Tag is H(s) as per spec Section 8.6.1 Step 2
   Tag* = array[32, byte]
 
+  TagInsertStatus* = enum
+    TagAdded
+    TagAlreadyPresent
+    TagCacheFull
+
   TagManager* = ref object
     cache: TimedCache[Tag]
     tagTTL: Duration
     maxTags: int
     purgeInterval: Duration
     purgeLoop: Future[void]
+    capacityWarningEmitted: bool
 
 proc len*(tm: TagManager): int {.inline.} =
   ## Returns the number of tags currently stored.
@@ -41,7 +50,10 @@ proc purgeExpiredTags*(tm: TagManager, now: Moment = Moment.now()): int =
   ## Returns the number of tags purged.
   let before = tm.cache.len
   tm.cache.expire(now)
-  before - tm.cache.len
+  let purged = before - tm.cache.len
+  if purged > 0:
+    tm.capacityWarningEmitted = false
+  purged
 
 proc purgeLoopProc(tm: TagManager) {.async: (raises: [CancelledError]).} =
   ## Periodically purges expired tags using the heartbeat pattern.
@@ -84,27 +96,48 @@ proc new*(
     tm.start()
   tm
 
-proc addTag*(tm: TagManager, tag: Tag, now: Moment = Moment.now()) =
-  ## Add a tag to the manager. If already present, this is a no-op
-  ## (does not refresh expiry - first seen time is what matters for replay protection).
+proc tryAddTag*(
+    tm: TagManager, tag: Tag, now: Moment = Moment.now()
+): TagInsertStatus {.raises: [].} =
+  ## Add a tag and report whether it was added, already present, or rejected.
+  tm.cache.expire(now)
+  if tag in tm.cache:
+    return TagAlreadyPresent
+  if tm.maxTags > 0 and tm.cache.len >= tm.maxTags:
+    if not tm.capacityWarningEmitted:
+      warn "Replay tag cache is full; rejecting new tags", maxTags = tm.maxTags
+      tm.capacityWarningEmitted = true
+    return TagCacheFull
+  tm.capacityWarningEmitted = false
   discard tm.cache.put(tag, now)
+  TagAdded
+
+proc addTag*(tm: TagManager, tag: Tag, now: Moment = Moment.now()) {.raises: [].} =
+  ## Add a tag if it is absent and the cache has capacity.
+  ## Re-adding a tag does not refresh its expiry.
+  discard tm.tryAddTag(tag, now)
 
 proc isTagSeen*(tm: TagManager, tag: Tag): bool {.inline.} =
   ## Check if a tag has been seen (and hasn't expired).
   tag in tm.cache
 
-proc checkAndAddTag*(tm: TagManager, tag: Tag, now: Moment = Moment.now()): bool =
+proc checkAndAddTag*(
+    tm: TagManager, tag: Tag, now: Moment = Moment.now()
+): bool {.raises: [].} =
   ## Atomically check if a tag exists and add it if not.
-  ## Returns true if the tag was already present (duplicate), false if newly added.
+  ## Returns true if the tag was already present or the cache is full, and false
+  ## if newly added. Treating capacity as seen preserves replay protection.
   ## This prevents race conditions in concurrent replay detection.
-  tm.cache.put(tag, now)
+  tm.tryAddTag(tag, now) != TagAdded
 
 proc removeTag*(tm: TagManager, tag: Tag) =
   ## Remove a specific tag.
   discard tm.cache.del(tag)
+  tm.capacityWarningEmitted = false
 
 proc clearTags*(tm: TagManager) =
   ## Remove all tags.
   tm.cache = TimedCache[Tag].init(
     timeout = tm.tagTTL, maxSize = tm.maxTags, refreshOnPut = false
   )
+  tm.capacityWarningEmitted = false
