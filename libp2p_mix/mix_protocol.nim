@@ -547,7 +547,7 @@ method buildSurb*(
         let selectedIndex = availableIndices[randomIndexPosition]
         let randPeerId = poolPeerIds[selectedIndex]
         availableIndices.del(randomIndexPosition)
-        debug "Selected mix node for surbs: ", indexInPath = i, peerId = randPeerId
+        debug "Selected mix node for surbs: ", indexInPath = i
         let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
           return err("could not get mix pub info for peer: " & $randPeerId)
         (
@@ -841,7 +841,7 @@ proc anonymizeLocalProtocolSend*(
         exitPeerId = destination.peerId
         randPeerId = destination.peerId
 
-    debug "Selected mix node: ", indexInPath = hop.len, peerId = randPeerId
+    debug "Selected mix node: ", indexInPath = hop.len
 
     let mixPubInfoOpt = mixProto.nodePool.get(randPeerId)
     if mixPubInfoOpt.isNone:
