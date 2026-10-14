@@ -20,6 +20,8 @@ export SurbStore, SurbSession
 when defined(enable_mix_benchmarks):
   import ./benchmark
   from times import getTime, toUnixFloat, `-`, initTime, `$`, inMilliseconds, Time
+logScope:
+  topics = "mix_protocol"
 
 when defined(libp2p_mix_experimental_exit_is_dest):
   {.warning: "experimental support for mix exit == destination is enabled!".}
@@ -311,9 +313,7 @@ method handleMixMessages*(
       return
 
     trace "Exit node - Received mix message",
-      peerId = mixProto.mixNodeInfo.peerId,
-      message = deserialized.message,
-      codec = deserialized.codec
+      peerId = mixProto.mixNodeInfo.peerId, codec = deserialized.codec
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Exit",
@@ -547,7 +547,7 @@ method buildSurb*(
         let selectedIndex = availableIndices[randomIndexPosition]
         let randPeerId = poolPeerIds[selectedIndex]
         availableIndices.del(randomIndexPosition)
-        debug "Selected mix node for surbs: ", indexInPath = i, peerId = randPeerId
+        debug "Selected mix node for surbs: ", indexInPath = i
         let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
           return err("could not get mix pub info for peer: " & $randPeerId)
         (
@@ -798,8 +798,6 @@ proc anonymizeLocalProtocolSend*(
   let numMixNodes = mixProto.nodePool.len
   var numAvailableNodes = numMixNodes
 
-  debug "Destination data", destination
-
   if mixProto.nodePool.get(destination.peerId).isSome:
     numAvailableNodes = numMixNodes - 1
 
@@ -843,7 +841,7 @@ proc anonymizeLocalProtocolSend*(
         exitPeerId = destination.peerId
         randPeerId = destination.peerId
 
-    debug "Selected mix node: ", indexInPath = hop.len, peerId = randPeerId
+    debug "Selected mix node: ", indexInPath = hop.len
 
     let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
       mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])

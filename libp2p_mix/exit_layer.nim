@@ -10,6 +10,8 @@ import ./[mix_metrics, reply_connection, serialization, multiaddr]
 when defined(libp2p_mix_experimental_exit_is_dest):
   import std/enumerate
   import ./exit_connection
+logScope:
+  topics = "exit_layer"
 
 type OnReplyDialer* =
   proc(surb: SURB, message: seq[byte]) {.async: (raises: [CancelledError]).}
@@ -80,6 +82,8 @@ when defined(libp2p_mix_experimental_exit_is_dest):
         try:
           hasHandler = true
           await handler.protocol.handler(exitConn, codec)
+        except CancelledError as e:
+          raise e
         except CatchableError as e:
           error "Error during execution of MixProtocol handler: ", err = e.msg
 
@@ -149,9 +153,11 @@ proc fwdRequest(
   except LPStreamError as exc:
     error "Stream error while writing to next hop: ", err = exc.msg
     mix_messages_error.inc(labelValues = ["ExitLayer", "LPSTREAM_ERR"])
+    return
   except DialFailedError as exc:
     error "Failed to dial next hop: ", err = exc.msg
     mix_messages_error.inc(labelValues = ["ExitLayer", "DIAL_FAILED"])
+    return
   except CancelledError as exc:
     raise exc
 
@@ -166,10 +172,10 @@ proc onMessage*(
 ) {.async: (raises: [CancelledError]).} =
   when defined(libp2p_mix_experimental_exit_is_dest):
     if destination == Hop():
-      trace "onMessage - exit is destination", codec, message
+      trace "onMessage - exit is destination", codec
       await self.runHandler(codec, message, surbs)
     else:
-      trace "onMessage - exist is not destination", codec, message
+      trace "onMessage - exit is not destination", codec
       await self.fwdRequest(codec, message, destination, surbs)
   else:
     await self.fwdRequest(codec, message, destination, surbs)

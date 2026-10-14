@@ -49,3 +49,42 @@ when defined(libp2p_mix_experimental_exit_is_dest):
           check response == (if writeResponse: @[3.byte]
           else: newSeq[byte]())
         await sw.stop()
+
+    asyncTest "handler cancellation propagates":
+      const Codec = "/mix/test/cancellation"
+      let
+        sw = SwitchBuilder.new().withTcpTransport().withMplex().withNoise().build()
+        handlerStarted = newAsyncEvent()
+        handlerGate = newAsyncEvent()
+        layer = ExitLayer.init(
+          sw,
+          proc(surb: SURB, message: seq[byte]) {.async: (raises: [CancelledError]).} =
+            discard,
+          newTable[string, DestReadBehavior](),
+        )
+      defer:
+        await sw.stop()
+
+      var handlerCancelled = false
+      sw.mount(
+        LPProtocol.new(
+          codecs = @[Codec],
+          handler = proc(
+              conn: Connection, proto: string
+          ) {.async: (raises: [CancelledError]).} =
+            handlerStarted.fire()
+            try:
+              await handlerGate.wait()
+            except CancelledError as exc:
+              handlerCancelled = true
+              raise exc,
+        )
+      )
+
+      let messageFut = layer.onMessage(Codec, @[1.byte], Hop(), @[])
+      await handlerStarted.wait().wait(1.seconds)
+      await messageFut.cancelAndWait()
+
+      check:
+        handlerCancelled
+        messageFut.cancelled()

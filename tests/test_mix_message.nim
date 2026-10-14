@@ -3,6 +3,7 @@
 
 {.used.}
 
+import std/strutils
 import results, stew/byteutils
 import libp2p_mix/[padding, mix_message, mix_protocol, serialization]
 import ./tools/[unittest]
@@ -36,6 +37,20 @@ suite "mix_message_tests":
       emptyMessage == string.fromBytes(dMixMsg.message)
       codec == dMixMsg.codec
 
+  test "round trips one- and two-byte codec lengths":
+    let message = @[1.byte, 2, 3]
+
+    for codecLen in [0, 1, 127, 128, 16_383]:
+      let
+        codec = repeat('a', codecLen)
+        serialized = MixMessage.init(message, codec).serialize()
+        deserialized =
+          MixMessage.deserialize(serialized).expect("deserialization failed")
+
+      check:
+        deserialized.codec == codec
+        deserialized.message == message
+
   test "deserialize with empty data returns error":
     let res = MixMessage.deserialize(@[])
     check:
@@ -44,10 +59,15 @@ suite "mix_message_tests":
 
   test "deserialize with invalid codec length returns error":
     # LEB128 continuation bit set — incomplete varint
-    let res = MixMessage.deserialize(@[0b10000000'u8, 0b00000000'u8])
-    check:
-      res.isErr()
-      res.error == "deserialization failed: invalid codec length"
+    for prefix in [
+      @[0b10000000'u8],
+      @[0b10000000'u8, 0b00000000],
+      @[0b10000000'u8, 0b10000000, 0b00000001],
+    ]:
+      let res = MixMessage.deserialize(prefix)
+      check:
+        res.isErr()
+        res.error == "deserialization failed: invalid codec length"
 
   test "deserialize with insufficient data returns error":
     # Varint says codec is 5 bytes, but only 1 byte follows

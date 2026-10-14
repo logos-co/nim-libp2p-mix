@@ -72,6 +72,31 @@ suite "Mix Protocol - Connection API":
     expect LPStreamError:
       discard await conn.readLp(1024)
 
+  asyncTest "close wakes an indefinite pending read":
+    const TestCodec = "/test/close"
+    let nodes = await setupMixNodes(
+      2, destReadBehavior = Opt.some((codec: TestCodec, callback: readLp(1024)))
+    )
+    startAndDeferStop(nodes)
+
+    let conn = nodes[0]
+      .toConnection(
+        nodes[1].toMixDestination(),
+        TestCodec,
+        MixParameters(
+          expectReply: Opt.some(true),
+          numSurbs: Opt.some(byte(1)),
+          replyTimeout: Opt.some(InfiniteDuration),
+        ),
+      )
+      .expect("could not build connection")
+
+    let readFut = conn.readLp(1024)
+    await conn.close()
+
+    expect LPStreamEOFError:
+      discard await readFut.wait(1.seconds)
+
   asyncTest "write rejects oversized messages":
     let nodes = await setupMixNodes(10)
     startAndDeferStop(nodes)
