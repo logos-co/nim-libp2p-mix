@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 {.used.}
+
 import chronos, results, metrics
 import libp2p/switch
 import libp2p/stream/connection
@@ -14,6 +15,16 @@ type AsyncProofs = ref object of SpamProtection
   unavailable, blocked, pending, cancelled: bool
   proofGate: AsyncEvent
   coverEpochs: seq[uint64]
+
+type StopOrderCoverTraffic = ref object of CoverTraffic
+  provider: AsyncProofs
+  stoppedBeforeProof: bool
+
+method start(ct: StopOrderCoverTraffic) {.async: (raises: [CancelledError]).} =
+  discard
+
+method stop(ct: StopOrderCoverTraffic) {.async: (raises: []).} =
+  ct.stoppedBeforeProof = ct.provider.pending
 
 method precomputeCoverProofs(sp: AsyncProofs): bool {.gcsafe, raises: [].} =
   false
@@ -231,3 +242,126 @@ suite "Asynchronous proof provider":
     await sending.cancelAndWait()
     check providers[0].cancelled
     check not providers[0].pending
+
+  asyncTest "a pending request refuses a second write and releases its reply credentials on a cancel, a close or a stop":
+    ## The provider blocks inside `sendPacket`, after the reply credentials
+    ## are registered. A cancel and a close must both release them, and
+    ## `write` refuses a second write on a pending request.
+    var infos = MixNodeInfo.generateRandomMany(5, rng())
+    for info in infos.mitems:
+      info.multiAddr = MultiAddress.init("/ip4/127.0.0.1/tcp/0").tryGet()
+    var nodes: seq[MixProtocol]
+    let provider = AsyncProofs(proofSize: 1, blocked: true)
+    let cover = StopOrderCoverTraffic(provider: provider, slotPool: SlotPool.new(100))
+    for i, info in infos:
+      let sw = createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey))
+      let sp =
+        if i == 0:
+          provider
+        else:
+          AsyncProofs(proofSize: 1)
+      let node = MixProtocol.new(
+        info,
+        sw,
+        pool = HostPool.new(),
+        spamProtection = Opt.some(SpamProtection(sp)),
+        coverTraffic =
+          (if i == 0: Opt.some(CoverTraffic(cover)) else: Opt.none(CoverTraffic)),
+        delayStrategy = Opt.some(DelayStrategy(NoSamplingDelayStrategy.new(rng()))),
+      )
+      for other in infos:
+        if other.peerId != info.peerId:
+          node.hostPool.addPeer(other.toMixPubInfo())
+      sw.mount(node)
+      nodes.add(node)
+    startAndDeferStop(nodes)
+    # Each host store gets the listen addresses, so the send after the restart
+    # reaches the first hop.
+    for node in nodes:
+      node.setLocalMultiAddr(node.switch.peerInfo.addrs[0]).expect("bound address")
+    for node in nodes:
+      for other in nodes:
+        if other != node:
+          node.hostPool.addPeer(other.localMixPubInfo())
+    let sender = nodes[0]
+    let destination = MixDestination.exitNode(infos[4].peerId)
+    let params = MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8))
+    sender.registerDestReadBehavior("/mix/test/cancel/1.0.0", readLp(32))
+    sender.registerDestReadBehavior("/mix/test/close/1.0.0", readLp(32))
+
+    let connToCancel =
+      sender.toConnection(destination, "/mix/test/cancel/1.0.0", params).tryGet()
+    defer:
+      await connToCancel.close()
+    let sending = connToCancel.writeLp(@[1.byte, 2, 3])
+    checkUntilTimeout:
+      provider.pending
+    check sender.surbCredsLen == 1
+    expect LPStreamError:
+      await connToCancel.writeLp(@[4.byte, 5, 6])
+    await sending.cancelAndWait()
+    check provider.cancelled
+    check sender.surbCredsLen == 0
+
+    provider.cancelled = false
+    let connToClose =
+      sender.toConnection(destination, "/mix/test/close/1.0.0", params).tryGet()
+    let writing = connToClose.writeLp(@[1.byte, 2, 3])
+    checkUntilTimeout:
+      provider.pending
+    check sender.surbCredsLen == 1
+    await connToClose.close()
+    expect LPStreamClosedError:
+      await writing.wait(2.seconds)
+    check provider.cancelled
+    check sender.surbCredsLen == 0
+    expect LPStreamClosedError:
+      await connToClose.writeLp(@[4.byte, 5, 6])
+    check sender.surbCredsLen == 0
+
+    # Protocol stop cancels the same in-flight send, including its proof work.
+    provider.cancelled = false
+    let connToStop =
+      sender.toConnection(destination, "/mix/test/close/1.0.0", params).get()
+    defer:
+      await connToStop.close()
+    let stoppedWrite = connToStop.writeLp(@[7.byte, 8, 9])
+    checkUntilTimeout:
+      provider.pending
+    await sender.stop()
+    check cover.stoppedBeforeProof
+    expect LPStreamError:
+      await stoppedWrite
+    check provider.cancelled
+    check sender.surbCredsLen == 0
+    await sender.start()
+    provider.blocked = false
+    let connAfterRestart =
+      sender.toConnection(destination, "/mix/test/close/1.0.0", params).get()
+    await connAfterRestart.writeLp(@[1.byte, 2, 3]).wait(5.seconds)
+    await connAfterRestart.close()
+    check sender.surbCredsLen == 0
+
+  asyncTest "protocol stop closes the cached hop streams":
+    let nodes = await startTestMixNodes(5)
+    defer:
+      await stopNodes(nodes)
+    let sender = nodes[0]
+    let echo = EchoProtocol.new()
+    await echo.start()
+    nodes[^1].switch.mount(echo)
+    for node in nodes:
+      node.registerDestReadBehavior(echo.codec, readLp(1024))
+    let conn = sender
+      .toConnection(
+        nodes[^1].switch.toMixDestination(),
+        echo.codec,
+        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8)),
+      )
+      .get()
+    await conn.writeLp(@[7'u8]).wait(5.seconds)
+    check (await conn.readLp(1024).wait(5.seconds)) == @[7'u8]
+    await conn.close()
+    check outgoingMixStreams(sender.switch).len > 0
+    await sender.stop()
+    check outgoingMixStreams(sender.switch).len == 0
