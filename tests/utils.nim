@@ -8,6 +8,7 @@ import chronos, results, strformat
 import
   libp2p/
     [protocols/ping, peerid, multiaddress, switch, builders, crypto/crypto, crypto/secp]
+import libp2p/[connmanager, muxers/muxer, stream/connection]
 import libp2p_mix
 import libp2p_mix/mix_protocol
 import libp2p_mix/curve25519
@@ -269,3 +270,14 @@ proc startTestMixNodes*(count: int): Future[seq[MixProtocol]] {.async.} =
       if other != node:
         node.hostPool.addPeer(other.localMixPubInfo())
   nodes
+
+proc outgoingMixStreams*(sw: Switch): seq[Connection] =
+  ## List the open outgoing mix streams of a switch.
+  var streams: seq[Connection]
+  for _, muxers in sw.connManager.getConnections():
+    for mux in muxers:
+      for stream in mux.getStreams():
+        if stream.dir == Direction.Out and stream.protocol == MixProtocolID and
+            not stream.closed:
+          streams.add(stream)
+  streams
