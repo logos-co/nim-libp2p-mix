@@ -9,6 +9,7 @@ import
     tag_manager, mix_metrics, exit_layer, multiaddr, exit_connection, spam_protection,
     delay_strategy, mix_pool, pool, cover_traffic, surb_store,
   ]
+import ./mix_events
 import libp2p/protocols/protocol
 import libp2p/stream/[connection, lpstream]
 import libp2p/[switch, multicodec, peerinfo, varint]
@@ -45,6 +46,7 @@ type MixProtocol* = ref object of LPProtocol
   mixNodeInfo: MixNodeInfo
   switch*: Switch
   pool*: MixPool ## The peers this node routes through. See mix_pool.nim.
+  brokerCtx: BrokerContext ## Where this node emits its events.
   tagManager: TagManager
   exitLayer: ExitLayer
   rng: Rng
@@ -441,6 +443,7 @@ method handleMixMessages*(
     except CancelledError as exc:
       raise exc
     except DialFailedError as exc:
+      MixHopDialFailed.emit(mixProto.brokerCtx, MixHopDialFailed(peerId: nextPeerId))
       error "Failed to dial next hop: ", err = exc.msg
       mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
     except LPStreamError as exc:
@@ -701,6 +704,7 @@ proc sendPacket(
       )
     await mixProto.writeLp(peerId, @[multiAddress], @[MixProtocolID], packetToSend)
   except DialFailedError as exc:
+    MixHopDialFailed.emit(mixProto.brokerCtx, MixHopDialFailed(peerId: peerId))
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
     return err(fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}")
   except LPStreamError as exc:
@@ -1003,6 +1007,7 @@ proc writeCoverPacket(
     mix_messages_forwarded.inc(labelValues = ["Cover"])
     return ok()
   except DialFailedError as exc:
+    MixHopDialFailed.emit(mixProto.brokerCtx, MixHopDialFailed(peerId: peerId))
     mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
     return err("Failed to dial for cover packet: " & exc.msg)
   except LPStreamError as exc:
@@ -1054,6 +1059,7 @@ proc init*(
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
     pool: MixPool = nil,
+    brokerCtx: BrokerContext = DefaultBrokerContext,
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
   ##
@@ -1091,6 +1097,7 @@ proc init*(
       MixNodePool.new(switch.peerStore, switch.rng)
     else:
       pool
+  mixProto.brokerCtx = brokerCtx
   mixProto.tagManager = tagManager
   mixProto.surbStore = store
   mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
@@ -1175,6 +1182,7 @@ proc new*(
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
     pool: MixPool = nil,
+    brokerCtx: BrokerContext = DefaultBrokerContext,
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
   ##
@@ -1189,4 +1197,5 @@ proc new*(
     mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic,
     surbStore, pool,
   )
+  mixProto.brokerCtx = brokerCtx
   mixProto

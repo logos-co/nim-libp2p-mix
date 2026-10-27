@@ -17,6 +17,20 @@
     fetchSubmodules = true;
   };
 
+  brokers = pkgs.fetchgit {
+    url = "https://github.com/NagyZoltanPeter/nim-brokers";
+    rev = "fd97eb355eee5d14594e0b4599964eff00648ec7";
+    sha256 = "1qg6q7nqbvgr83xwklyv23g77ynpk3v8rr5xdcz8im9bvrfp3c2f";
+    fetchSubmodules = true;
+  };
+
+  cbor_serialization = pkgs.fetchgit {
+    url = "https://github.com/iftech/nim-cbor-serialization";
+    rev = "db1dca9066dfe0ec6820aed0056b32d8f8e5afd8";
+    sha256 = "03hc6mh8jwvvv30lggg49y2ag1l65qdl6qxys8ca5p3hp4aa1163";
+    fetchSubmodules = true;
+  };
+
   chronicles = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-chronicles";
     rev = "45c823b8af409f82fa35fd5e1f6a7c9a06fe3137";

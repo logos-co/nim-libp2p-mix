@@ -10,7 +10,7 @@ skipDirs = @["examples", "tests"]
 
 requires "nim >= 2.2.4",
   "libp2p >= 2.2.1", "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
-  "nimcrypto >= 0.6.0", "stew >= 0.4.2", "results", "unittest2"
+  "nimcrypto >= 0.6.0", "stew >= 0.4.2", "results", "unittest2", "brokers >= 3.4.0"
 
 import os, strutils
 
