@@ -7,7 +7,7 @@ import libp2p_mix
 import
   libp2p_mix/[mix_protocol, spam_protection, cover_traffic, mix_metrics, delay_strategy]
 import ../utils
-import ../tools/[unittest, lifecycle, crypto]
+import ../tools/[unittest, lifecycle, crypto, host_pool]
 
 type AsyncProofs = ref object of SpamProtection
   generated, verified: int

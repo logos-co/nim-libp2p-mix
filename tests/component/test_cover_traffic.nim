@@ -15,7 +15,7 @@ import libp2p_mix/spam_protection
 
 import metrics
 import libp2p_mix/mix_metrics
-import ../tools/[lifecycle, unittest, crypto]
+import ../tools/[lifecycle, unittest, crypto, host_pool]
 import ../[utils, spam_protection_impl]
 
 suite "Cover Traffic - Integration":

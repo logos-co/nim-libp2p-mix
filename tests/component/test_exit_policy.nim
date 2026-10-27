@@ -11,7 +11,7 @@ import libp2p/protocols/protocol
 import libp2p/stream/connection
 import libp2p_mix
 import libp2p_mix/[mix_protocol, cover_traffic]
-import ../tools/[crypto, unittest]
+import ../tools/[crypto, unittest, host_pool]
 
 type
   Counter = ref object
