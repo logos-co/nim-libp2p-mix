@@ -134,8 +134,28 @@ suite "Mix Protocol - Node Failures":
     checkUntilTimeout:
       mock.receivedPacketCount == 2
 
-    # The first reply released the whole group, so the second found nothing —
-    # group-atomic release, end to end.
+    # Each arrived reply consumes its own credential, even though the legacy
+    # stream adapter exposes only the first response.
+    check mock.surbCredsLen == 0
+
+  asyncTest "native send queue receives one response per SURB":
+    let (nodes, mock) = await setupMixNodesWithMock(
+      10, destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32)))
+    )
+    let (destNode, pingProto) = await setupDestNode(Ping.new(rng = rng()))
+    await startNodes(nodes)
+    defer:
+      await stopDestNode(destNode)
+      await stopNodes(nodes)
+
+    let incoming = newAsyncQueue[seq[byte]]()
+    let payload = newSeqWith(32, byte(42))
+    let sent = await mock.anonymizeLocalProtocolSend(
+      incoming, payload, pingProto.codec, destNode.toMixDestination(), byte(2)
+    )
+    check sent.isOk()
+    check (await incoming.get().wait(10.seconds)) == payload
+    check (await incoming.get().wait(10.seconds)) == payload
     check mock.surbCredsLen == 0
 
   asyncTest "sender times out when destination is unreachable":

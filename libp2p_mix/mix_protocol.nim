@@ -343,9 +343,8 @@ method handleMixMessages*(
       mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
       return
 
-    # The exit replies via every SURB in the group, so N replies race; the
-    # first one to arrive invalidates the rest.
-    mixProto.surbStore.release(connCred.igroup)
+    # Each SURB is single-use; other blocks can still deliver their replies.
+    mixProto.surbStore.release(processedSP.id)
 
     let unpaddedMsg = removePadding(reply).valueOr:
       error "Unpadding message failed", err = error
