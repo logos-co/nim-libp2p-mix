@@ -53,7 +53,9 @@ suite "Hop stream cache":
         await allFutures(pending.mapIt(it.cancelAndWait()))
       let streams = outgoingMixStreams(sender.switch)
       check streams.len > 0
-      check streams.len <= sender.switch.connectedPeers().len
+      # One cached stream for each peer. A second stream to the same peer is
+      # the duplicate that this test exists to catch.
+      check streams.mapIt(it.peerId).deduplicate().len == streams.len
       check sender.surbCredsLen == 0
       if round == 0:
         # Close the cached streams and keep the cache entries, as a peer reset does.
