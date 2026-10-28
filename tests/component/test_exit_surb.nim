@@ -92,7 +92,9 @@ when defined(libp2p_mix_experimental_exit_is_dest):
       let sw = SwitchBuilder.new().withTcpTransport().withMplex().withNoise().build()
       var pending, cancelled: int
       let allPending = newAsyncEvent()
+      let allCancelled = newAsyncEvent()
       let blocked = newAsyncEvent()
+      let cleanupDone = newAsyncEvent()
       proc fakeReplyDialer(
           surb: SURB, message: seq[byte]
       ) {.async: (raises: [CancelledError]).} =
@@ -103,8 +105,13 @@ when defined(libp2p_mix_experimental_exit_is_dest):
           await blocked.wait()
         except CancelledError as exc:
           inc cancelled
+          if cancelled == 3:
+            allCancelled.fire()
           raise exc
         finally:
+          # A cancelled send can still have work to finish. The reply must wait
+          # for it, so each send ends only when the test opens this event.
+          await noCancel cleanupDone.wait()
           dec pending
 
       proc handle(
@@ -126,8 +133,17 @@ when defined(libp2p_mix_experimental_exit_is_dest):
       )
       await allPending.wait().wait(2.seconds)
       check pending == 3
-      await replying.cancelAndWait().wait(2.seconds)
+      let cancelling = replying.cancelAndWait()
+      await allCancelled.wait().wait(2.seconds)
+      check:
+        cancelled == 3
+        pending == 3
+      # The sends are still in their cleanup, so the reply must not end yet.
+      check not await cancelling.join().withTimeout(200.milliseconds)
+      check not replying.finished
+      cleanupDone.fire()
+      await cancelling.wait(2.seconds)
       check:
         pending == 0
-        cancelled == 3
+        replying.cancelled
       await sw.stop()
