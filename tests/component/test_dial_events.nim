@@ -77,6 +77,44 @@ suite "Mix dial failure events":
     MixHopDialFailed.emit(ctx, MixHopDialFailed(peerId: refusedPeer().peerId))
     check await again.withTimeout(2.seconds)
 
+  asyncTest "detaching one listener leaves another listener's active callback running":
+    let ctx = NewBrokerContext()
+    defer:
+      await MixHopDialFailed.dropAllListeners(ctx)
+    let started = newFuture[void]("second listener started")
+    let release = newFuture[void]("release second listener")
+    let outcome = newFuture[bool]("second listener outcome")
+    var idleSeen, waitingSeen = 0
+    proc idle(event: MixHopDialFailed) {.async: (raises: []), gcsafe.} =
+      inc idleSeen
+
+    proc waiting(event: MixHopDialFailed) {.async: (raises: []), gcsafe.} =
+      inc waitingSeen
+      if started.finished:
+        return
+      started.complete()
+      try:
+        await release
+        outcome.complete(true)
+      except CancelledError:
+        outcome.complete(false)
+      except CatchableError:
+        outcome.complete(false)
+
+    let first = MixHopDialFailed.listen(ctx, idle).get()
+    discard MixHopDialFailed.listen(ctx, waiting).get()
+    MixHopDialFailed.emit(ctx, MixHopDialFailed(peerId: refusedPeer().peerId))
+    check await started.withTimeout(2.seconds)
+    # The first listener goes while the second one's callback still waits.
+    detachMixHopDialFailedListener(ctx, first)
+    release.complete()
+    check await outcome.withTimeout(2.seconds)
+    check outcome.read()
+    MixHopDialFailed.emit(ctx, MixHopDialFailed(peerId: refusedPeer().peerId))
+    checkUntilTimeout:
+      waitingSeen == 2
+    check idleSeen == 1
+
   asyncTest "a sender emits the peer of a refused first hop on its own context":
     let ctx = NewBrokerContext()
     let otherCtx = NewBrokerContext()
