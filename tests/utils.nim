@@ -239,10 +239,10 @@ method generateForEntry*(self: FixedDelayStrategy): Delay =
 method generateForIntermediate*(self: FixedDelayStrategy, encodedDelay: Delay): Delay =
   self.delay
 
-proc outgoingMixStreams*(sw: Switch): seq[Connection] =
+proc outgoingMixStreams*(switch: Switch): seq[Connection] =
   ## List the open outgoing mix streams of a switch.
   var streams: seq[Connection]
-  for _, muxers in sw.connManager.getConnections():
+  for _, muxers in switch.connManager.getConnections():
     for mux in muxers:
       for stream in mux.getStreams():
         if stream.dir == Direction.Out and stream.protocol == MixProtocolID and
