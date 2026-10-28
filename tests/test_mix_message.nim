@@ -4,9 +4,10 @@
 {.used.}
 
 import std/strutils
-import chronos, results, stew/byteutils
+import chronos, metrics, results, stew/byteutils
 import libp2p/peerid
-import libp2p_mix/[padding, mix_message, mix_protocol, mix_node, serialization]
+import
+  libp2p_mix/[padding, mix_message, mix_protocol, mix_node, serialization, mix_metrics]
 import ./tools/[unittest, crypto]
 import ./utils
 
@@ -130,3 +131,22 @@ suite "mix_message_tests":
       1,
     )
     check sent.error == "message exceeds the codec and reply payload capacity"
+
+  test "a codec that leaves no capacity fails and counts INVALID_SIZE":
+    let info = MixNodeInfo.generateRandom(0, rng())
+    let mix =
+      MixProtocol.new(info, createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey)))
+    let codec = "/" & 'x'.repeat(DataSize)
+    check getMaxMessageSizeForCodec(codec).isErr
+    let before = mix_messages_error.value(["Entry", "INVALID_SIZE"])
+    let other = MixNodeInfo.generateRandom(0, rng())
+    let sent = waitFor mix.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      @[1.byte],
+      codec,
+      MixDestination.init(other.peerId, other.multiAddr),
+      0,
+    )
+    check:
+      sent.isErr
+      mix_messages_error.value(["Entry", "INVALID_SIZE"]) == before + 1

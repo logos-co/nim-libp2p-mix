@@ -853,6 +853,7 @@ proc anonymizeLocalProtocolSend*(
 
   mix_messages_recvd.inc(labelValues = ["Entry"])
   let capacity = getMaxMessageSizeForCodec(codec, numSurbs).valueOr:
+    mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
     return err(error)
   if msg.len > capacity:
     mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
