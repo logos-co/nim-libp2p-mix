@@ -588,7 +588,11 @@ proc buildSurbs(
     # Fire-and-forget send: no reply expected, so nothing to register.
     return ok((@[], Opt.none(SurbSession)))
   let excluded = @[mixProto.mixNodeInfo.peerId, destPeerId, exitPeerId]
-  if (?mixProto.pool.countUsable(excluded)) < PathLength - 1:
+  let usable = mixProto.pool.countUsable(excluded).valueOr:
+    mix_messages_error.inc(labelValues = ["Entry/SURB", "POOL_UNAVAILABLE"])
+    return err(error)
+  if usable < PathLength - 1:
+    mix_messages_error.inc(labelValues = ["Entry/SURB", "LOW_MIX_POOL"])
     return err("not enough usable mix nodes for a reply path")
 
   var response: seq[SURB]
@@ -600,6 +604,7 @@ proc buildSurbs(
 
   for _ in 0.uint8 ..< numSurbs:
     let finalPeer = (await mixProto.selectReplyPeer(excluded)).valueOr:
+      mix_messages_error.inc(labelValues = ["Entry/SURB", poolErrorLabel(error)])
       return err(error)
     # Uniqueness rests on 128 bits of CSPRNG output, per spec Section 8.7.2
     # Step 2. No collision check: a repeat would mean the RNG has failed, which

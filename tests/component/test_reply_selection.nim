@@ -3,10 +3,10 @@
 
 {.used.}
 
-import chronos, results
-import libp2p/[switch, stream/lpstream, peerstore, peerid]
+import chronos, metrics, results
+import libp2p/[switch, stream/lpstream, peerstore, peerid, multiaddress]
 import libp2p_mix
-import libp2p_mix/[mix_protocol, delay_strategy, mix_pool]
+import libp2p_mix/[mix_protocol, delay_strategy, mix_pool, mix_metrics]
 import ../tools/[lifecycle, unittest, crypto, host_pool]
 import ../utils
 
@@ -48,6 +48,16 @@ method selectReplyPeer(
   if pool.mode == "withdrawn":
     discard pool.removePeer(peer)
   return ok(peer)
+
+type PinnedPool = ref object of HostPool
+  ## Answers the reply selection with one fixed peer, as a host that knows its
+  ## connections does.
+  replyPeer: PeerId
+
+method selectReplyPeer(
+    pool: PinnedPool, excluded: seq[PeerId]
+): Future[Result[PeerId, string]] {.async: (raises: [CancelledError]).} =
+  ok(pool.replyPeer)
 
 proc sendWithReplies(mode: string): Future[SelectingPool] {.async.} =
   ## Send one request with two SURBs through a fresh sender, expect it to
@@ -106,3 +116,56 @@ suite "Pool selection of the final reply peer":
     for mode in ["list", "read", "reply"]:
       let pool = await sendWithReplies(mode)
       check pool.calls == 0
+
+  asyncTest "a failed reply selection counts POOL_UNAVAILABLE for the reply path":
+    let before = mix_messages_error.value(["Entry/SURB", "POOL_UNAVAILABLE"])
+    discard await sendWithReplies("reply")
+    check mix_messages_error.value(["Entry/SURB", "POOL_UNAVAILABLE"]) == before + 1
+
+  asyncTest "a host-chosen connected peer delivers the reply to a sender that no one can dial":
+    let nodes = await startTestMixNodes(4)
+    defer:
+      await stopNodes(nodes)
+    let echo = EchoProtocol.new()
+    await echo.start()
+    nodes[^1].switch.mount(echo)
+    for node in nodes:
+      node.registerDestReadBehavior(echo.codec, readLp(1024))
+    # The sender advertises a port where nothing listens. The reply reaches it
+    # only over the connection that the sender opened to the chosen peer.
+    let info = MixNodeInfo.generateRandom(0, rng())
+    let sw = createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey))
+    let pool = PinnedPool(store: PeerStore.new(), rng: rng())
+    let sender = MixProtocol.new(
+      info,
+      sw,
+      pool = pool,
+      delayStrategy = Opt.some(DelayStrategy(NoSamplingDelayStrategy.new(rng()))),
+    )
+    sender.registerDestReadBehavior(echo.codec, readLp(1024))
+    sw.mount(sender)
+    await sw.start()
+    defer:
+      await stopNodes(@[sender])
+    sender.setLocalMultiAddr(MultiAddress.init("/ip4/127.0.0.1/tcp/1").get()).expect(
+      "undialable sender address"
+    )
+    for node in nodes:
+      pool.addPeer(node.localMixPubInfo())
+    let replyPeer = nodes[0]
+    pool.replyPeer = replyPeer.switch.peerInfo.peerId
+    await sw.connect(replyPeer.switch.peerInfo.peerId, replyPeer.switch.peerInfo.addrs)
+    let conn = sender
+      .toConnection(
+        MixDestination.exitNode(nodes[^1].localMixPubInfo().peerId),
+        echo.codec,
+        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8)),
+      )
+      .get()
+    defer:
+      await conn.close()
+    await conn.writeLp(@[9'u8]).wait(5.seconds)
+    check:
+      (await conn.readLp(1024).wait(5.seconds)) == @[9'u8]
+      sw.connectedPeers(Direction.In).len == 0
+      sender.surbCredsLen == 0
