@@ -94,6 +94,11 @@ mix.registerDestReadBehavior("/your/proto/1.0.0", readLp(maxSize = -1))
 for bootstrapNode in bootstrapNodes:
   pool.add(bootstrapNode)
 
+# A host that keeps its own peers passes an ExternalMixPool instead. It answers
+# the three requests in libp2p_mix/external_pool.nim on the pool's context.
+# Mix emits MixHopDialFailed (libp2p_mix/mix_events.nim) when it cannot dial a
+# hop, so a host can back that peer off.
+
 # Mount and start
 switch.mount(mix)
 await mix.start()
