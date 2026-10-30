@@ -382,6 +382,7 @@ method handleMixMessages*(
     mix_messages_recvd.inc(labelValues = ["Intermediate"])
 
     # Claim a slot for forwarding (Mix Cover Traffic spec §6.4)
+    var claimEpoch: uint64
     mixProto.coverTraffic.withValue(ct):
       let claim = ct.slotPool.claimSlot()
       if not claim.success:
@@ -389,10 +390,15 @@ method handleMixMessages*(
         mix_messages_error.inc(labelValues = ["Intermediate", "SLOT_EXHAUSTED"])
         mix_slot_claim_rejected.inc(labelValues = ["forward"])
         return
+      claimEpoch = ct.slotPool.epoch
       # Reclaim proof token from discarded cover packet for messageId reuse
       if claim.reclaimedToken.len > 0:
         mixProto.spamProtection.withValue(sp):
           sp.reclaimProofToken(claim.reclaimedToken)
+
+    template refundSlot(): untyped =
+      mixProto.coverTraffic.withValue(ct):
+        ct.slotPool.unclaimSlot(claimEpoch)
 
     let actualDelay = mixProto.delayStrategy.generateForIntermediate(processedSP.delay)
     trace "Computed delay", encodedDelay = processedSP.delay, actualDelay
@@ -403,6 +409,7 @@ method handleMixMessages*(
     let (nextPeerId, nextAddr) = bytesToMultiAddr(nextHopBytes).valueOr:
       trace "Failed to convert bytes to multiaddress", err = error
       mix_messages_error.inc(labelValues = ["Intermediate", "INVALID_DEST"])
+      refundSlot()
       return
 
     when defined(enable_mix_benchmarks):
@@ -445,14 +452,35 @@ method handleMixMessages*(
           sampledDelay = actualDelay,
           hint = "Increase the minimum delay floor or reduce proof generation time"
 
-    let (outgoingPacket, _) = (await proofGenFut).valueOr:
+    let (outgoingPacket, proofToken) = (await proofGenFut).valueOr:
       error "Failed to generate spam protection proof for next hop", err = error
+      refundSlot()
       return
+
+    # Only a failed first dial proves the packet never left this node, so its
+    # slot can be refunded and its messageId reused. After any write attempt the
+    # next hop may hold the proof, and reissuing the messageId in this epoch
+    # would be an RLN double-signal.
+    let conn =
+      try:
+        await mixProto.getConn(nextPeerId, @[nextAddr], @[MixProtocolID])
+      except DialFailedError as exc:
+        error "Failed to dial next hop: ", err = exc.msg
+        mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
+        if proofToken.len > 0:
+          mixProto.spamProtection.withValue(sp):
+            sp.reclaimProofToken(proofToken)
+        refundSlot()
+        return
 
     try:
       when defined(enable_mix_benchmarks):
-        await mixProto.writeLp(nextPeerId, @[nextAddr], @[MixProtocolID], metadataBytes)
-      await mixProto.writeLp(nextPeerId, @[nextAddr], @[MixProtocolID], outgoingPacket)
+        await mixProto.writeLpWithRetry(
+          conn, nextPeerId, @[nextAddr], @[MixProtocolID], metadataBytes
+        )
+      await mixProto.writeLpWithRetry(
+        conn, nextPeerId, @[nextAddr], @[MixProtocolID], outgoingPacket
+      )
       mix_messages_forwarded.inc(labelValues = ["Intermediate"])
     except CancelledError as exc:
       raise exc
@@ -826,8 +854,7 @@ proc anonymizeLocalProtocolSend*(
   mix_messages_recvd.inc(labelValues = ["Entry"])
 
   # Note: the cover-traffic slot is claimed further down, immediately before
-  # the packet is sent. Claiming here would consume a slot on every validation
-  # failure below, and local sends take no slot refund.
+  # the packet is sent, so validation failures below never consume one.
 
   var logConfig = SendPacketLogConfig(logType: Entry)
   when defined(enable_mix_benchmarks):
@@ -953,14 +980,15 @@ proc anonymizeLocalProtocolSend*(
     releaseAndFail(fmt"Failed to wrap in sphinx packet: {error}")
 
   # Claim a slot for local origination (Mix Cover Traffic spec §6.3).
-  # Claimed here rather than on entry so that a slot is only consumed by a
-  # packet that is actually emitted -- local sends take no slot refund, so an
-  # earlier claim would leak one on every validation failure above.
+  # Claimed here rather than on entry so that validation failures above never
+  # consume a slot.
+  var claimEpoch: uint64
   mixProto.coverTraffic.withValue(ct):
     let claim = ct.slotPool.claimSlot()
     if not claim.success:
       mix_slot_claim_rejected.inc(labelValues = ["send"])
       releaseAndFail("No slots available in current epoch")
+    claimEpoch = ct.slotPool.epoch
     # Reclaim proof token from discarded cover packet for messageId reuse
     if claim.reclaimedToken.len > 0:
       mixProto.spamProtection.withValue(sp):
@@ -968,6 +996,11 @@ proc anonymizeLocalProtocolSend*(
 
   # Send the wrapped message to the first mix node in the selected path
   (await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)).isOkOr:
+    # A packet that may have reached the next hop keeps its slot, matching its
+    # proof, which sendPacket only reclaims when nothing was written.
+    if error.neverWritten:
+      mixProto.coverTraffic.withValue(ct):
+        ct.slotPool.unclaimSlot(claimEpoch)
     releaseAndFail(error.msg)
 
   return ok(session)

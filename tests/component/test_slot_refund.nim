@@ -141,3 +141,102 @@ when defined(libp2p_mix_experimental_exit_is_dest):
 
       check (await reply).isErr
       check ct.slotPool.nonCoverClaimed == 1
+
+when defined(libp2p_mix_experimental_exit_is_dest):
+  proc sendToExit(nodes: seq[MixProtocol]) {.async.} =
+    ## With 5 nodes the path is two of nodes[1 .. 3] in random order, then the
+    ## exit nodes[4], so the second of those two forwards to the exit.
+    let res = await nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      @[1.byte],
+      TestCodec,
+      MixDestination.exitNode(nodes[4].switch.peerInfo.peerId),
+      0,
+    )
+    check res.isOk
+
+  suite "Slot refund - forward":
+    asyncTeardown:
+      checkTrackers()
+
+    asyncTest "failed first dial refunds the slot and reclaims the proof":
+      let (nodes, spam) = setupCountingNodes(5)
+      await startNodes(nodes)
+      defer:
+        await stopNodes(nodes)
+      let hops = nodes[1 .. 3].mapIt(it.attachCover())
+
+      await nodes[4].switch.stop()
+      await nodes.sendToExit()
+      await sleepAsync(300.milliseconds)
+
+      # The first hop's forward went out; the second hop's dial failed
+      check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 1
+      check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
+
+    asyncTest "failure after a write attempt keeps the slot and the proof spent":
+      let (nodes, spam) = setupCountingNodes(5)
+      await startNodes(nodes)
+      defer:
+        await stopNodes(nodes)
+
+      # Any of the three may go second, so send until each has almost certainly
+      # cached a connection to the exit
+      for _ in 0 ..< 40:
+        await nodes.sendToExit()
+      await sleepAsync(300.milliseconds)
+
+      let hops = nodes[1 .. 3].mapIt(it.attachCover())
+
+      await nodes[4].switch.stop()
+      await sleepAsync(300.milliseconds)
+      await nodes.sendToExit()
+      await sleepAsync(300.milliseconds)
+
+      check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 2
+      check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 0
+
+suite "Slot refund - local send":
+  asyncTeardown:
+    checkTrackers()
+
+  asyncTest "failed first dial refunds the slot and reclaims the proof":
+    let (nodes, spam) = setupCountingNodes(10)
+    await startNodes(nodes)
+    defer:
+      await stopNodes(nodes)
+    let ct = nodes[0].attachCover()
+
+    # Every candidate first hop is down, whichever path gets selected
+    for node in nodes[1 ..^ 1]:
+      await node.switch.stop()
+
+    let res = await nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](), @[1.byte], TestCodec, nodes[^1].toMixDestination(), 0
+    )
+
+    check res.isErr
+    check ct.slotPool.nonCoverClaimed == 0
+    # Proves the send got as far as a proof, so the slot was claimed and refunded
+    check spam[0].reclaimCount == 1
+
+  asyncTest "failed send claimed in an earlier epoch leaves the new epoch alone":
+    let (nodes, _) = setupCountingNodes(10)
+    await startNodes(nodes)
+    defer:
+      await stopNodes(nodes)
+    let ct = nodes[0].attachCover()
+
+    for node in nodes[1 ..^ 1]:
+      await node.switch.stop()
+
+    let send = nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](), @[1.byte], TestCodec, nodes[^1].toMixDestination(), 0
+    )
+    check ct.slotPool.nonCoverClaimed == 1
+
+    ct.onEpochChange(2)
+    discard ct.slotPool.claimSlot()
+
+    check (await send).isErr
+    check ct.slotPool.nonCoverClaimed == 1
