@@ -41,6 +41,7 @@ type MixEntryConnection* = ref object of Connection
   cached: seq[byte]
   replyTimeout: Duration
   sent: bool
+  pendingWrite: Future[void].Raising([CancelledError, LPStreamError])
   replySession: Opt[SurbSession]
 
 func shortLog*(conn: MixEntryConnection): string {.raises: [].} =
@@ -114,20 +115,44 @@ method write*(
   ## there is one incoming queue and one reply future, so a second write would
   ## have its reply silently dropped. Reject it instead. Fire-and-forget
   ## connections have no such limit.
+  ## A write after a close fails. A close cancels a pending write only on a
+  ## reply-expecting connection.
+  if self.isClosed:
+    raise newLPStreamClosedError()
+
   if msg.len() > DataSize:
     raise newException(LPStreamError, "exceeds max msg size of " & $DataSize & " bytes")
 
-  if not self.replyReceivedFut.isNil and self.sent:
+  if self.replyReceivedFut.isNil:
+    await self.mixDialer(move(msg), self.codec, self.destination)
+    return
+
+  if self.sent or not self.pendingWrite.isNil:
     raise newException(
       LPStreamError,
       "mix connection expecting a reply supports a single write; " &
         "use one connection per request",
     )
 
-  await self.mixDialer(move(msg), self.codec, self.destination)
-  self.sent = true
+  let pending = self.mixDialer(move(msg), self.codec, self.destination)
+  self.pendingWrite = pending
+  try:
+    await pending
+    self.sent = true
+  except CancelledError as exc:
+    # A close of this connection cancels the pending write. The writer did
+    # not cancel, so it gets a closed stream error.
+    if self.isClosed:
+      raise newLPStreamClosedError()
+    raise exc
+  finally:
+    self.pendingWrite = nil
 
 method closeImpl*(self: MixEntryConnection): Future[void] {.async: (raises: []).} =
+  if not self.pendingWrite.isNil:
+    # Wait until the cancelled write stops. Then the credentials are in
+    # `replySession`, or the send released them.
+    await self.pendingWrite.cancelAndWait()
   self.releaseReplyCreds()
   if not self.incomingFut.isNil:
     await self.incomingFut.cancelAndWait()
