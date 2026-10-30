@@ -3,6 +3,7 @@
 
 {.used.}
 
+import std/tables
 import chronos, results, strformat
 import
   libp2p/
@@ -12,7 +13,7 @@ import libp2p_mix/mix_protocol
 import libp2p_mix/curve25519
 import libp2p_mix/delay_strategy
 
-import ./tools/crypto
+import ./tools/[unittest, crypto, lifecycle, host_pool]
 import ./[mock_mix, spam_protection_impl]
 
 proc createSwitch*(
@@ -236,3 +237,35 @@ method generateForEntry*(self: FixedDelayStrategy): Delay =
 
 method generateForIntermediate*(self: FixedDelayStrategy, encodedDelay: Delay): Delay =
   self.delay
+
+proc hostPool*(node: MixProtocol): HostPool =
+  ## The host pool of a test node.
+  HostPool(node.pool)
+
+proc startTestMixNodes*(count: int): Future[seq[MixProtocol]] {.async.} =
+  ## Start test nodes on OS-assigned ports and store each node with the others.
+  ## Each node gets a `HostPool`.
+  var nodes: seq[MixProtocol]
+  for _ in 0 ..< count:
+    let info = MixNodeInfo.generateRandom(0, rng())
+    let sw = createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey))
+    let proto = MixProtocol.new(
+      info,
+      sw,
+      pool = HostPool.new(),
+      delayStrategy = Opt.some(DelayStrategy(NoSamplingDelayStrategy.new(rng()))),
+    )
+    sw.mount(proto)
+    nodes.add(proto)
+  try:
+    await startNodes(nodes)
+  except CatchableError as e:
+    await stopNodes(nodes)
+    raise e
+  for node in nodes:
+    node.setLocalMultiAddr(node.switch.peerInfo.addrs[0]).expect("bound address")
+  for node in nodes:
+    for other in nodes:
+      if other != node:
+        node.hostPool.addPeer(other.localMixPubInfo())
+  nodes

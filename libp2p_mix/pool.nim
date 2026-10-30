@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 # Copyright (c) Status Research & Development GmbH
 
-## Mix Node Pool Management
+## Mix Node Pool
 ##
-## This module provides an abstraction layer for managing mix node information.
-## It encapsulates access to the peerStore's MixPubKeyBook, AddressBook, and KeyBook,
-## providing a clean interface for the mix protocol to interact with mix node data.
+## `MixNodePool` is the stock `MixPool`. It stores mix nodes in the peer store
+## of a libp2p switch, in the MixPubKeyBook, AddressBook and KeyBook, and reads
+## them back for the mix protocol.
+
+{.push raises: [].}
 
 import std/[sequtils, tables]
 import results
@@ -15,43 +17,38 @@ import libp2p/multiaddress
 import libp2p/crypto/crypto
 import libp2p/crypto/curve25519
 import ./mix_node
-import ./multiaddr as mix_multiaddr
+import ./mix_pool
 
-export mix_node.MixPubInfo
+export mix_pool
 
 type MixPubKeyBook* = ref object of PeerBook[Curve25519Key]
   ## Tracks Curve25519 mix public keys per peer. Defined here so the mix
   ## package owns its peer-store extension and libp2p core stays free of
   ## mix-specific types.
 
-func isSupportedMultiaddr(maddr: MultiAddress): bool =
-  ## Returns true if the multiaddress is supported by the mix protocol.
-  ## Mix protocol supports IPv4 addresses with TCP or QUIC-v1 transports,
-  ## including circuit-relay addresses that use these transports.
-  let baseAddr = mix_multiaddr.getBaseTransport(maddr).valueOr:
-    return false
-  TCP_IP4.match(baseAddr) or QUIC_V1_IP4.match(baseAddr)
-
-func findSupportedMultiaddr(maddrs: seq[MultiAddress]): Opt[MultiAddress] =
-  ## Returns the first multiaddress that is supported by the mix protocol.
-  for maddr in maddrs:
-    if isSupportedMultiaddr(maddr):
-      return Opt.some(maddr)
-  Opt.none(MultiAddress)
-
-type MixNodePool* = ref object
-  ## Manages mix node public information through the peerStore.
-  ## This abstraction allows the mix protocol to interact with mix node data
-  ## without directly coupling to peerStore implementation details.
-  ##
-  ## Future enhancements:
-  ## - Peer scoring: Track node reliability, latency, and performance metrics
-  ## - Pool maintenance: Automatic pruning of stale/unresponsive nodes
+type MixNodePool* = ref object of MixPool
+  ## The stock pool. Keeps mix node information in a peer store, so other
+  ## protocols on the same switch see the same addresses and keys.
   peerStore: PeerStore
 
-proc new*(T: typedesc[MixNodePool], peerStore: PeerStore): T =
-  ## Create a new MixNodePool instance backed by the given peerStore.
-  T(peerStore: peerStore)
+proc new*(T: typedesc[MixNodePool], peerStore: PeerStore, rng: Rng): T =
+  ## Create a pool on `peerStore`. `rng` drives its random selections.
+  T(peerStore: peerStore, rng: rng)
+
+method readPeer*(
+    pool: MixNodePool, peerId: PeerId
+): Result[MixPeerRecord, string] {.gcsafe, raises: [].} =
+  ## Keys from the books, and the addresses with the last outbound one first.
+  var addresses = pool.peerStore[AddressBook][peerId]
+  pool.peerStore[LastSeenOutboundBook][peerId].withValue(address):
+    addresses = @[address] & addresses.filterIt(it != address)
+  ok(
+    MixPeerRecord(
+      mixPubKey: pool.peerStore[MixPubKeyBook][peerId],
+      publicKey: pool.peerStore[KeyBook][peerId],
+      addresses: addresses,
+    )
+  )
 
 proc add*(pool: MixNodePool, info: MixPubInfo) =
   ## Add a mix node to the pool.
@@ -87,31 +84,18 @@ proc remove*(pool: MixNodePool, peerId: PeerId): bool =
   # Preserve AddressBook/KeyBook entries used by other protocols.
 
 proc get*(pool: MixNodePool, peerId: PeerId): Opt[MixPubInfo] =
-  ## Get MixPubInfo for a peer. Returns none if peer is not in the pool
-  ## or if required information (address, key) is missing.
-  let mixPubKey = pool.peerStore[MixPubKeyBook][peerId]
-  if mixPubKey == default(Curve25519Key):
-    return Opt.none(MixPubInfo)
-
-  # Get the address - prefer LastSeenOutboundBook, fall back to AddressBook
-  # Mix protocol only supports IPv4 addresses with TCP or QUIC-v1 transports
-  var supportedAddr: MultiAddress
-  let lastSeenAddr = pool.peerStore[LastSeenOutboundBook][peerId]
-  if lastSeenAddr.isSome and isSupportedMultiaddr(lastSeenAddr.get):
-    supportedAddr = lastSeenAddr.get
-  else:
-    supportedAddr = findSupportedMultiaddr(pool.peerStore[AddressBook][peerId]).valueOr:
-      return Opt.none(MixPubInfo)
-
-  let pubKey = pool.peerStore[KeyBook][peerId]
-  if pubKey.scheme != Secp256k1:
-    return Opt.none(MixPubInfo)
-
-  Opt.some(MixPubInfo.init(peerId, supportedAddr, mixPubKey, pubKey.skkey))
+  ## The peer as a route hop. None when the pool lacks its keys or an address
+  ## that the wire format can encode.
+  pool.usablePeer(peerId).expect("the stock pool always answers")
 
 proc peerIds*(pool: MixNodePool): seq[PeerId] =
   ## Get all peer IDs in the mix node pool.
   pool.peerStore[MixPubKeyBook].book.keys.toSeq()
+
+method listPeerIds*(
+    pool: MixNodePool
+): Result[seq[PeerId], string] {.gcsafe, raises: [].} =
+  ok(pool.peerIds())
 
 proc len*(pool: MixNodePool): int =
   ## Get the number of mix nodes in the pool.

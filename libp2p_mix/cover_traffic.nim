@@ -23,7 +23,7 @@ logScope:
 # CoverTraffic lives in a separate module and cannot import MixProtocol
 # (that would create a circular import). The callbacks are the only way
 # to break this cycle while letting CoverTraffic build and send packets
-# through MixProtocol's infrastructure (nodePool, sphinx, spam protection).
+# through MixProtocol's infrastructure (peer selection, sphinx, spam protection).
 type
   CoverPacketBuild* = object
     packet*: seq[byte]

@@ -3,7 +3,7 @@
 
 {.used.}
 
-import chronos, results, stew/byteutils, sequtils, tables
+import chronos, results, stew/byteutils, sequtils
 import
   libp2p/[
     protocols/ping,
@@ -17,10 +17,11 @@ import
   ]
 import libp2p_mix
 import libp2p_mix/mix_protocol
+import libp2p_mix/pool
 import libp2p_mix/sphinx
 import libp2p_mix/delay_strategy
 
-import ../tools/[lifecycle, unittest, crypto]
+import ../tools/[lifecycle, unittest, crypto, host_pool]
 import ../utils
 import ../mock_mix
 
@@ -341,98 +342,40 @@ suite "Mix Protocol - Node Failures":
     expect AsyncTimeoutError:
       discard await nrProto.receivedMessages.get().wait(5.seconds)
 
-  asyncTest "skip and remove nodes with invalid multiaddress from pool":
-    # This test validates that nodes with invalid multiaddrs are:
-    # 1. Skipped during path construction
-    # 2. Removed from peerStore MixPubKeyBook
-    # 3. Message still succeeds if enough valid nodes remain
-
-    # Setup all mix protocol nodes (needed for forwarding)
-    let nodes = await setupMixNodes(10)
-
-    # Create invalid node with a multiaddr missing transport layer
-    let invalidPeerId = PeerId.random(rng()).expect("could not generate peerId")
-    let invalidMultiAddr =
-      MultiAddress.init("/ip4/0.0.0.0").expect("could not initialize invalid multiaddr")
-
-    # Get valid keys from any node's pub info (read from pool before clearing)
-    let validPubInfo = nodes[0].nodePool.get(nodes[1].switch.peerInfo.peerId).get()
-    let (_, _, validMixPubKey, validLibp2pPubKey) = validPubInfo.get()
-
-    let invalidPubInfo = MixPubInfo.init(
-      invalidPeerId, invalidMultiAddr, validMixPubKey, validLibp2pPubKey
-    )
-
-    # Calculate how many valid nodes to include in the pool
-    # We need at least PathLength nodes after both:
-    # 1. Destination node is excluded from path selection
-    # 2. Invalid node is removed from pool
-    # So we need PathLength + 1 valid nodes minimum (3 + 1 = 4)
-    # Since destination (nodes[1]) is one of them, we need 4 total valid nodes
-    let validNodesCount = min(nodes.len - 1, PathLength + 1)
-    check nodes.len - 1 >= PathLength + 1
-
-    # Save pub info from pool before clearing (need it for re-population)
-    var savedPubInfos: seq[MixPubInfo]
-    for i in 1 ..< validNodesCount + 1:
-      savedPubInfos.add(nodes[0].nodePool.get(nodes[i].switch.peerInfo.peerId).get())
-
-    # Now inject invalid node into sender's (node 0) peerStore
-    # Include enough valid nodes so that even after invalid node is removed,
-    # we still have sufficient nodes for PathLength = 3
-    # First clear the existing MixPubKeyBook entries for sender's switch
-    let senderPeerStore = nodes[0].switch.peerStore
-    for peerId in senderPeerStore[MixPubKeyBook].book.keys.toSeq():
-      discard senderPeerStore[MixPubKeyBook].del(peerId)
-
-    # Add valid nodes to peerStore
-    for pubInfo in savedPubInfos:
-      senderPeerStore[MixPubKeyBook][pubInfo.peerId] = pubInfo.mixPubKey
-      senderPeerStore[AddressBook][pubInfo.peerId] = @[pubInfo.multiAddr]
-      senderPeerStore[KeyBook][pubInfo.peerId] =
-        PublicKey(scheme: Secp256k1, skkey: pubInfo.libp2pPubKey)
-
-    # Add invalid node to peerStore
-    senderPeerStore[MixPubKeyBook][invalidPeerId] = invalidPubInfo.mixPubKey
-    senderPeerStore[AddressBook][invalidPeerId] = @[invalidPubInfo.multiAddr]
-    senderPeerStore[KeyBook][invalidPeerId] =
-      PublicKey(scheme: Secp256k1, skkey: invalidPubInfo.libp2pPubKey)
-
-    # Verify pool has validNodesCount + 1 invalid node
-    check senderPeerStore[MixPubKeyBook].len == validNodesCount + 1
-
-    # Setup destination node
-    let nrProto = NoReplyProtocol.new()
-    nodes[1].switch.mount(nrProto)
-
-    # Start all switches - they're needed as intermediate nodes in the mix path
-    # even though only sender (0) and destination (1) are doing protocol work
+  asyncTest "unusable records stay in shared books while valid paths deliver":
+    let nodes = await setupMixNodes(6)
+    let senderStore = PeerStore.new()
+    var valid: seq[MixPubInfo]
+    for i in 1 .. PathLength + 1:
+      valid.add(nodes[0].nodePool.get(nodes[i].switch.peerInfo.peerId).get())
+    # Read peers from the store books only, without the records that the fixture
+    # added.
+    nodes[0].pool = MixNodePool.new(senderStore, rng())
+    for info in valid:
+      senderStore[MixPubKeyBook][info.peerId] = info.mixPubKey
+      senderStore[AddressBook][info.peerId] = @[info.multiAddr]
+      senderStore[KeyBook][info.peerId] =
+        PublicKey(scheme: Secp256k1, skkey: info.libp2pPubKey)
+    let invalidId = PeerId.random(rng()).get()
+    let invalidAddress = MultiAddress.init("/ip4/0.0.0.0").get()
+    senderStore[MixPubKeyBook][invalidId] = valid[0].mixPubKey
+    senderStore[AddressBook][invalidId] = @[invalidAddress]
+    senderStore[KeyBook][invalidId] =
+      PublicKey(scheme: Secp256k1, skkey: valid[0].libp2pPubKey)
+    check:
+      nodes[0].pool.countUsable([]).get() == valid.len
+      nodes[0].pool.usablePeer(invalidId).get().isNone
+      senderStore[MixPubKeyBook].len == valid.len + 1
+    let receiver = NoReplyProtocol.new()
+    nodes[1].switch.mount(receiver)
     startAndDeferStop(nodes)
-
-    # Send messages in a loop until invalid node is encountered and removed
-    # With validNodesCount + 1 invalid nodes and PathLength=3, we need multiple attempts
-    let testPayload = "test message".toBytes()
-    var initialPoolSize = senderPeerStore[MixPubKeyBook].len
-
-    # Try up to 20 times to encounter the invalid node
-    # Stop if pool size goes below PathLength (can't construct path anymore)
-    for attempt in 0 ..< 20:
-      if senderPeerStore[MixPubKeyBook].len < PathLength:
-        break
-
-      let conn = nodes[0].toConnection(nodes[1].toMixDestination(), nrProto.codec)
-
-      if conn.isErr:
-        # If we can't build connection due to insufficient nodes, break
-        break
-
-      await conn.get().writeLp(testPayload)
-      discard await nrProto.receivedMessages.get().wait(5.seconds)
-      await conn.get().close()
-
-      # Check if invalid node was removed
-      if senderPeerStore[MixPubKeyBook].len < initialPoolSize:
-        break
-
-    # Verify invalid node was removed from pool (should be 6 valid nodes remaining)
-    check senderPeerStore[MixPubKeyBook].len == validNodesCount
+    let conn = nodes[0].toConnection(nodes[1].toMixDestination(), receiver.codec).get()
+    defer:
+      await conn.close()
+    let payload = "test message".toBytes()
+    await conn.writeLp(payload).wait(5.seconds)
+    check (await receiver.receivedMessages.get().wait(5.seconds)).data == payload
+    check:
+      senderStore[MixPubKeyBook][invalidId] == valid[0].mixPubKey
+      senderStore[AddressBook][invalidId] == @[invalidAddress]
+      nodes[0].pool.countUsable([]).get() == valid.len

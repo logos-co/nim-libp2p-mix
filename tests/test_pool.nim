@@ -18,7 +18,7 @@ suite "MixNodePool Tests":
 
   setup:
     peerStore = PeerStore.new()
-    pool = MixNodePool.new(peerStore)
+    pool = MixNodePool.new(peerStore, rng())
     mixNodes = MixNodeInfo.generateRandomMany(5, rng())
 
   test "new creates empty pool":

@@ -47,10 +47,11 @@ proc mixPingSimulation() {.async: (raises: [Exception]).} =
   # Set up mix protocols on each mix node
   for nodeInfo in mixNodeInfos:
     var switch = createSwitch(nodeInfo.multiAddr, rng, Opt.some(nodeInfo.libp2pPrivKey))
-    let proto = MixProtocol.new(nodeInfo, switch)
+    let pool = MixNodePool.new(switch.peerStore, rng)
+    let proto = MixProtocol.new(nodeInfo, switch, pool = pool)
 
-    # Populate nodePool with all other nodes' public info
-    proto.nodePool.add(mixNodeInfos.includeAllExcept(nodeInfo))
+    # Add all other nodes to this node's pool
+    pool.add(mixNodeInfos.includeAllExcept(nodeInfo))
 
     # Register how to read ping responses (32 bytes exactly)
     proto.registerDestReadBehavior(PingCodec, readExactly(32))
