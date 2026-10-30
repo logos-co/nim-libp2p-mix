@@ -37,6 +37,12 @@ func isCoverTraffic*(msg: MixMessage): bool =
   ## Returns true if the message is a cover traffic packet.
   msg.codec == CoverTrafficCodec
 
+type PeerStreamLock = ref object
+  lock: AsyncLock
+    ## Lets one caller of getConn look up and dial for this peer at a time, so
+    ## concurrent sends to the peer reuse one cached stream.
+  users: int ## Callers inside getConn. The last one deletes the entry from streamLocks.
+
 ## Mix Protocol defines a decentralized anonymous message routing layer for libp2p networks.
 ## It enables sender anonymity by routing each message through a decentralized mix overlay
 ## network composed of participating libp2p nodes, known as mix nodes. Each message is
@@ -55,6 +61,7 @@ type MixProtocol* = ref object of LPProtocol
     ## reply never arrives; see surb_store.nim.
   destReadBehaviors: TableRef[string, DestReadBehavior]
   connPool: Table[PeerId, Connection]
+  streamLocks: Table[PeerId, PeerStreamLock]
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
   coverTraffic*: Opt[CoverTraffic]
@@ -89,36 +96,48 @@ proc surbCredsLen*(mixProto: MixProtocol): int =
   mixProto.surbStore.len
 
 proc removeClosedConnections(
-    mixProto: MixProtocol, pid: PeerId
+    mixProto: MixProtocol, failed: Connection
 ) {.async: (raises: []).} =
-  var peersToGC = mixProto.connPool
-    .keys()
-    .toSeq()
-    .filterIt(not mixProto.switch.isConnected(it))
-    .toHashSet()
-  peersToGC.incl(pid)
-
-  for p in peersToGC:
-    var conn: Connection
-    if mixProto.connPool.pop(p, conn):
-      await conn.close()
+  var stale: seq[tuple[peerId: PeerId, conn: Connection]]
+  for peerId, conn in mixProto.connPool:
+    if conn == failed or not mixProto.switch.isConnected(peerId):
+      stale.add((peerId, conn))
+  for (peerId, conn) in stale:
+    # Another caller can replace the entry while this proc awaits a close.
+    if mixProto.connPool.getOrDefault(peerId) == conn:
+      mixProto.connPool.del(peerId)
+    await conn.close()
 
 proc getConn(
     mixProto: MixProtocol,
     pid: PeerId,
     addrs: seq[MultiAddress],
     codecs: seq[string],
-    forceNewStream: bool = false,
+    failed: Connection = nil,
 ): Future[Connection] {.async: (raises: [DialFailedError, CancelledError]).} =
-  if forceNewStream:
-    # GC all expired connections including the one used for `pid`
-    await mixProto.removeClosedConnections(pid)
+  var streamLock = mixProto.streamLocks.getOrDefault(pid)
+  if streamLock.isNil:
+    streamLock = PeerStreamLock(lock: newAsyncLock())
+    mixProto.streamLocks[pid] = streamLock
+  streamLock.users.inc()
   try:
-    return mixProto.connPool[pid]
-  except KeyError:
+    await streamLock.lock.acquire()
+    defer:
+      try:
+        streamLock.lock.release()
+      except AsyncLockError as exc:
+        raiseAssert "stream lock released without acquire: " & exc.msg
+    if not failed.isNil:
+      await mixProto.removeClosedConnections(failed)
+    mixProto.connPool.withValue(pid, conn):
+      return conn[]
     let c = await mixProto.switch.dial(pid, addrs, codecs)
     mixProto.connPool[pid] = c
     return c
+  finally:
+    streamLock.users.dec()
+    if streamLock.users == 0 and mixProto.streamLocks.getOrDefault(pid) == streamLock:
+      mixProto.streamLocks.del(pid)
 
 proc writeLp(
     mixProto: MixProtocol,
@@ -132,8 +151,8 @@ proc writeLp(
     await c.writeLp(payload)
   except LPStreamClosedError, LPStreamResetError, LPStreamRemoteClosedError,
       LPStreamConnDownError:
-    let c = await mixProto.getConn(pid, addrs, codecs, forceNewStream = true)
-    await c.writeLp(payload)
+    let replacement = await mixProto.getConn(pid, addrs, codecs, failed = c)
+    await replacement.writeLp(payload)
 
 proc generateAndAppendProof(
     mixProto: MixProtocol,
