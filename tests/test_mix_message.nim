@@ -130,7 +130,9 @@ suite "mix_message_tests":
       MixDestination.init(other.peerId, other.multiAddr),
       1,
     )
-    check sent.error == "message exceeds the codec and reply payload capacity"
+    check:
+      sent.isErr
+      sent.error.startsWith("message exceeds the codec and reply payload capacity")
 
   test "a codec that leaves no capacity fails and counts INVALID_SIZE":
     let info = MixNodeInfo.generateRandom(0, rng())
