@@ -4,9 +4,12 @@
 {.used.}
 
 import std/strutils
-import results, stew/byteutils
-import libp2p_mix/[padding, mix_message, mix_protocol, serialization]
-import ./tools/[unittest]
+import chronos, metrics, results, stew/byteutils
+import libp2p/peerid
+import
+  libp2p_mix/[padding, mix_message, mix_protocol, mix_node, serialization, mix_metrics]
+import ./tools/[unittest, crypto]
+import ./utils
 
 # Define test cases
 suite "mix_message_tests":
@@ -111,3 +114,41 @@ suite "mix_message_tests":
     check:
       getMaxMessageSizeForCodec(codec, maxSurbs).isOk
       getMaxMessageSizeForCodec(codec, maxSurbs + 1).isErr
+
+  test "a send larger than the capacity fails before any peer selection":
+    # The pool is empty, so a peer selection would fail with its own error.
+    let info = MixNodeInfo.generateRandom(0, rng())
+    let mix =
+      MixProtocol.new(info, createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey)))
+    let codec = "/test/1.0.0"
+    let capacity = getMaxMessageSizeForCodec(codec, 1).get()
+    let other = MixNodeInfo.generateRandom(0, rng())
+    let sent = waitFor mix.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      newSeq[byte](capacity + 1),
+      codec,
+      MixDestination.init(other.peerId, other.multiAddr),
+      1,
+    )
+    check:
+      sent.isErr
+      sent.error.startsWith("message exceeds the codec and reply payload capacity")
+
+  test "a codec that leaves no capacity fails and counts INVALID_SIZE":
+    let info = MixNodeInfo.generateRandom(0, rng())
+    let mix =
+      MixProtocol.new(info, createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey)))
+    let codec = "/" & 'x'.repeat(DataSize)
+    check getMaxMessageSizeForCodec(codec).isErr
+    let before = mix_messages_error.value(["Entry", "INVALID_SIZE"])
+    let other = MixNodeInfo.generateRandom(0, rng())
+    let sent = waitFor mix.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      @[1.byte],
+      codec,
+      MixDestination.init(other.peerId, other.multiAddr),
+      0,
+    )
+    check:
+      sent.isErr
+      mix_messages_error.value(["Entry", "INVALID_SIZE"]) == before + 1
