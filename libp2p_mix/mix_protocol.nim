@@ -852,6 +852,15 @@ proc anonymizeLocalProtocolSend*(
     doAssert destination.kind == ForwardAddr, "Only exit != destination is allowed"
 
   mix_messages_recvd.inc(labelValues = ["Entry"])
+  let capacity = getMaxMessageSizeForCodec(codec, numSurbs).valueOr:
+    mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
+    return err("failure when calling getMaxMessageSizeForCodec: " & error)
+  if msg.len > capacity:
+    mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
+    return err(
+      "message exceeds the codec and reply payload capacity, size: " & $msg.len &
+        ", capacity: " & $capacity
+    )
 
   # Note: the cover-traffic slot is claimed further down, immediately before
   # the packet is sent, so validation failures below never consume one.
