@@ -82,10 +82,9 @@ let mixNodeInfo = initMixNodeInfo(
   peerId, multiAddr, mixPubKey, mixPrivKey, libp2pPubKey, libp2pPrivKey
 )
 
-let mix = MixProtocol.new(mixNodeInfo, switch).valueOr:
-  return err("mix init failed: " & error)
+let mix = MixProtocol.new(mixNodeInfo, switch)
 
-# Optional: configure how the exit layer reads payloads for a given proto
+# Optional: configure how the exit layer reads payloads for a given codec
 mix.registerDestReadBehavior("/your/proto/1.0.0", readLp(maxSize = -1))
 
 # Optional: bootstrap the node pool
@@ -102,7 +101,7 @@ await mix.start()
 # other libp2p connection.
 let conn = mix.toConnection(
   MixDestination.init(targetPeerId, targetMultiAddr),
-  proto = "/your/proto/1.0.0",
+  codec = "/your/proto/1.0.0",
   MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1.byte)),
 ).valueOr:
   return err(error)
