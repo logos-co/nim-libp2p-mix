@@ -274,15 +274,14 @@ suite "Mix Key Ring":
     check ring.candidates(mid(TestPeriod + 5)) == @[ahead]
 
   test "a key period never gets a second key":
-    var times =
-      @[
-        mid(TestPeriod - 1),
-        mid(TestPeriod),
-        mid(TestPeriod + 5), # the clock jumps ahead
-        mid(TestPeriod), # and is corrected
-        mid(TestPeriod - 1), # then steps back
-        mid(TestPeriod),
-      ]
+    var times = @[
+      mid(TestPeriod - 1),
+      mid(TestPeriod),
+      mid(TestPeriod + 5), # the clock jumps ahead
+      mid(TestPeriod), # and is corrected
+      mid(TestPeriod - 1), # then steps back
+      mid(TestPeriod),
+    ]
     for period in TestPeriod + 1 .. TestPeriod + 7:
       times.add(schedule.periodStart(period))
       times.add(mid(period))

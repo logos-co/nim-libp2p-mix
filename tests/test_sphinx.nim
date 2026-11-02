@@ -835,7 +835,7 @@ suite "Sphinx Key Rotation":
 
     check:
       processSphinxPacket(packetFor(candidates[0].publicKey), match)
-      .expect("processing error").status == InvalidMAC
+        .expect("processing error").status == InvalidMAC
       candidates[0].tagCount == 0
 
   test "a replay is detected under the current key":
