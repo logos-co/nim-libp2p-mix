@@ -29,9 +29,10 @@ code follows the spec, not the other way round.
 
 ```
 libp2p_mix.nim            Top-level facade — re-exports the public API
-libp2p_mix/               Protocol implementation (24 modules)
+libp2p_mix/               Protocol implementation (25 modules)
   ├── mix_protocol.nim    Core mix protocol (mounts on a libp2p Switch)
   ├── sphinx.nim          Sphinx packet format with LIONESS payload encryption
+  ├── key_rotation.nim    Mix key schedule, key ring, and per-key replay tables
   ├── cover_traffic.nim   Constant-rate cover-traffic generator
   ├── exit_layer.nim      Exit-node behaviour & dest read framing
   ├── entry_connection.nim/exit_connection.nim/reply_connection.nim
