@@ -4,7 +4,7 @@
 {.used.}
 
 import std/tables
-from std/times import Time, getTime, toUnix, nanosecond, initTime
+from std/times import Time, toUnix, nanosecond, initTime
 import chronos
 import libp2p_mix/[curve25519, key_rotation, tag_manager]
 import ./tools/[unittest, crypto]
@@ -17,18 +17,17 @@ proc timeAt(schedule: KeySchedule, period: KeyPeriod, offset: Duration): Time =
   let ns = start.toUnix() * 1_000_000_000 + start.nanosecond + offset.nanoseconds
   initTime(ns div 1_000_000_000, ns mod 1_000_000_000)
 
-proc untilTime(t: Time): Duration =
-  let now = getTime()
-  chronos.seconds(t.toUnix() - now.toUnix()) +
-    chronos.nanoseconds(t.nanosecond - now.nanosecond)
-
 proc makeTag(seed: byte): Tag =
-  for i in 0 ..< result.len:
-    result[i] = byte((int(seed) * 32 + i) mod 256)
+  var tag: Tag
+  for i in 0 ..< tag.len:
+    tag[i] = byte((int(seed) * 32 + i) mod 256)
+  tag
 
 proc periods(keys: seq[MixKey]): seq[KeyPeriod] =
+  var keyPeriods: seq[KeyPeriod]
   for key in keys:
-    result.add(key.period)
+    keyPeriods.add(key.period)
+  keyPeriods
 
 suite "Key Schedule":
   test "default schedule uses the recommended parameters":
@@ -311,15 +310,19 @@ suite "Mix Key Ring":
       ring.update(schedule.periodStart(period))
     check ring.candidates(mid(TestPeriod + 5)) == @[ahead]
 
-  test "destroying a key wipes its private key and replay table":
+  test "a destroyed key refuses to multiply and empties its replay table":
     ring.update(mid(TestPeriod))
-    let key = ring.candidates(mid(TestPeriod))[0]
-    check key.addTag(makeTag(1)) == TagAdded
+    let
+      key = ring.candidates(mid(TestPeriod))[0]
+      (_, alpha) = generateKeyPair().expect("generate keypair error")
+    check:
+      key.multiply(alpha).isOk
+      key.addTag(makeTag(1)) == TagAdded
 
     ring.update(schedule.timeAt(TestPeriod + 1, schedule.graceWindow))
     check:
       key.isDestroyed
-      key.privateKey.isZeroFieldElement()
+      key.multiply(alpha).isErr
       key.tagCount == 0
       not key.isTagSeen(makeTag(1))
       key.addTag(makeTag(2)) == TagCacheFull
@@ -345,11 +348,8 @@ suite "Mix Key Ring":
       first = fastRing.candidates()[0]
       period = first.period
 
-    await sleepAsync(
-      untilTime(fast.timeAt(period + 1, fast.graceWindow)) + 100.milliseconds
-    )
-
-    check:
+    # The loop destroys the first key once the grace window after its period ends.
+    checkUntilTimeout:
       first.isDestroyed
       fastRing.publicKey(period).isNone
       fastRing.publicKey(period + 1).isSome

@@ -96,13 +96,13 @@ func init*(
     )
   )
 
-func periodDuration*(schedule: KeySchedule): Duration {.inline.} =
+func periodDuration*(schedule: KeySchedule): Duration =
   schedule.periodDuration
 
-func earlyWindow*(schedule: KeySchedule): Duration {.inline.} =
+func earlyWindow*(schedule: KeySchedule): Duration =
   schedule.earlyWindow
 
-func graceWindow*(schedule: KeySchedule): Duration {.inline.} =
+func graceWindow*(schedule: KeySchedule): Duration =
   schedule.graceWindow
 
 func acceptanceWindow*(schedule: KeySchedule): Duration =
@@ -140,27 +140,32 @@ type MixKey* = ref object
   capacity: int
   destroyed: bool
 
-func period*(key: MixKey): KeyPeriod {.inline.} =
+func period*(key: MixKey): KeyPeriod =
   key.period
 
-func publicKey*(key: MixKey): FieldElement {.inline.} =
+func publicKey*(key: MixKey): FieldElement =
   key.publicKey
 
-func privateKey*(key: MixKey): lent FieldElement {.inline.} =
-  ## All zero once the key is destroyed.
-  key.privateKey
-
-func isDestroyed*(key: MixKey): bool {.inline.} =
+func isDestroyed*(key: MixKey): bool =
   key.destroyed
 
-func tagCount*(key: MixKey): int {.inline.} =
+func tagCount*(key: MixKey): int =
   key.tags.len
 
-func isTagSeen*(key: MixKey, tag: Tag): bool {.inline.} =
+func isTagSeen*(key: MixKey, tag: Tag): bool =
   tag in key.tags
 
-func isReplayTableFull*(key: MixKey): bool {.inline.} =
+func isReplayTableFull*(key: MixKey): bool =
   key.tags.len >= key.capacity
+
+proc multiply*(key: MixKey, point: FieldElement): Result[FieldElement, string] =
+  ## point multiplied by this key's private scalar (X25519).
+  if key.destroyed:
+    return err("Destroyed mix key: period " & $key.period)
+  var scalars = [key.privateKey]
+  defer:
+    burnMem(scalars)
+  ok(multiplyPointWithScalars(point, scalars))
 
 proc addTag*(key: MixKey, tag: Tag): TagInsertStatus =
   ## Tags are never evicted: a removed tag would let its packet be replayed
@@ -224,7 +229,7 @@ proc new*(
     ),
   )
 
-func len*(ring: MixKeyRing): int {.inline.} =
+func len*(ring: MixKeyRing): int =
   ## Number of keys held.
   ring.keys.len
 
@@ -300,15 +305,17 @@ proc candidates*(ring: MixKeyRing, now: Time = getTime()): seq[MixKey] =
     current = ring.schedule.keyPeriod(now)
     elapsed = now.sinceUnixEpoch()
 
+  var keys: seq[MixKey]
   ring.findKey(current).withValue(key):
-    result.add(key)
+    keys.add(key)
   if current > 0 and
       elapsed < ring.schedule.startOffset(current) + ring.schedule.graceWindow:
     ring.findKey(current - 1).withValue(key):
-      result.add(key)
+      keys.add(key)
   if elapsed >= ring.schedule.startOffset(current + 1) - ring.schedule.earlyWindow:
     ring.findKey(current + 1).withValue(key):
-      result.add(key)
+      keys.add(key)
+  keys
 
 func untilNextUpdate(ring: MixKeyRing, now: Time): Duration =
   ## Time until the next key period starts or, if sooner, the grace window of

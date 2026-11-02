@@ -311,17 +311,20 @@ proc computeTag(s: FieldElement): Tag =
   ## Compute replay detection tag as H(s) per spec Section 8.6.1 Step 2.
   sha256_hash(fieldElementToBytes(s))
 
-proc computeSharedSecret(
-    alphaFE: FieldElement, privateKey: FieldElement
-): Result[FieldElement, string] =
+proc checkSharedSecret(s: FieldElement): Result[FieldElement, string] =
   # Low-order public inputs collapse X25519 output to zero; reject after multiplication
   # because that is the point where the subgroup check is observable for X25519.
-  var scalars = [privateKey]
-  let s = multiplyPointWithScalars(alphaFE, scalars)
-  burnMem(scalars)
   if s.isZeroFieldElement():
     return err("Invalid alpha: low-order shared secret")
   ok(s)
+
+proc computeSharedSecret(
+    alphaFE: FieldElement, privateKey: FieldElement
+): Result[FieldElement, string] =
+  var scalars = [privateKey]
+  let s = multiplyPointWithScalars(alphaFE, scalars)
+  burnMem(scalars)
+  checkSharedSecret(s)
 
 proc checkReplay*(
     sphinxPacket: SphinxPacket, privateKey: FieldElement, tm: var TagManager
@@ -473,22 +476,22 @@ proc processSphinxPacket*(
 
 type
   KeyMatchStatus* = enum
+    NoKeyMatched
     KeyMatched
     KeyReplayed
     KeyTableFull
-    NoKeyMatched
 
   KeyMatch* = object
     case status*: KeyMatchStatus
     of KeyMatched:
       key*: MixKey
-      sharedSecret*: FieldElement
+      sharedSecret: FieldElement
     else:
       discard
 
 proc matchKey*(
     sphinxPacket: SphinxPacket, candidates: openArray[MixKey]
-): Result[KeyMatch, string] =
+): Result[KeyMatch, string] {.raises: [].} =
   ## Find the candidate key the packet was built for, without storing its tag
   ## (Mix Key Rotation spec §7). Destroyed keys never match. KeyTableFull means
   ## the packet was built for a key whose replay table is full (Mix Key
@@ -501,40 +504,35 @@ proc matchKey*(
   let alphaFE = bytesToAlphaFieldElement(alpha).valueOr:
     return err("Invalid alpha: " & error)
 
-  # Run every candidate, even after one matches, so processing time does not
-  # reveal which key the packet was built for.
-  var
-    secrets = newSeq[FieldElement](candidates.len)
-    seen = newSeq[bool](candidates.len)
-    valid = newSeq[bool](candidates.len)
-  defer:
-    for secret in secrets.mitems:
-      burnMem(secret)
-  for i, key in candidates:
+  var match = KeyMatch(status: NoKeyMatched)
+  for key in candidates:
     if key.isDestroyed:
       continue
-    secrets[i] = computeSharedSecret(alphaFE, key.privateKey).valueOr:
+    var secret = checkSharedSecret(?key.multiply(alphaFE)).valueOr:
       return err(error)
-    seen[i] = key.isTagSeen(computeTag(secrets[i]))
-    valid[i] = isMacValid(beta, gamma, fieldElementToBytes(secrets[i]))
+    defer:
+      burnMem(secret)
 
-  var match = KeyMatch(status: NoKeyMatched)
-  for i, key in candidates:
-    if seen[i]:
-      match = KeyMatch(status: KeyReplayed)
-      break
-    if valid[i]:
-      match =
-        if key.isReplayTableFull:
-          KeyMatch(status: KeyTableFull)
-        else:
-          KeyMatch(status: KeyMatched, key: key, sharedSecret: secrets[i])
-      break
+    # Run every candidate, even after one matches, so processing time does not
+    # reveal which key the packet was built for.
+    let
+      seen = key.isTagSeen(computeTag(secret))
+      valid = isMacValid(beta, gamma, fieldElementToBytes(secret))
+
+    if match.status == NoKeyMatched:
+      if seen:
+        match = KeyMatch(status: KeyReplayed)
+      elif valid:
+        match =
+          if key.isReplayTableFull:
+            KeyMatch(status: KeyTableFull)
+          else:
+            KeyMatch(status: KeyMatched, key: key, sharedSecret: secret)
   ok(match)
 
 proc processSphinxPacket*(
     sphinxPacket: SphinxPacket, match: var KeyMatch
-): Result[ProcessedSphinxPacket, string] =
+): Result[ProcessedSphinxPacket, string] {.raises: [].} =
   ## Complete a packet `matchKey` matched, storing its tag in the matched key's
   ## replay table. The match is consumed: its shared secret is wiped and its
   ## status reset to NoKeyMatched. The key's acceptance window is not rechecked.
