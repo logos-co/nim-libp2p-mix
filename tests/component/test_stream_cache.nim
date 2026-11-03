@@ -5,10 +5,10 @@
 
 import std/sequtils
 import chronos, results
-import libp2p/switch
+import libp2p/[switch, peerid, multiaddress]
 import libp2p_mix
 import libp2p_mix/mix_protocol
-import ../tools/[lifecycle, unittest]
+import ../tools/[lifecycle, unittest, crypto]
 import ../utils
 
 const ReplyParams = MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8))
@@ -51,3 +51,41 @@ suite "Hop stream cache":
       if round == 0:
         # Close the cached streams and keep the cache entries, as a peer reset does.
         await allFutures(streams.mapIt(it.close()))
+
+  asyncTest "protocol stop cancels a dial in flight and refuses a new dial":
+    let nodes = await setupMixNodes(1)
+    startAndDeferStop(nodes)
+
+    # A server that accepts and never answers keeps a dial in its handshake.
+    var connections: seq[StreamTransport]
+    let server = createStreamServer(initTAddress("127.0.0.1:0"))
+    proc acceptLoop() {.async.} =
+      while true:
+        connections.add(await server.accept())
+
+    let acceptor = acceptLoop()
+    defer:
+      await acceptor.cancelAndWait()
+      for connection in connections:
+        await connection.closeWait()
+      await server.closeWait()
+
+    let hopPeerId = PeerId.random(rng()).expect("peer id")
+    let hopAddr = MultiAddress.init(server.localAddress()).expect("address")
+    let sending = nodes[0].sendCoverPacket(hopPeerId, hopAddr, @[1.byte])
+    checkUntilTimeout:
+      connections.len == 1
+    check not sending.finished
+
+    await nodes[0].stop()
+    expect CancelledError:
+      discard await sending.wait(2.seconds)
+    let refused = await nodes[0].sendCoverPacket(hopPeerId, hopAddr, @[1.byte])
+    check refused.isErr
+    check connections.len == 1
+
+    await nodes[0].start()
+    let again = nodes[0].sendCoverPacket(hopPeerId, hopAddr, @[1.byte])
+    checkUntilTimeout:
+      connections.len == 2
+    await again.cancelAndWait()

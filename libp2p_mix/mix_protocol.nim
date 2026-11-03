@@ -119,7 +119,7 @@ proc startDial(
   dial.addCallback(
     proc(_: pointer) {.gcsafe, raises: [].} =
       mixProto.dialing.del(pid)
-      if dial.completed():
+      if dial.completed() and mixProto.started:
         mixProto.connPool[pid] = dial.value
   )
   dial
@@ -137,6 +137,8 @@ proc getConn(
     await mixProto.removeClosedConnections(failed)
   mixProto.connPool.withValue(pid, conn):
     return conn[]
+  if not mixProto.started:
+    raise newException(DialFailedError, "mix protocol is not running")
   var dial = mixProto.dialing.getOrDefault(pid)
   if dial.isNil:
     dial = mixProto.startDial(pid, addrs, codecs)
@@ -486,8 +488,9 @@ method handleMixMessages*(
       try:
         await mixProto.getConn(nextPeerId, @[nextAddr], @[MixProtocolID])
       except DialFailedError as exc:
-        error "Failed to dial next hop: ", err = exc.msg
-        mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
+        if mixProto.started:
+          error "Failed to dial next hop: ", err = exc.msg
+          mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
         if proofToken.len > 0:
           mixProto.spamProtection.withValue(sp):
             sp.reclaimProofToken(proofToken)
@@ -1213,23 +1216,30 @@ method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
     await ct.start()
 
 method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
-  ## Stop the MixProtocol background tasks and cancel all in-flight
-  ## handleMixMessages futures.
-  mixProto.started = false
-
-  await mixProto.tagManager.stop()
-
-  await mixProto.surbStore.stop()
-  mixProto.surbStore.clear()
-
+  ## Stop the MixProtocol background tasks, cancel the in-flight
+  ## handleMixMessages futures and the hop dials, and close a stream whose dial
+  ## completes after the stop began.
   mixProto.coverTraffic.withValue(ct):
     await ct.stop()
+  mixProto.started = false
+  let dials = toSeq(mixProto.dialing.values)
 
   # Snapshot the list and clear it before cancelling.
   let pending = mixProto.ongoingMixMessages
   mixProto.ongoingMixMessages = @[]
   if pending.len > 0:
     await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
+
+  await mixProto.tagManager.stop()
+
+  await mixProto.surbStore.stop()
+  mixProto.surbStore.clear()
+
+  if dials.len > 0:
+    await noCancel allFutures(dials.mapIt(it.cancelAndWait()))
+  for dial in dials:
+    if dial.completed():
+      await dial.value.close()
 
 proc init*(
     mixProto: MixProtocol,
