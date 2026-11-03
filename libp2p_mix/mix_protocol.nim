@@ -56,9 +56,10 @@ type MixProtocol* = ref object of LPProtocol
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
   coverTraffic*: Opt[CoverTraffic]
-  ongoingMixMessages: seq[Future[void]]
-    ## Tracks all in-flight handleMixMessages futures so they can be
-    ## cancelled on stop and waited for during teardown.
+  ongoingMixMessages: Table[uint64, Future[void]]
+    ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
+    ## removal on completion is O(1).
+  nextMixMessageId: uint64
 
 proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
   return mixProto.destReadBehaviors.hasKey(codec)
@@ -527,11 +528,13 @@ proc spawnMixMessage(
   ## and removes it from the list when it finishes.
   if not mixProto.started:
     return
+  let id = mixProto.nextMixMessageId
+  mixProto.nextMixMessageId.inc()
   let fut = runMixMessage(mixProto, fromPeerId, receivedBytes, metadataBytes)
-  mixProto.ongoingMixMessages.add(fut)
+  mixProto.ongoingMixMessages[id] = fut
   fut.addCallback(
     proc(_: pointer) {.gcsafe, raises: [].} =
-      mixProto.ongoingMixMessages.keepItIf(not it.finished)
+      mixProto.ongoingMixMessages.del(id)
   )
 
 proc handleMixNodeConnection(
@@ -1196,9 +1199,9 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   mixProto.coverTraffic.withValue(ct):
     await ct.stop()
 
-  # Snapshot the list and clear it before cancelling.
-  let pending = mixProto.ongoingMixMessages
-  mixProto.ongoingMixMessages = @[]
+  # Cancelling fires the completion callback, which deletes from this table.
+  let pending = toSeq(mixProto.ongoingMixMessages.values)
+  mixProto.ongoingMixMessages.clear()
   if pending.len > 0:
     await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
 
