@@ -54,6 +54,16 @@ suite "mix_message_tests":
         deserialized.codec == codec
         deserialized.message == message
 
+  test "serializedLen matches serialize across the varint boundary":
+    for codecLen in [0, 1, 127, 128, 16_383]:
+      let codec = repeat('a', codecLen)
+      for message in [newSeq[byte](), @[1.byte, 2, 3]]:
+        check serializedLen(codec, message.len) ==
+          MixMessage.init(message, codec).serialize().len
+    # A codec of 16384 bytes needs a three byte length prefix. The size check
+    # returns an error and does not serialize the codec.
+    check getMaxMessageSizeForCodec(repeat('a', 16_384)).isErr
+
   test "deserialize with empty data returns error":
     let res = MixMessage.deserialize(@[])
     check:
