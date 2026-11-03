@@ -11,6 +11,13 @@ import
 import ./tools/[unittest, crypto]
 import ./utils
 
+proc invalidSizeErrors(): float64 =
+  ## The count of INVALID_SIZE entry errors. 0 before the label exists.
+  try:
+    mix_messages_error.value(["Entry", "INVALID_SIZE"])
+  except KeyError:
+    0.0
+
 # Define test cases
 suite "mix_message_tests":
   test "serialize_and_deserialize_mix_message":
@@ -132,6 +139,7 @@ suite "mix_message_tests":
       MixProtocol.new(info, createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey)))
     let codec = "/test/1.0.0"
     let capacity = getMaxMessageSizeForCodec(codec, 1).get()
+    let before = invalidSizeErrors()
     let other = MixNodeInfo.generateRandom(0, rng())
     let sent = waitFor mix.anonymizeLocalProtocolSend(
       newAsyncQueue[seq[byte]](),
@@ -143,6 +151,7 @@ suite "mix_message_tests":
     check:
       sent.isErr
       sent.error.startsWith("message exceeds the codec and reply payload capacity")
+      invalidSizeErrors() == before + 1
 
   test "a codec that leaves no capacity fails and counts INVALID_SIZE":
     let info = MixNodeInfo.generateRandom(0, rng())
@@ -150,7 +159,7 @@ suite "mix_message_tests":
       MixProtocol.new(info, createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey)))
     let codec = "/" & 'x'.repeat(DataSize)
     check getMaxMessageSizeForCodec(codec).isErr
-    let before = mix_messages_error.value(["Entry", "INVALID_SIZE"])
+    let before = invalidSizeErrors()
     let other = MixNodeInfo.generateRandom(0, rng())
     let sent = waitFor mix.anonymizeLocalProtocolSend(
       newAsyncQueue[seq[byte]](),
@@ -161,4 +170,4 @@ suite "mix_message_tests":
     )
     check:
       sent.isErr
-      mix_messages_error.value(["Entry", "INVALID_SIZE"]) == before + 1
+      invalidSizeErrors() == before + 1
