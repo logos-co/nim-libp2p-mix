@@ -90,6 +90,8 @@ when defined(libp2p_mix_experimental_exit_is_dest):
         messageFut.cancelled()
     asyncTest "cancelling an exit reply cancels and awaits every pending send":
       let sw = SwitchBuilder.new().withTcpTransport().withMplex().withNoise().build()
+      defer:
+        await sw.stop()
       var pending, cancelled: int
       let allPending = newAsyncEvent()
       let allCancelled = newAsyncEvent()
@@ -146,4 +148,3 @@ when defined(libp2p_mix_experimental_exit_is_dest):
       check:
         pending == 0
         replying.cancelled
-      await sw.stop()
