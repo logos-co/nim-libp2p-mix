@@ -4,6 +4,7 @@
 {.used.}
 
 import chronos, results, sequtils
+import std/[importutils, tables]
 import libp2p/[protocols/protocol, peerid, switch, builders, varint, dialer]
 import libp2p_mix
 import libp2p_mix/[exit_connection, mix_node, mix_protocol, multiaddr, serialization]
@@ -13,6 +14,8 @@ import libp2p_mix/spam_protection
 
 import ../tools/[lifecycle, unittest, crypto]
 import ../[utils, spam_protection_impl]
+
+privateAccess(MixProtocol)
 
 const
   TestCodec = "/mix/test/slot-refund/1.0.0"
@@ -166,10 +169,10 @@ suite "Slot refund - forward":
 
     await nodes[4].switch.stop()
     await nodes.sendToExit()
+    checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
+      spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
 
     # The first hop's forward went out; the second hop's dial failed
-    checkUntilTimeout:
-      spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
     check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 1
 
   asyncTest "failure after a write attempt keeps the slot and the proof spent":
@@ -178,24 +181,26 @@ suite "Slot refund - forward":
     defer:
       await stopNodes(nodes)
 
-    # Any of the three may go second, so send until each has almost certainly
-    # cached a connection to the exit
-    let delivered = forwardedCount("Exit")
-    for _ in 0 ..< 40:
-      await nodes.sendToExit()
-    checkUntilTimeout:
-      forwardedCount("Exit") == delivered + 40
+    # Establish every possible second hop's cached stream directly. Random
+    # warm-up messages can still be in flight when accounting is enabled.
+    let exitPeer = nodes[4].switch.peerInfo.peerId
+    for node in nodes[1 .. 3]:
+      let conn = await node.switch.dial(
+        exitPeer, @[nodes[4].localMixPubInfo().multiAddr], @[MixProtocolID]
+      )
+      node.connPool[exitPeer] = conn
 
     let hops = nodes[1 .. 3].mapIt(it.attachCover())
-
     await nodes[4].switch.stop()
-    let exitPeerId = nodes[4].switch.peerInfo.peerId
-    checkUntilTimeout:
-      nodes[1 .. 3].allIt(not it.switch.isConnected(exitPeerId))
-    let failed = errorCount("Intermediate", "DIAL_FAILED")
+    checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
+      nodes[1 .. 3].allIt(it.connPool[exitPeer].closed())
+
     await nodes.sendToExit()
-    checkUntilTimeout:
-      errorCount("Intermediate", "DIAL_FAILED") == failed + 1
+    # Proof generation shows both relays received the packet; then wait for
+    # their owned forwarding tasks to finish before checking final accounting.
+    checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
+      spam[1 .. 3].mapIt(it.generateCount).foldl(a + b) == 2
+      nodes[1 .. 3].allIt(it.ongoingMixMessages.len == 0)
 
     check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 2
     check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 0
@@ -693,8 +698,6 @@ suite "Slot refund - packet stages":
       provider.wrongSize = true
 
     check (await nodes.sendToLast()).isOk
-    checkUntilTimeout:
-      spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
       covers.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 0
     check spam[1 .. 3].mapIt(it.generated).foldl(a + b) == 1
 
@@ -758,8 +761,6 @@ suite "Slot refund - packet stages":
     let covers = nodes[1 .. 3].mapIt(it.attachCover())
 
     check (await nodes.sendToLast()).isOk
-    checkUntilTimeout:
-      spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
     check covers.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 0
 
   asyncTest "forward stopped in dial refunds slot and reclaims proof":
