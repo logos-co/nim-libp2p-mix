@@ -240,7 +240,7 @@ suite "Mix Protocol - Node Failures":
 
     check sender.surbCredsLen == 0
 
-  asyncTest "closing the connection releases credentials, and a second write is refused":
+  asyncTest "default reply connection uses one SURB, releases on close, and refuses a second write":
     ## Prompt reclamation well inside the store TTL, plus the single-exchange
     ## guard — both properties of one live connection, so one setup covers them.
     const TestCodec = "/silent-2/test/1.0.0"
@@ -263,7 +263,7 @@ suite "Mix Protocol - Node Failures":
       .toConnection(
         destNode.toMixDestination(),
         TestCodec,
-        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(3))),
+        MixParameters(expectReply: Opt.some(true)),
       )
       .expect("could not build connection")
     defer:
@@ -271,7 +271,7 @@ suite "Mix Protocol - Node Failures":
 
     await conn.writeLp(@[1.byte, 2, 3])
     discard await destProto.receivedMessages.get().wait(10.seconds)
-    check sender.surbCredsLen == 3
+    check sender.surbCredsLen == 1
 
     # A second reply would land in a queue nobody drains, so it is refused.
     expect LPStreamError:

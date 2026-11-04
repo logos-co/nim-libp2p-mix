@@ -7,7 +7,7 @@ import libp2p/varint
 import ./[mix_protocol, mix_metrics, surb_store]
 from padding import DataSize
 
-const DefaultSurbs = uint8(4)
+const DefaultSurbs = uint8(1)
 
 const DefaultReplyTimeout = chronos.seconds(30)
   ## How long `readOnce` waits for a mix reply before giving up.
