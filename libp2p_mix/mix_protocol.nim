@@ -113,6 +113,8 @@ type
 proc registerMixDeliveryHandler*(
     mixProto: MixProtocol, service: string, handler: MixDeliveryHandler
 ): Result[void, string] =
+  ## Handlers must handle their own recoverable errors. The callback's async
+  ## effect type permits only CancelledError, which propagates to the owner.
   if service.len == 0:
     return err("Mix delivery service must not be empty")
 
@@ -131,6 +133,9 @@ proc unregisterMixDeliveryHandler*(mixProto: MixProtocol, service: string) =
 proc registerRawSurbReplyHandler*(
     mixProto: MixProtocol, handler: RawSurbReplyHandler
 ): Result[void, string] =
+  ## Handlers must handle their own recoverable errors and return Unhandled
+  ## when appropriate. Only CancelledError may escape the callback; cancellation
+  ## propagates instead of invoking the embedded-connection fallback.
   if handler.isNil:
     return err("raw SURB reply handler must not be nil")
 
