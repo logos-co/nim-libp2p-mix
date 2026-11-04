@@ -15,30 +15,33 @@ proc init*(T: typedesc[MixMessage], message: openArray[byte], codec: string): T 
 proc init*(T: typedesc[MixMessage], message: sink seq[byte], codec: string): T =
   return T(message: move(message), codec: codec)
 
+proc serializedLen*(codec: string, messageLen: int): int =
+  ## The length of a serialized `MixMessage` with `codec` and a message of
+  ## `messageLen` bytes.
+  toBytes(codec.len.uint64, Leb128).len + codec.len + messageLen
+
 proc serialize*(mixMsg: MixMessage): seq[byte] =
   let vbytes = toBytes(mixMsg.codec.len.uint64, Leb128)
   doAssert vbytes.len <= 2, "serialization failed: codec length exceeds 2 bytes"
 
-  var buf = newSeqUninit[byte](vbytes.len + mixMsg.codec.len + mixMsg.message.len)
+  var buf = newSeqUninit[byte](serializedLen(mixMsg.codec, mixMsg.message.len))
   buf[0 ..< vbytes.len] = vbytes.toOpenArray()
-  buf[vbytes.len ..< mixMsg.codec.len] = mixMsg.codec.toBytes()
+  buf[vbytes.len ..< vbytes.len + mixMsg.codec.len] = mixMsg.codec.toBytes()
   buf[vbytes.len + mixMsg.codec.len ..< buf.len] = mixMsg.message
   buf
 
 proc deserialize*(
     T: typedesc[MixMessage], data: openArray[byte]
-): Result[MixMessage, string] =
+): Result[MixMessage, string] {.raises: [].} =
   if data.len == 0:
     return err("deserialization failed: data is empty")
 
-  var codecLen: int
-  var varintLen: int
-  for i in 0 ..< min(data.len, 2):
-    let parsed = uint16.fromBytes(data[0 ..< i], Leb128)
-    if parsed.len < 0 or (i == 1 and parsed.len == 0):
-      return err("deserialization failed: invalid codec length")
+  let parsed = uint16.fromBytes(data.toOpenArray(0, min(data.len, 2) - 1), Leb128)
+  if parsed.len <= 0 or parsed.len != Leb128.len(parsed.val):
+    return err("deserialization failed: invalid codec length")
 
-    varintLen = parsed.len
+  let
+    varintLen = parsed.len.int
     codecLen = parsed.val.int
 
   if data.len < varintLen + codecLen:

@@ -20,6 +20,8 @@ export SurbStore, SurbSession
 when defined(enable_mix_benchmarks):
   import ./benchmark
   from times import getTime, toUnixFloat, `-`, initTime, `$`, inMilliseconds, Time
+logScope:
+  topics = "mix_protocol"
 
 when defined(libp2p_mix_experimental_exit_is_dest):
   {.warning: "experimental support for mix exit == destination is enabled!".}
@@ -122,6 +124,21 @@ proc getConn(
     mixProto.connPool[pid] = c
     return c
 
+proc writeLpWithRetry(
+    mixProto: MixProtocol,
+    c: Connection,
+    pid: PeerId,
+    addrs: seq[MultiAddress],
+    codecs: seq[string],
+    payload: seq[byte],
+) {.async: (raises: [DialFailedError, LPStreamError, CancelledError]).} =
+  try:
+    await c.writeLp(payload)
+  except LPStreamClosedError, LPStreamResetError, LPStreamRemoteClosedError,
+      LPStreamConnDownError:
+    let c = await mixProto.getConn(pid, addrs, codecs, forceNewStream = true)
+    await c.writeLp(payload)
+
 proc writeLp(
     mixProto: MixProtocol,
     pid: PeerId,
@@ -130,12 +147,7 @@ proc writeLp(
     payload: seq[byte],
 ) {.async: (raises: [DialFailedError, LPStreamError, CancelledError]).} =
   let c = await mixProto.getConn(pid, addrs, codecs)
-  try:
-    await c.writeLp(payload)
-  except LPStreamClosedError, LPStreamResetError, LPStreamRemoteClosedError,
-      LPStreamConnDownError:
-    let c = await mixProto.getConn(pid, addrs, codecs, forceNewStream = true)
-    await c.writeLp(payload)
+  await mixProto.writeLpWithRetry(c, pid, addrs, codecs, payload)
 
 proc generateAndAppendProof(
     mixProto: MixProtocol,
@@ -311,9 +323,7 @@ method handleMixMessages*(
       return
 
     trace "Exit node - Received mix message",
-      peerId = mixProto.mixNodeInfo.peerId,
-      message = deserialized.message,
-      codec = deserialized.codec
+      peerId = mixProto.mixNodeInfo.peerId, codec = deserialized.codec
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Exit",
@@ -371,6 +381,7 @@ method handleMixMessages*(
     mix_messages_recvd.inc(labelValues = ["Intermediate"])
 
     # Claim a slot for forwarding (Mix Cover Traffic spec §6.4)
+    var claimEpoch: uint64
     mixProto.coverTraffic.withValue(ct):
       let claim = ct.slotPool.claimSlot()
       if not claim.success:
@@ -378,10 +389,15 @@ method handleMixMessages*(
         mix_messages_error.inc(labelValues = ["Intermediate", "SLOT_EXHAUSTED"])
         mix_slot_claim_rejected.inc(labelValues = ["forward"])
         return
+      claimEpoch = ct.slotPool.epoch
       # Reclaim proof token from discarded cover packet for messageId reuse
       if claim.reclaimedToken.len > 0:
         mixProto.spamProtection.withValue(sp):
           sp.reclaimProofToken(claim.reclaimedToken)
+
+    template refundSlot(): untyped =
+      mixProto.coverTraffic.withValue(ct):
+        ct.slotPool.unclaimSlot(claimEpoch)
 
     let actualDelay = mixProto.delayStrategy.generateForIntermediate(processedSP.delay)
     trace "Computed delay", encodedDelay = processedSP.delay, actualDelay
@@ -392,6 +408,7 @@ method handleMixMessages*(
     let (nextPeerId, nextAddr) = bytesToMultiAddr(nextHopBytes).valueOr:
       trace "Failed to convert bytes to multiaddress", err = error
       mix_messages_error.inc(labelValues = ["Intermediate", "INVALID_DEST"])
+      refundSlot()
       return
 
     when defined(enable_mix_benchmarks):
@@ -434,14 +451,35 @@ method handleMixMessages*(
           sampledDelay = actualDelay,
           hint = "Increase the minimum delay floor or reduce proof generation time"
 
-    let (outgoingPacket, _) = (await proofGenFut).valueOr:
+    let (outgoingPacket, proofToken) = (await proofGenFut).valueOr:
       error "Failed to generate spam protection proof for next hop", err = error
+      refundSlot()
       return
+
+    # Only a failed first dial proves the packet never left this node, so its
+    # slot can be refunded and its messageId reused. After any write attempt the
+    # next hop may hold the proof, and reissuing the messageId in this epoch
+    # would be an RLN double-signal.
+    let conn =
+      try:
+        await mixProto.getConn(nextPeerId, @[nextAddr], @[MixProtocolID])
+      except DialFailedError as exc:
+        error "Failed to dial next hop: ", err = exc.msg
+        mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
+        if proofToken.len > 0:
+          mixProto.spamProtection.withValue(sp):
+            sp.reclaimProofToken(proofToken)
+        refundSlot()
+        return
 
     try:
       when defined(enable_mix_benchmarks):
-        await mixProto.writeLp(nextPeerId, @[nextAddr], @[MixProtocolID], metadataBytes)
-      await mixProto.writeLp(nextPeerId, @[nextAddr], @[MixProtocolID], outgoingPacket)
+        await mixProto.writeLpWithRetry(
+          conn, nextPeerId, @[nextAddr], @[MixProtocolID], metadataBytes
+        )
+      await mixProto.writeLpWithRetry(
+        conn, nextPeerId, @[nextAddr], @[MixProtocolID], outgoingPacket
+      )
       mix_messages_forwarded.inc(labelValues = ["Intermediate"])
     except CancelledError as exc:
       raise exc
@@ -453,6 +491,8 @@ method handleMixMessages*(
       mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
   of Duplicate:
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "DUPLICATE"])
+  of ReplayCacheFull:
+    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "REPLAY_CACHE_FULL"])
   of InvalidMAC:
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_MAC"])
 
@@ -515,8 +555,7 @@ proc getMaxMessageSizeForCodec*(
   ## Computes the maximum payload size (in bytes) available for a message when encoded  
   ## with the given `codec`, optionally including space for the chosen number of surbs.  
   ## Returns an error if the codec + surb overhead exceeds the data capacity.  
-  let serializedMsg = MixMessage.init(@[], codec).serialize()
-  let totalLen = serializedMsg.len + SurbLenSize + (int(numberOfSurbs) * SurbSize)
+  let totalLen = serializedLen(codec, 0) + SurbLenSize + (int(numberOfSurbs) * SurbSize)
   if totalLen > DataSize:
     return err("cannot encode messages for this codec")
   return ok(DataSize - totalLen)
@@ -546,7 +585,7 @@ method buildSurb*(
         let selectedIndex = availableIndices[randomIndexPosition]
         let randPeerId = poolPeerIds[selectedIndex]
         availableIndices.del(randomIndexPosition)
-        debug "Selected mix node for surbs: ", indexInPath = i, peerId = randPeerId
+        debug "Selected mix node for surbs: ", indexInPath = i
         let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
           return err("could not get mix pub info for peer: " & $randPeerId)
         (
@@ -641,13 +680,19 @@ type SendPacketLogConfig = object
     startTime: Time
     metadata: Metadata
 
+type SendPacketError = object
+  msg: string
+  neverWritten: bool
+    ## True only when no byte of the packet can have left this node, which is
+    ## the one case where its slot may be refunded and its proof reused.
+
 proc sendPacket(
     mixProto: MixProtocol,
     peerId: PeerId,
     multiAddress: MultiAddress,
     sphinxPacket: SphinxPacket,
     logConfig: SendPacketLogConfig,
-): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+): Future[Result[void, SendPacketError]] {.async: (raises: [CancelledError]).} =
   ## Send the wrapped message to the first mix node in the selected path.
   ## Applies the sender pre-send delay (mix.md §8.5.2 step 3.f) before the
   ## first-hop write to break burst timing correlation.
@@ -685,8 +730,8 @@ proc sendPacket(
         sampledDelay = initialDelay,
         hint = "Increase the minimum delay floor or reduce proof generation time"
 
-  let (packetToSend, _) = (await proofGenFut).valueOr:
-    return err(error)
+  let (packetToSend, proofToken) = (await proofGenFut).valueOr:
+    return err(SendPacketError(msg: error, neverWritten: true))
 
   when defined(enable_mix_benchmarks):
     if logConfig.logType == Entry:
@@ -697,18 +742,47 @@ proc sendPacket(
         Opt.none(PeerId),
         Opt.some(peerId)
 
+  # Only a failed first dial proves the packet never left this node, so its
+  # messageId can be reused. After any write attempt the next hop may hold the
+  # proof: reissuing the messageId in this epoch would be an RLN double-signal,
+  # so the proof stays spent, including when a retry's redial fails.
+  let conn =
+    try:
+      await mixProto.getConn(peerId, @[multiAddress], @[MixProtocolID])
+    except DialFailedError as exc:
+      mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
+      if proofToken.len > 0:
+        mixProto.spamProtection.withValue(sp):
+          sp.reclaimProofToken(proofToken)
+      return err(
+        SendPacketError(
+          msg: fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}",
+          neverWritten: true,
+        )
+      )
+
   try:
     when defined(enable_mix_benchmarks):
-      await mixProto.writeLp(
-        peerId, @[multiAddress], @[MixProtocolID], logConfig.metadata.serialize()
+      await mixProto.writeLpWithRetry(
+        conn, peerId, @[multiAddress], @[MixProtocolID], logConfig.metadata.serialize()
       )
-    await mixProto.writeLp(peerId, @[multiAddress], @[MixProtocolID], packetToSend)
+    await mixProto.writeLpWithRetry(
+      conn, peerId, @[multiAddress], @[MixProtocolID], packetToSend
+    )
   except DialFailedError as exc:
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
-    return err(fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}")
+    return err(
+      SendPacketError(
+        msg: fmt"Failed to redial next hop ({peerId}, {multiAddress}): {exc.msg}"
+      )
+    )
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
-    return err(fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}")
+    return err(
+      SendPacketError(
+        msg: fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}"
+      )
+    )
   except CancelledError as exc:
     raise exc
 
@@ -776,10 +850,18 @@ proc anonymizeLocalProtocolSend*(
     doAssert destination.kind == ForwardAddr, "Only exit != destination is allowed"
 
   mix_messages_recvd.inc(labelValues = ["Entry"])
+  let capacity = getMaxMessageSizeForCodec(codec, numSurbs).valueOr:
+    mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
+    return err("failure when calling getMaxMessageSizeForCodec: " & error)
+  if msg.len > capacity:
+    mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
+    return err(
+      "message exceeds the codec and reply payload capacity, size: " & $msg.len &
+        ", capacity: " & $capacity
+    )
 
   # Note: the cover-traffic slot is claimed further down, immediately before
-  # the packet is sent. Claiming here would consume a slot on every validation
-  # failure below, and the pool has no refund path.
+  # the packet is sent, so validation failures below never consume one.
 
   var logConfig = SendPacketLogConfig(logType: Entry)
   when defined(enable_mix_benchmarks):
@@ -796,8 +878,6 @@ proc anonymizeLocalProtocolSend*(
 
   let numMixNodes = mixProto.nodePool.len
   var numAvailableNodes = numMixNodes
-
-  debug "Destination data", destination
 
   if mixProto.nodePool.get(destination.peerId).isSome:
     numAvailableNodes = numMixNodes - 1
@@ -842,7 +922,7 @@ proc anonymizeLocalProtocolSend*(
         exitPeerId = destination.peerId
         randPeerId = destination.peerId
 
-    debug "Selected mix node: ", indexInPath = hop.len, peerId = randPeerId
+    debug "Selected mix node: ", indexInPath = hop.len
 
     let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
       mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
@@ -907,14 +987,15 @@ proc anonymizeLocalProtocolSend*(
     releaseAndFail(fmt"Failed to wrap in sphinx packet: {error}")
 
   # Claim a slot for local origination (Mix Cover Traffic spec §6.3).
-  # Claimed here rather than on entry so that a slot is only consumed by a
-  # packet that is actually emitted -- the pool has no refund path, so an
-  # earlier claim would leak one on every validation failure above.
+  # Claimed here rather than on entry so that validation failures above never
+  # consume a slot.
+  var claimEpoch: uint64
   mixProto.coverTraffic.withValue(ct):
     let claim = ct.slotPool.claimSlot()
     if not claim.success:
       mix_slot_claim_rejected.inc(labelValues = ["send"])
       releaseAndFail("No slots available in current epoch")
+    claimEpoch = ct.slotPool.epoch
     # Reclaim proof token from discarded cover packet for messageId reuse
     if claim.reclaimedToken.len > 0:
       mixProto.spamProtection.withValue(sp):
@@ -922,7 +1003,12 @@ proc anonymizeLocalProtocolSend*(
 
   # Send the wrapped message to the first mix node in the selected path
   (await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)).isOkOr:
-    releaseAndFail(error)
+    # A packet that may have reached the next hop keeps its slot, matching its
+    # proof, which sendPacket only reclaims when nothing was written.
+    if error.neverWritten:
+      mixProto.coverTraffic.withValue(ct):
+        ct.slotPool.unclaimSlot(claimEpoch)
+    releaseAndFail(error.msg)
 
   return ok(session)
 
@@ -938,11 +1024,13 @@ proc sendSurbReply*(
 
   let sphinxPacket = useSURB(surb, message)
 
+  var claimEpoch: uint64
   mixProto.coverTraffic.withValue(ct):
     let claim = ct.slotPool.claimSlot()
     if not claim.success:
       mix_slot_claim_rejected.inc(labelValues = ["reply"])
       return err("No slots available in current epoch")
+    claimEpoch = ct.slotPool.epoch
     if claim.reclaimedToken.len > 0:
       mixProto.spamProtection.withValue(sp):
         sp.reclaimProofToken(claim.reclaimedToken)
@@ -952,7 +1040,12 @@ proc sendSurbReply*(
       peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
     )
   ).isOkOr:
-    return err("could not send reply: " & error)
+    # A packet that may have reached the next hop keeps its slot, matching its
+    # proof, which sendPacket only reclaims when nothing was written.
+    if error.neverWritten:
+      mixProto.coverTraffic.withValue(ct):
+        ct.slotPool.unclaimSlot(claimEpoch)
+    return err("could not send reply: " & error.msg)
   return ok()
 
 type PathNode = object

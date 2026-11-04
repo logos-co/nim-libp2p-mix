@@ -136,3 +136,26 @@ method verifyProof*(
     return ok(false)
 
   ok(true)
+
+type
+  # Issues reclaimable proofs and counts how many come back
+  ReclaimCountingSpamProtection* = ref object of SpamProtection
+    reclaimCount*: int
+
+proc newReclaimCountingSpamProtection*(): ReclaimCountingSpamProtection =
+  ReclaimCountingSpamProtection(proofSize: RateLimitProofSize)
+
+method generateProof*(
+    self: ReclaimCountingSpamProtection, bindingData: seq[byte]
+): Result[ProofResult, string] =
+  ok(ProofResult(proof: newSeq[byte](RateLimitProofSize), token: @[1.byte]))
+
+method verifyProof*(
+    self: ReclaimCountingSpamProtection,
+    encodedProofData: seq[byte],
+    bindingData: seq[byte],
+): Result[bool, string] =
+  ok(true)
+
+method reclaimProofToken*(self: ReclaimCountingSpamProtection, token: seq[byte]) =
+  self.reclaimCount += 1

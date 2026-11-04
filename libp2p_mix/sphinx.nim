@@ -21,6 +21,7 @@ type ProcessingStatus* = enum
   Intermediate
   Reply
   Duplicate
+  ReplayCacheFull
   InvalidMAC
 
 proc computeAlpha(
@@ -382,8 +383,13 @@ proc processSphinxPacket*(
     return ok(ProcessedSphinxPacket(status: InvalidMAC))
 
   # Atomically add the replay tag only after authentication succeeds.
-  if checkAndAddTag(tm, tag):
+  case tm.tryAddTag(tag)
+  of TagAlreadyPresent:
     return ok(ProcessedSphinxPacket(status: Duplicate))
+  of TagCacheFull:
+    return ok(ProcessedSphinxPacket(status: ReplayCacheFull))
+  of TagAdded:
+    discard
 
   # Derive AES key and IV for the header (beta)
   let
