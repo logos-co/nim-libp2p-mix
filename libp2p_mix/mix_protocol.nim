@@ -7,12 +7,13 @@ import
   ./[
     curve25519, delay, padding, mix_message, mix_node, sphinx, serialization,
     tag_manager, mix_metrics, exit_layer, multiaddr, exit_connection, spam_protection,
-    delay_strategy, pool, cover_traffic, surb_store,
+    delay_strategy, pool, cover_traffic, surb_store, key_rotation,
   ]
 import libp2p/protocols/protocol
 import libp2p/stream/[connection, lpstream]
 import libp2p/[switch, multicodec, peerinfo, varint]
 import libp2p/crypto/crypto
+import nimcrypto/utils # burnMem
 
 export pool
 export SurbStore, SurbSession
@@ -56,6 +57,7 @@ type MixProtocol* = ref object of LPProtocol
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
   coverTraffic*: Opt[CoverTraffic]
+  keyRing: Opt[MixKeyRing]
   ongoingMixMessages: seq[Future[void]]
     ## Tracks all in-flight handleMixMessages futures so they can be
     ## cancelled on stop and waited for during teardown.
@@ -231,6 +233,81 @@ proc verifyProof(
   trace "Spam protection proof verified successfully"
   return ok()
 
+proc ownMixPubKey(mixProto: MixProtocol): Result[FieldElement, string] {.raises: [].} =
+  ## The public key for this node's own hop in a packet built now.
+  let ring = mixProto.keyRing.valueOr:
+    return ok(mixProto.mixNodeInfo.mixPubKey)
+  let key = ring.currentPublicKey().valueOr:
+    return err("No mix key for the current key period")
+  ok(key)
+
+type PacketKey = object
+  ## The key a received packet was built for, found before its spam proof is
+  ## verified.
+  case rotating: bool
+  of true:
+    match: KeyMatch
+  of false:
+    sharedSecret: FieldElement
+
+proc checkPacketKey(
+    mixProto: MixProtocol, sphinxPacket: SphinxPacket
+): Opt[PacketKey] {.raises: [].} =
+  ## None when the packet is discarded; the reason is counted here.
+  let ring = mixProto.keyRing.valueOr:
+    var replay = checkReplay(
+      sphinxPacket, mixProto.mixNodeInfo.mixPrivKey, mixProto.tagManager
+    ).valueOr:
+      error "Replay check failed", err = error
+      mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
+      return Opt.none(PacketKey)
+    defer:
+      burnMem(replay.sharedSecret)
+    if replay.isReplay:
+      mix_messages_error.inc(labelValues = ["Intermediate/Exit", "DUPLICATE"])
+      return Opt.none(PacketKey)
+    return Opt.some(PacketKey(rotating: false, sharedSecret: replay.sharedSecret))
+
+  var match = matchKey(sphinxPacket, ring.candidates()).valueOr:
+    error "Replay check failed", err = error
+    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
+    return Opt.none(PacketKey)
+  defer:
+    match.wipe()
+  let reason =
+    case match.status
+    of KeyMatched:
+      return Opt.some(PacketKey(rotating: true, match: match))
+    of KeyReplayed:
+      "DUPLICATE"
+    of KeyTableFull:
+      "REPLAY_CACHE_FULL"
+    of NoKeyMatched:
+      "INVALID_MAC"
+  mix_messages_error.inc(labelValues = ["Intermediate/Exit", reason])
+  Opt.none(PacketKey)
+
+proc wipe(key: var PacketKey) {.raises: [].} =
+  ## Processing wipes the shared secret only when it runs; this covers every
+  ## other way out, such as a failed spam proof (Mix Key Rotation spec §4.3).
+  if key.rotating:
+    key.match.wipe()
+  else:
+    burnMem(key.sharedSecret)
+
+proc processWithKey(
+    mixProto: MixProtocol, sphinxPacket: SphinxPacket, key: var PacketKey
+): Result[ProcessedSphinxPacket, string] {.raises: [].} =
+  if key.rotating:
+    processSphinxPacket(sphinxPacket, key.match)
+  else:
+    processSphinxPacket(
+      sphinxPacket,
+      mixProto.mixNodeInfo.mixPrivKey,
+      mixProto.tagManager,
+      Opt.some(key.sharedSecret),
+    )
+
 method handleMixMessages*(
     mixProto: MixProtocol,
     fromPeerId: PeerId,
@@ -262,16 +339,10 @@ method handleMixMessages*(
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
     return
 
-  let (isReplay, sharedSecret) = checkReplay(
-    sphinxPacket, mixProto.mixNodeInfo.mixPrivKey, mixProto.tagManager
-  ).valueOr:
-    error "Replay check failed", err = error
-    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
+  var packetKey = mixProto.checkPacketKey(sphinxPacket).valueOr:
     return
-
-  if isReplay:
-    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "DUPLICATE"])
-    return
+  defer:
+    packetKey.wipe()
 
   # Step 3: Verify spam proof
   # Only done after replay check passes to avoid wasting cycles on duplicates
@@ -279,14 +350,15 @@ method handleMixMessages*(
     error "Spam protection verification failed", err = error
     return
 
+  # The matched key's grace window can end while the proof is verified.
+  if packetKey.rotating and packetKey.match.key.isDestroyed:
+    debug "Mix key expired before processing", period = packetKey.match.key.period
+    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "EXPIRED_KEY"])
+    return
+
   # Step 4: Full Sphinx processing
   # Reuse the shared secret computed in step 2 to avoid duplicate EC multiplication
-  let processedSP = processSphinxPacket(
-    sphinxPacket,
-    mixProto.mixNodeInfo.mixPrivKey,
-    mixProto.tagManager,
-    Opt.some(sharedSecret),
-  ).valueOr:
+  let processedSP = mixProto.processWithKey(sphinxPacket, packetKey).valueOr:
     error "Failed to process Sphinx packet", err = error
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
     return
@@ -597,8 +669,10 @@ method buildSurb*(
         )
       else:
         (
-          mixProto.mixNodeInfo.peerId, mixProto.mixNodeInfo.multiAddr,
-          mixProto.mixNodeInfo.mixPubKey, NoDelay,
+          mixProto.mixNodeInfo.peerId,
+          mixProto.mixNodeInfo.multiAddr,
+          ?mixProto.ownMixPubKey(),
+          NoDelay,
         ) # No delay for last hop
 
     publicKeys.add(mixPubKey)
@@ -1106,7 +1180,7 @@ proc buildCoverPacket*(
     mixProto.mixNodeInfo.peerId, mixProto.mixNodeInfo.multiAddr
   ).valueOr:
     return err("Failed to convert self multiaddress to bytes: " & error)
-  publicKeys.add(mixProto.mixNodeInfo.mixPubKey)
+  publicKeys.add(?mixProto.ownMixPubKey())
   hops.add(Hop.init(selfAddrBytes))
   delays.add(NoDelay)
 
@@ -1188,6 +1262,8 @@ proc sendCoverPacket*(
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
+  if mixProto.keyRing.isSome():
+    mixProto.keyRing.get().start()
   mixProto.coverTraffic.withValue(ct):
     await ct.start()
 
@@ -1197,6 +1273,9 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   mixProto.started = false
 
   await mixProto.tagManager.stop()
+
+  if mixProto.keyRing.isSome():
+    await mixProto.keyRing.get().stop()
 
   await mixProto.surbStore.stop()
   mixProto.surbStore.clear()
@@ -1219,12 +1298,17 @@ proc init*(
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
+    keyRing: Opt[MixKeyRing] = Opt.none(MixKeyRing),
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
   ##
   ## A nil `surbStore` gets a default one. Defaulting to nil rather than
   ## `SurbStore.new()` keeps the constructor out of the parameter list, so
   ## callers do not need `surb_store`'s `new` in scope.
+  ##
+  ## With a `keyRing` the node rotates its mix key (Mix Key Rotation spec), and
+  ## start and stop also start and stop the ring. Without one it uses
+  ## `mixNodeInfo.mixPrivKey` and `tagManager`.
   ##
   ## Mix node public keys should be populated via the nodePool after
   ## initialization using `mixProto.nodePool.add(mixPubInfo)`.
@@ -1253,6 +1337,7 @@ proc init*(
   mixProto.rng = switch.rng
   mixProto.nodePool = MixNodePool.new(switch.peerStore)
   mixProto.tagManager = tagManager
+  mixProto.keyRing = keyRing
   mixProto.surbStore = store
   mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
 
@@ -1335,6 +1420,7 @@ proc new*(
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
+    keyRing: Opt[MixKeyRing] = Opt.none(MixKeyRing),
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
   ##
@@ -1347,6 +1433,6 @@ proc new*(
   let mixProto = new(T)
   mixProto.init(
     mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic,
-    surbStore,
+    surbStore, keyRing,
   )
   mixProto

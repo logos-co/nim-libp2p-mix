@@ -348,8 +348,17 @@ proc checkReplay*(
 
   ok((isReplay: isTagSeen(tm, tag), sharedSecret: s))
 
+proc deriveKey(label: string, sBytes: seq[byte]): seq[byte] {.raises: [].} =
+  ## KDF over label and the shared secret, wiping the input that holds the secret.
+  var material = deriveKeyMaterial(label, sBytes)
+  defer:
+    burnMem(material)
+  material.kdf()
+
 proc isMacValid(beta, gamma, sBytes: seq[byte]): bool =
-  let mac_key = deriveKeyMaterial(MacKeyLabel, sBytes).kdf()
+  var mac_key = deriveKey(MacKeyLabel, sBytes)
+  defer:
+    burnMem(mac_key)
 
   let expectedMac = hmac(mac_key, beta)
   # CT.isEqual compares only the shared prefix, so reject unequal lengths first.
@@ -358,15 +367,20 @@ proc isMacValid(beta, gamma, sBytes: seq[byte]): bool =
 proc peelLayer(
     alpha, beta, payload: seq[byte], alphaFE: FieldElement, sBytes: seq[byte]
 ): Result[ProcessedSphinxPacket, string] =
-  ## Remove one layer of an authenticated packet.
+  ## Remove one layer of an authenticated packet, wiping the keys derived from
+  ## the shared secret (Mix Key Rotation spec §4.3).
   # Derive AES key and IV for the header (beta)
-  let
-    beta_aes_key = deriveKeyMaterial(AesKeyLabel, sBytes).kdf()
-    beta_iv = deriveKeyMaterial(IvLabel, sBytes).kdf()
+  var
+    beta_aes_key = deriveKey(AesKeyLabel, sBytes)
+    beta_iv = deriveKey(IvLabel, sBytes)
 
   # Decrypt one LIONESS layer of the payload. delta_key = KDF("payload_enc_key", s).
   # `var` forces a real mutable copy, so the shared input payload is not mutated.
-  let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, sBytes)
+  var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, sBytes)
+  defer:
+    burnMem(beta_aes_key)
+    burnMem(beta_iv)
+    burnMem(delta_key)
   var delta_prime = payload
   var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
     return err("LIONESS init error: " & $error)
@@ -409,10 +423,17 @@ proc peelLayer(
     let (address, delay, gamma_prime, beta_prime) = routingInfo.getRoutingInfo()
 
     # Compute alpha
-    let blinder = bytesToFieldElement(sha256_hash(alpha & sBytes)).valueOr:
+    var blinderInput = alpha & sBytes
+    defer:
+      burnMem(blinderInput)
+    var blinder = bytesToFieldElement(sha256_hash(blinderInput)).valueOr:
       return err("Error in bytes to field element conversion: " & error)
+    var scalars = [blinder]
+    defer:
+      burnMem(blinder)
+      burnMem(scalars)
 
-    let alpha_prime = multiplyPointWithScalars(alphaFE, [blinder])
+    let alpha_prime = multiplyPointWithScalars(alphaFE, scalars)
 
     # Serialize sphinx packet
     let sphinxPkt = SphinxPacket.init(
@@ -510,14 +531,16 @@ proc matchKey*(
       continue
     var secret = checkSharedSecret(?key.multiply(alphaFE)).valueOr:
       return err(error)
+    var sBytes = fieldElementToBytes(secret)
     defer:
       burnMem(secret)
+      burnMem(sBytes)
 
     # Run every candidate, even after one matches, so processing time does not
     # reveal which key the packet was built for.
     let
       seen = key.isTagSeen(computeTag(secret))
-      valid = isMacValid(beta, gamma, fieldElementToBytes(secret))
+      valid = isMacValid(beta, gamma, sBytes)
 
     if match.status == NoKeyMatched:
       if seen:
@@ -529,6 +552,13 @@ proc matchKey*(
           else:
             KeyMatch(status: KeyMatched, key: key, sharedSecret: secret)
   ok(match)
+
+proc wipe*(match: var KeyMatch) {.raises: [].} =
+  ## Wipe the shared secret of a match that is not processed, and reset it to
+  ## NoKeyMatched (Mix Key Rotation spec §4.3).
+  if match.status == KeyMatched:
+    burnMem(match.sharedSecret)
+  match = KeyMatch(status: NoKeyMatched)
 
 proc processSphinxPacket*(
     sphinxPacket: SphinxPacket, match: var KeyMatch
@@ -554,7 +584,9 @@ proc processSphinxPacket*(
   if key.isDestroyed:
     return err("Destroyed mix key: period " & $key.period)
 
-  let sBytes = fieldElementToBytes(match.sharedSecret)
+  var sBytes = fieldElementToBytes(match.sharedSecret)
+  defer:
+    burnMem(sBytes)
 
   # Rechecked so that a match applied to another packet stores no tag.
   if not isMacValid(beta, gamma, sBytes):
