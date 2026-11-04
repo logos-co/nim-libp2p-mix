@@ -10,7 +10,7 @@ from padding import DataSize
 logScope:
   topics = "entry_connection"
 
-const DefaultSurbs = uint8(4)
+const DefaultSurbs = uint8(1)
 
 const DefaultReplyTimeout = chronos.seconds(30)
   ## How long `readOnce` waits for a mix reply before giving up.

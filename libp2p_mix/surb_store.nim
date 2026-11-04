@@ -40,8 +40,8 @@ type
     ## All SURBs minted for a single send.
     ##
     ## `expiresAt` is stamped here rather than per credential, so a partially
-    ## expired group is unrepresentable. The exit replies via *every* SURB in
-    ## the group, so N replies race and the first must invalidate the rest.
+    ## expired group is unrepresentable. Each reply consumes its own block;
+    ## closing the send releases any remaining members.
     members: HashSet[SURBIdentifier]
     expiresAt: Moment
 
@@ -162,6 +162,13 @@ proc get*(
       return Opt.none(ConnCreds)
     return Opt.some(c[])
   Opt.none(ConnCreds)
+
+proc release*(s: SurbStore, id: SURBIdentifier) =
+  ## Consumes one reply block without invalidating other replies for the send.
+  s.creds.withValue(id, c):
+    c.igroup.members.excl(id)
+  s.creds.del(id)
+  mix_surb_creds_active.set(s.creds.len.int64)
 
 proc release*(s: SurbStore, igroup: SURBIdentifierGroup) =
   ## Idempotent, so releasing twice or after expiry is safe.

@@ -51,8 +51,7 @@ suite "SURB Store":
       check store.add(makeId(i), makeCreds(igroup), base).isOk()
     check store.len == 4
 
-    # Releasing via one member's group drops all siblings: the exit replies
-    # through every SURB, so the first reply must invalidate the rest.
+    # Closing a send releases all blocks that have not received a reply.
     let creds = store.get(makeId(0), base).valueOr:
       raiseAssert "just added"
     store.release(creds.igroup)
@@ -60,6 +59,27 @@ suite "SURB Store":
     check store.len == 0
     for i in 0 .. 3:
       check store.get(makeId(i), base).isNone()
+
+  test "consuming a reply preserves sibling blocks and rejects reuse":
+    let group = store.newGroup(base)
+    for i in 0 .. 2:
+      check store.add(makeId(i), makeCreds(group), base).isOk()
+
+    store.release(makeId(0))
+    check store.get(makeId(0), base).isNone()
+    check store.get(makeId(1), base).isSome()
+    check store.get(makeId(2), base).isSome()
+    check store.len == 2
+
+    store.release(makeId(0))
+    check store.len == 2
+    store.release(makeId(1))
+    check store.get(makeId(1), base).isNone()
+    check store.get(makeId(2), base).isSome()
+
+    store.release(group)
+    check store.len == 0
+    check store.get(makeId(2), base).isNone()
 
   test "release is idempotent":
     let igroup = store.newGroup(base)

@@ -134,8 +134,28 @@ suite "Mix Protocol - Node Failures":
     checkUntilTimeout:
       mock.receivedPacketCount == 2
 
-    # The first reply released the whole group, so the second found nothing —
-    # group-atomic release, end to end.
+    # Each arrived reply consumes its own credential, even though the legacy
+    # stream adapter exposes only the first response.
+    check mock.surbCredsLen == 0
+
+  asyncTest "native send queue receives one response per SURB":
+    let (nodes, mock) = await setupMixNodesWithMock(
+      10, destReadBehavior = Opt.some((codec: PingCodec, callback: readExactly(32)))
+    )
+    let (destNode, pingProto) = await setupDestNode(Ping.new(rng = rng()))
+    await startNodes(nodes)
+    defer:
+      await stopDestNode(destNode)
+      await stopNodes(nodes)
+
+    let incoming = newAsyncQueue[seq[byte]]()
+    let payload = newSeqWith(32, byte(42))
+    let sent = await mock.anonymizeLocalProtocolSend(
+      incoming, payload, pingProto.codec, destNode.toMixDestination(), byte(2)
+    )
+    check sent.isOk()
+    check (await incoming.get().wait(10.seconds)) == payload
+    check (await incoming.get().wait(10.seconds)) == payload
     check mock.surbCredsLen == 0
 
   asyncTest "sender times out when destination is unreachable":
@@ -226,7 +246,7 @@ suite "Mix Protocol - Node Failures":
 
     check sender.surbCredsLen == 0
 
-  asyncTest "closing the connection releases credentials, and a second write is refused":
+  asyncTest "default reply connection uses one SURB, releases on close, and refuses a second write":
     ## Prompt reclamation well inside the store TTL, plus the single-exchange
     ## guard — both properties of one live connection, so one setup covers them.
     const TestCodec = "/silent-2/test/1.0.0"
@@ -249,7 +269,7 @@ suite "Mix Protocol - Node Failures":
       .toConnection(
         destNode.toMixDestination(),
         TestCodec,
-        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(3))),
+        MixParameters(expectReply: Opt.some(true)),
       )
       .expect("could not build connection")
     defer:
@@ -257,7 +277,7 @@ suite "Mix Protocol - Node Failures":
 
     await conn.writeLp(@[1.byte, 2, 3])
     discard await destProto.receivedMessages.get().wait(10.seconds)
-    check sender.surbCredsLen == 3
+    check sender.surbCredsLen == 1
 
     # A second reply would land in a queue nobody drains, so it is refused.
     expect LPStreamError:
