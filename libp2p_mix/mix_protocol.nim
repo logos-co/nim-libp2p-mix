@@ -968,9 +968,15 @@ proc sendInternal(
   ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
   ## promptly when its connection closes.
   mix_messages_recvd.inc(labelValues = ["Entry"])
-  let capacity = getMaxMessageSizeForCodec(codec, numSurbs).valueOr:
+  let envelopeSize =
+    if useLegacySurbEnvelope:
+      SurbLenSize + int(numSurbs) * SurbSize
+    else:
+      0
+  let capacity = DataSize - serializedLen(codec, 0) - envelopeSize
+  if capacity < 0:
     mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
-    return err("failure when calling getMaxMessageSizeForCodec: " & error)
+    return err("cannot encode messages for this codec")
   if msg.len > capacity:
     mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
     return err(
