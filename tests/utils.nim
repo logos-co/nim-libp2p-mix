@@ -40,6 +40,7 @@ proc setupMixNode[T: MixProtocol](
     destReadBehavior: Opt[tuple[codec: string, callback: DestReadBehavior]],
     spamProtectionRateLimit: Opt[int],
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
+    hopBackoff: Duration = DefaultHopBackoff,
 ): T =
   let spamProtection =
     if spamProtectionRateLimit.isSome():
@@ -59,6 +60,7 @@ proc setupMixNode[T: MixProtocol](
     switch,
     spamProtection = spamProtection,
     delayStrategy = Opt.some(actualDelayStrategy),
+    hopBackoff = hopBackoff,
   )
 
   if destReadBehavior.isSome():
@@ -73,6 +75,7 @@ proc setupMixNodes*(
     destReadBehavior = Opt.none(tuple[codec: string, callback: DestReadBehavior]),
     spamProtectionRateLimit = Opt.none(int),
     delayStrategy = Opt.none(DelayStrategy),
+    hopBackoff: Duration = DefaultHopBackoff,
 ): Future[seq[MixProtocol]] {.async.} =
   var nodes: seq[MixProtocol] = @[]
   let nodeInfos = MixNodeInfo.generateRandomMany(numNodes, rng())
@@ -80,7 +83,8 @@ proc setupMixNodes*(
     let switch =
       createSwitch(mixNodeInfo.multiAddr, Opt.some(mixNodeInfo.libp2pPrivKey))
     let mixNode = setupMixNode[MixProtocol](
-      mixNodeInfo, switch, destReadBehavior, spamProtectionRateLimit, delayStrategy
+      mixNodeInfo, switch, destReadBehavior, spamProtectionRateLimit, delayStrategy,
+      hopBackoff,
     )
     mixNode.nodePool.add(nodeInfos.includeAllExcept(mixNodeInfo))
     nodes.add(mixNode)
