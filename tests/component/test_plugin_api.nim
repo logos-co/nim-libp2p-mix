@@ -8,6 +8,7 @@ import libp2p/[protocols/ping, peerid, switch, builders]
 import libp2p_mix
 import libp2p_mix/mix_protocol
 import libp2p_mix/pool
+import libp2p_mix/serialization
 
 import ../tools/[lifecycle, unittest, crypto]
 import ../utils
@@ -69,6 +70,20 @@ suite "Mix Protocol - Plug-in API":
     )
     check (await deliveries.get().wait(2.seconds)).payload == explicitPayload
     check sender.nodePool.get(destinationId).isNone
+
+    # Raw service messages have no legacy SURB-count prefix. Exercise the
+    # extra byte as well as rejection beyond the actual message capacity.
+    let rawCapacity = getMaxMessageSizeForCodec(fallbackProto.codec).get() + SurbLenSize
+    let fullPayload = newSeq[byte](rawCapacity)
+    (await sender.send(destinationInfo, fallbackProto.codec, fullPayload)).expect(
+      "could not send a full-capacity service payload"
+    )
+    check (await deliveries.get().wait(2.seconds)).payload == fullPayload
+    check (
+      await sender.send(
+        destinationInfo, fallbackProto.codec, newSeq[byte](rawCapacity + 1)
+      )
+    ).isErr
     sender.nodePool.add(destinationInfo)
 
     destination.unregisterMixDeliveryHandler(fallbackProto.codec)
