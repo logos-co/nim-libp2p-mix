@@ -4,12 +4,20 @@
 {.used.}
 
 import std/sequtils
-import chronos, results
+import chronos, metrics, results
 import libp2p/[switch, peerid, multiaddress]
 import libp2p_mix
-import libp2p_mix/mix_protocol
+import libp2p_mix/[mix_protocol, mix_metrics]
 import ../tools/[lifecycle, unittest, crypto]
 import ../utils
+
+proc errorCount(role, reason: string): float64 =
+  ## The count of `mix_messages_error` for `role` and `reason`. 0 before the
+  ## label exists.
+  try:
+    mix_messages_error.value([role, reason])
+  except KeyError:
+    0.0
 
 const ReplyParams = MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8))
 
@@ -80,9 +88,13 @@ suite "Hop stream cache":
     await nodes[0].stop()
     expect CancelledError:
       discard await sending.wait(2.seconds)
+    # A refusal by the stop is not a failure of the hop, so it counts nothing.
+    let errorsBefore = errorCount("Cover", "SEND_FAILED")
     let refused = await nodes[0].sendCoverPacket(hopPeerId, hopAddr, @[1.byte])
-    check refused.isErr
-    check connections.len == 1
+    check:
+      refused.isErr
+      errorCount("Cover", "SEND_FAILED") == errorsBefore
+      connections.len == 1
 
     await nodes[0].start()
     let again = nodes[0].sendCoverPacket(hopPeerId, hopAddr, @[1.byte])
