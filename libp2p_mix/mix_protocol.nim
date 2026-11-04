@@ -143,6 +143,10 @@ proc getConn(
   if dial.isNil:
     dial = mixProto.startDial(pid, addrs, codecs)
   await dial.join()
+  if dial.cancelled():
+    # Only `stop` cancels a shared dial. A caller cancelled in `join` raises
+    # before this line.
+    raise newException(DialFailedError, "mix protocol stopped during the dial")
   try:
     return dial.read()
   except FuturePendingError:
