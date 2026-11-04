@@ -51,150 +51,148 @@ proc firstHop(nodes: seq[MixProtocol], surb: SURB): MixProtocol =
   let (peerId, _) = surb.hop.get().bytesToMultiAddr().expect("valid SURB hop")
   nodes.filterIt(it.switch.peerInfo.peerId == peerId)[0]
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  proc requestSurb(
-      nodes: seq[MixProtocol]
-  ): Future[tuple[surb: SURB, conn: Connection]] {.async.} =
-    ## Starts the nodes and sends one request from the first node to the last,
-    ## returning the SURB that the last node received with it.
-    let surbs = newAsyncQueue[SURB]()
-    nodes[^1].switch.mount(
-      LPProtocol.new(
-        codecs = @[TestCodec],
-        handler = proc(
-            conn: Connection, proto: string
-        ) {.async: (raises: [CancelledError]).} =
-          try:
-            discard await conn.readLp(1024)
-            await surbs.put(MixExitConnection(conn).takeSURBs()[0])
-          except LPStreamError as exc:
-            raiseAssert exc.msg
-        ,
-      )
+proc requestSurb(
+    nodes: seq[MixProtocol]
+): Future[tuple[surb: SURB, conn: Connection]] {.async.} =
+  ## Starts the nodes and sends one request from the first node to the last,
+  ## returning the SURB that the last node received with it.
+  let surbs = newAsyncQueue[SURB]()
+  nodes[^1].switch.mount(
+    LPProtocol.new(
+      codecs = @[TestCodec],
+      handler = proc(
+          conn: Connection, proto: string
+      ) {.async: (raises: [CancelledError]).} =
+        try:
+          discard await conn.readLp(1024)
+          await surbs.put(MixExitConnection(conn).takeSURBs()[0])
+        except LPStreamError as exc:
+          raiseAssert exc.msg
+      ,
     )
-    await startNodes(nodes)
+  )
+  await startNodes(nodes)
 
-    let conn = nodes[0]
-      .toConnection(
-        MixDestination.exitNode(nodes[^1].switch.peerInfo.peerId),
-        TestCodec,
-        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
-      )
-      .expect("could not build connection")
-    await conn.writeLp(@[1.byte])
-    return (await surbs.get().wait(5.seconds), conn)
-
-  suite "Slot refund - SURB reply":
-    asyncTeardown:
-      checkTrackers()
-
-    asyncTest "failed first dial refunds the slot and reclaims the proof":
-      let (nodes, spam) = setupCountingNodes(10)
-      let (surb, conn) = await nodes.requestSurb()
-      defer:
-        await conn.close()
-        await stopNodes(nodes)
-      let ct = nodes[^1].attachCover()
-
-      await nodes.firstHop(surb).switch.stop()
-      let reclaimedBefore = spam[^1].reclaimCount
-
-      check (await nodes[^1].sendSurbReply(surb, ReplyPayload)).isErr
-      check ct.slotPool.nonCoverClaimed == 0
-      check spam[^1].reclaimCount == reclaimedBefore + 1
-
-    asyncTest "failure after a write attempt keeps the slot and the proof spent":
-      ## The next hop may hold a packet whose write reported an error, so
-      ## reissuing its messageId would risk an RLN double-signal.
-      let (nodes, spam) = setupCountingNodes(10)
-      let (surb, conn) = await nodes.requestSurb()
-      defer:
-        await conn.close()
-        await stopNodes(nodes)
-      let ct = nodes[^1].attachCover()
-
-      # A successful reply caches the connection, so the next send writes to it
-      check (await nodes[^1].sendSurbReply(surb, ReplyPayload)).isOk
-      await nodes.firstHop(surb).switch.stop()
-      await sleepAsync(300.milliseconds)
-      let reclaimedBefore = spam[^1].reclaimCount
-
-      check (await nodes[^1].sendSurbReply(surb, ReplyPayload)).isErr
-      check ct.slotPool.nonCoverClaimed == 2
-      check spam[^1].reclaimCount == reclaimedBefore
-
-    asyncTest "failed reply claimed in an earlier epoch leaves the new epoch alone":
-      let (nodes, _) = setupCountingNodes(10)
-      let (surb, conn) = await nodes.requestSurb()
-      defer:
-        await conn.close()
-        await stopNodes(nodes)
-      let ct = nodes[^1].attachCover()
-
-      await nodes.firstHop(surb).switch.stop()
-
-      let reply = nodes[^1].sendSurbReply(surb, ReplyPayload)
-      check ct.slotPool.nonCoverClaimed == 1
-
-      ct.onEpochChange(2)
-      discard ct.slotPool.claimSlot()
-
-      check (await reply).isErr
-      check ct.slotPool.nonCoverClaimed == 1
-
-when defined(libp2p_mix_experimental_exit_is_dest):
-  proc sendToExit(nodes: seq[MixProtocol]) {.async.} =
-    ## With 5 nodes the path is two of nodes[1 .. 3] in random order, then the
-    ## exit nodes[4], so the second of those two forwards to the exit.
-    let res = await nodes[0].anonymizeLocalProtocolSend(
-      newAsyncQueue[seq[byte]](),
-      @[1.byte],
+  let conn = nodes[0]
+    .toConnection(
+      MixDestination.exitNode(nodes[^1].switch.peerInfo.peerId),
       TestCodec,
-      MixDestination.exitNode(nodes[4].switch.peerInfo.peerId),
-      0,
+      MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
     )
-    check res.isOk
+    .expect("could not build connection")
+  await conn.writeLp(@[1.byte])
+  return (await surbs.get().wait(5.seconds), conn)
 
-  suite "Slot refund - forward":
-    asyncTeardown:
-      checkTrackers()
+suite "Slot refund - SURB reply":
+  asyncTeardown:
+    checkTrackers()
 
-    asyncTest "failed first dial refunds the slot and reclaims the proof":
-      let (nodes, spam) = setupCountingNodes(5)
-      await startNodes(nodes)
-      defer:
-        await stopNodes(nodes)
-      let hops = nodes[1 .. 3].mapIt(it.attachCover())
+  asyncTest "failed first dial refunds the slot and reclaims the proof":
+    let (nodes, spam) = setupCountingNodes(10)
+    let (surb, conn) = await nodes.requestSurb()
+    defer:
+      await conn.close()
+      await stopNodes(nodes)
+    let ct = nodes[^1].attachCover()
 
-      await nodes[4].switch.stop()
+    await nodes.firstHop(surb).switch.stop()
+    let reclaimedBefore = spam[^1].reclaimCount
+
+    check (await nodes[^1].sendSurbReply(surb, ReplyPayload)).isErr
+    check ct.slotPool.nonCoverClaimed == 0
+    check spam[^1].reclaimCount == reclaimedBefore + 1
+
+  asyncTest "failure after a write attempt keeps the slot and the proof spent":
+    ## The next hop may hold a packet whose write reported an error, so
+    ## reissuing its messageId would risk an RLN double-signal.
+    let (nodes, spam) = setupCountingNodes(10)
+    let (surb, conn) = await nodes.requestSurb()
+    defer:
+      await conn.close()
+      await stopNodes(nodes)
+    let ct = nodes[^1].attachCover()
+
+    # A successful reply caches the connection, so the next send writes to it
+    check (await nodes[^1].sendSurbReply(surb, ReplyPayload)).isOk
+    await nodes.firstHop(surb).switch.stop()
+    await sleepAsync(300.milliseconds)
+    let reclaimedBefore = spam[^1].reclaimCount
+
+    check (await nodes[^1].sendSurbReply(surb, ReplyPayload)).isErr
+    check ct.slotPool.nonCoverClaimed == 2
+    check spam[^1].reclaimCount == reclaimedBefore
+
+  asyncTest "failed reply claimed in an earlier epoch leaves the new epoch alone":
+    let (nodes, _) = setupCountingNodes(10)
+    let (surb, conn) = await nodes.requestSurb()
+    defer:
+      await conn.close()
+      await stopNodes(nodes)
+    let ct = nodes[^1].attachCover()
+
+    await nodes.firstHop(surb).switch.stop()
+
+    let reply = nodes[^1].sendSurbReply(surb, ReplyPayload)
+    check ct.slotPool.nonCoverClaimed == 1
+
+    ct.onEpochChange(2)
+    discard ct.slotPool.claimSlot()
+
+    check (await reply).isErr
+    check ct.slotPool.nonCoverClaimed == 1
+
+proc sendToExit(nodes: seq[MixProtocol]) {.async.} =
+  ## With 5 nodes the path is two of nodes[1 .. 3] in random order, then the
+  ## exit nodes[4], so the second of those two forwards to the exit.
+  let res = await nodes[0].anonymizeLocalProtocolSend(
+    newAsyncQueue[seq[byte]](),
+    @[1.byte],
+    TestCodec,
+    MixDestination.exitNode(nodes[4].switch.peerInfo.peerId),
+    0,
+  )
+  check res.isOk
+
+suite "Slot refund - forward":
+  asyncTeardown:
+    checkTrackers()
+
+  asyncTest "failed first dial refunds the slot and reclaims the proof":
+    let (nodes, spam) = setupCountingNodes(5)
+    await startNodes(nodes)
+    defer:
+      await stopNodes(nodes)
+    let hops = nodes[1 .. 3].mapIt(it.attachCover())
+
+    await nodes[4].switch.stop()
+    await nodes.sendToExit()
+    await sleepAsync(300.milliseconds)
+
+    # The first hop's forward went out; the second hop's dial failed
+    check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 1
+    check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
+
+  asyncTest "failure after a write attempt keeps the slot and the proof spent":
+    let (nodes, spam) = setupCountingNodes(5)
+    await startNodes(nodes)
+    defer:
+      await stopNodes(nodes)
+
+    # Any of the three may go second, so send until each has almost certainly
+    # cached a connection to the exit
+    for _ in 0 ..< 40:
       await nodes.sendToExit()
-      await sleepAsync(300.milliseconds)
+    await sleepAsync(300.milliseconds)
 
-      # The first hop's forward went out; the second hop's dial failed
-      check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 1
-      check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
+    let hops = nodes[1 .. 3].mapIt(it.attachCover())
 
-    asyncTest "failure after a write attempt keeps the slot and the proof spent":
-      let (nodes, spam) = setupCountingNodes(5)
-      await startNodes(nodes)
-      defer:
-        await stopNodes(nodes)
+    await nodes[4].switch.stop()
+    await sleepAsync(300.milliseconds)
+    await nodes.sendToExit()
+    await sleepAsync(300.milliseconds)
 
-      # Any of the three may go second, so send until each has almost certainly
-      # cached a connection to the exit
-      for _ in 0 ..< 40:
-        await nodes.sendToExit()
-      await sleepAsync(300.milliseconds)
-
-      let hops = nodes[1 .. 3].mapIt(it.attachCover())
-
-      await nodes[4].switch.stop()
-      await sleepAsync(300.milliseconds)
-      await nodes.sendToExit()
-      await sleepAsync(300.milliseconds)
-
-      check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 2
-      check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 0
+    check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 2
+    check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 0
 
 suite "Slot refund - local send":
   asyncTeardown:

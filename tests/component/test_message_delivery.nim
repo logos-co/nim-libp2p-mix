@@ -150,63 +150,62 @@ suite "Mix Protocol - Message Delivery":
 
     check response != 0.seconds
 
-    asyncTest "deferred SURB reply, exit == destination":
-      const codec = "/mix/test/deferred-surb/1.0.0"
-      let nodes = await setupMixNodes(
-        10, destReadBehavior = Opt.some((codec: codec, callback: readLp(1024)))
+  asyncTest "deferred SURB reply, exit == destination":
+    const codec = "/mix/test/deferred-surb/1.0.0"
+    let nodes = await setupMixNodes(
+      10, destReadBehavior = Opt.some((codec: codec, callback: readLp(1024)))
+    )
+    let destNode = nodes[^1]
+    let claimedSurbs = newAsyncQueue[SURB]()
+    destNode.switch.mount(
+      LPProtocol.new(
+        codecs = @[codec],
+        handler = proc(
+            conn: Connection, proto: string
+        ) {.async: (raises: [CancelledError]).} =
+          try:
+            discard await conn.readLp(1024)
+            let surbs = MixExitConnection(conn).takeSURBs()
+            check surbs.len == 1
+            await claimedSurbs.put(surbs[0])
+          except LPStreamError:
+            check false
+        ,
       )
-      let destNode = nodes[^1]
-      let claimedSurbs = newAsyncQueue[SURB]()
-      destNode.switch.mount(
-        LPProtocol.new(
-          codecs = @[codec],
-          handler = proc(
-              conn: Connection, proto: string
-          ) {.async: (raises: [CancelledError]).} =
-            try:
-              discard await conn.readLp(1024)
-              let surbs = MixExitConnection(conn).takeSURBs()
-              check surbs.len == 1
-              await claimedSurbs.put(surbs[0])
-            except LPStreamError:
-              check false
-          ,
-        )
+    )
+    startAndDeferStop(nodes)
+
+    let conn = nodes[0]
+      .toConnection(
+        MixDestination.exitNode(destNode.switch.peerInfo.peerId),
+        codec,
+        MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
       )
-      startAndDeferStop(nodes)
+      .expect("could not build connection")
+    defer:
+      await conn.close()
 
-      let conn = nodes[0]
-        .toConnection(
-          MixDestination.exitNode(destNode.switch.peerInfo.peerId),
-          codec,
-          MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(byte(1))),
-        )
-        .expect("could not build connection")
-      defer:
-        await conn.close()
+    await conn.writeLp(@[1.byte])
+    let surb = await claimedSurbs.get().wait(2.seconds)
+    let payload = @[2.byte, 3, 4]
+    let prefix = PB.toBytes(payload.len.uint64)
+    var reply = newSeqUninit[byte](prefix.len + payload.len)
+    reply[0 ..< prefix.len] = prefix.toOpenArray()
+    reply[prefix.len ..< reply.len] = payload
 
-      await conn.writeLp(@[1.byte])
-      let surb = await claimedSurbs.get().wait(2.seconds)
-      let payload = @[2.byte, 3, 4]
-      let prefix = PB.toBytes(payload.len.uint64)
-      var reply = newSeqUninit[byte](prefix.len + payload.len)
-      reply[0 ..< prefix.len] = prefix.toOpenArray()
-      reply[prefix.len ..< reply.len] = payload
+    let ct = ConstantRateCoverTraffic.new(totalSlots = 1, useInternalEpochTimer = false)
+    ct.onEpochChange(1)
+    destNode.coverTraffic = Opt.some(CoverTraffic(ct))
+    discard ct.slotPool.claimSlot()
 
-      let ct =
-        ConstantRateCoverTraffic.new(totalSlots = 1, useInternalEpochTimer = false)
-      ct.onEpochChange(1)
-      destNode.coverTraffic = Opt.some(CoverTraffic(ct))
-      discard ct.slotPool.claimSlot()
+    let blocked = await destNode.sendSurbReply(surb, reply)
+    check blocked.isErr
+    check blocked.error == "No slots available in current epoch"
 
-      let blocked = await destNode.sendSurbReply(surb, reply)
-      check blocked.isErr
-      check blocked.error == "No slots available in current epoch"
-
-      ct.onEpochChange(2)
-      check (await destNode.sendSurbReply(surb, reply)).isOk
-      check ct.slotPool.nonCoverClaimed == 1
-      check (await conn.readLp(1024)) == payload
+    ct.onEpochChange(2)
+    check (await destNode.sendSurbReply(surb, reply)).isOk
+    check ct.slotPool.nonCoverClaimed == 1
+    check (await conn.readLp(1024)) == payload
 
   asyncTest "length-prefixed protocol - verify readLp fix":
     ## This test verifies the fix for the length prefix bug where responses
