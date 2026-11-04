@@ -6,6 +6,7 @@
 import std/tables
 from std/times import Time, toUnix, nanosecond, initTime
 import chronos
+import libp2p/protobuf/minprotobuf
 import libp2p_mix/[curve25519, key_rotation, tag_manager]
 import ./tools/[unittest, crypto]
 
@@ -48,6 +49,12 @@ suite "Key Schedule":
       KeySchedule.init(periodDuration = chronos.minutes(16)).isErr
       KeySchedule.init(maxClockOffset = chronos.seconds(-1)).isErr
       KeySchedule.init(maxTransit = chronos.seconds(-1)).isErr
+      # periodDuration <= 2 * earlyWindow
+      KeySchedule.init(
+        periodDuration = chronos.minutes(12),
+        earlyWindow = chronos.minutes(6),
+        graceWindow = chronos.minutes(3),
+      ).isErr
 
   test "init accepts windows at the constraint boundaries":
     check:
@@ -57,6 +64,11 @@ suite "Key Schedule":
         graceWindow = chronos.minutes(2) + chronos.seconds(30) + 1.nanoseconds
       ).isOk
       KeySchedule.init(periodDuration = chronos.minutes(16) + 1.nanoseconds).isOk
+      KeySchedule.init(
+        periodDuration = chronos.minutes(12) + 1.nanoseconds,
+        earlyWindow = chronos.minutes(6),
+        graceWindow = chronos.minutes(3),
+      ).isOk
 
   test "keyPeriod changes exactly at periodStart":
     let schedule = KeySchedule.init().expect("default schedule")
@@ -186,6 +198,14 @@ suite "Mix Key Ring":
       restarted.publicKey(TestPeriod + 2).isSome
       restarted.candidates(mid(TestPeriod + 1)).len == 0
       restarted.candidates(mid(TestPeriod + 2)).periods == @[TestPeriod + 2]
+
+  test "currentPublicKey is the key for the current key period":
+    ring.update(mid(TestPeriod))
+    check:
+      ring.currentPublicKey(mid(TestPeriod)) == ring.publicKey(TestPeriod)
+      ring.currentPublicKey(
+        schedule.timeAt(TestPeriod, schedule.periodDuration - schedule.earlyWindow)
+      ) == ring.publicKey(TestPeriod)
 
   test "keys are generated independently":
     ring.update(mid(TestPeriod))
@@ -387,3 +407,114 @@ suite "Replay Table":
       key.isTagSeen(makeTag(1))
       key.isTagSeen(makeTag(2))
       not key.isTagSeen(makeTag(3))
+
+suite "Key Entries Encoding":
+  var entries: MixKeyEntries
+
+  setup:
+    let
+      (_, key) = generateKeyPair().expect("generate keypair error")
+      (_, nextKey) = generateKeyPair().expect("generate keypair error")
+    entries = MixKeyEntries(keyPeriod: TestPeriod, key: key, nextKey: nextKey)
+
+  test "entries round-trip through encode and decode":
+    check MixKeyEntries.decode(entries.encode()).expect("decode") == entries
+
+  test "encoded entries take at most 79 bytes":
+    entries.keyPeriod = high(KeyPeriod)
+    check entries.encode().len == 79
+
+  test "decode rejects a single unrotated key":
+    check MixKeyEntries.decode(newSeq[byte](FieldElementSize)).isErr
+
+  test "decode rejects keys that are not 32 bytes":
+    var pb = initProtoBuffer()
+    pb.write(1, TestPeriod)
+    pb.write(2, newSeq[byte](FieldElementSize - 1))
+    pb.write(3, newSeq[byte](FieldElementSize))
+    pb.finish()
+    check MixKeyEntries.decode(pb.buffer).isErr
+
+  test "decode rejects entries without a next key":
+    var pb = initProtoBuffer()
+    pb.write(1, TestPeriod)
+    pb.write(2, newSeq[byte](FieldElementSize))
+    pb.finish()
+    check MixKeyEntries.decode(pb.buffer).isErr
+
+suite "Published Key Entries":
+  var
+    schedule: KeySchedule
+    ring: MixKeyRing
+    changes: ref seq[Opt[MixKeyEntries]]
+
+  setup:
+    schedule = KeySchedule.init().expect("default schedule")
+    ring = MixKeyRing.new(
+      schedule, rng(), replayTableCapacity = 16, publishedThrough = Opt.none(KeyPeriod)
+    )
+    changes = new seq[Opt[MixKeyEntries]]
+    let recorded = changes
+    ring.setEntriesHandler(
+      proc(entries: Opt[MixKeyEntries]) {.gcsafe, raises: [].} =
+        recorded[].add(entries)
+    )
+
+  template mid(period: KeyPeriod): Time =
+    schedule.timeAt(period, schedule.periodDuration div 2)
+
+  template entriesFor(keyRing: MixKeyRing, period: KeyPeriod): MixKeyEntries =
+    MixKeyEntries(
+      keyPeriod: period,
+      key: keyRing.publicKey(period).get(),
+      nextKey: keyRing.publicKey(period + 1).get(),
+    )
+
+  test "a fresh ring publishes its current and next keys at once":
+    ring.update(mid(TestPeriod))
+    let expected = Opt.some(ring.entriesFor(TestPeriod))
+    check:
+      ring.publishedEntries == expected
+      changes[] == @[expected]
+
+  test "entries change between start + earlyWindow and start + periodDuration / 2":
+    ring.update(mid(TestPeriod))
+    let first = Opt.some(ring.entriesFor(TestPeriod))
+
+    ring.update(schedule.periodStart(TestPeriod + 1))
+    let second = Opt.some(ring.entriesFor(TestPeriod + 1))
+    ring.update(schedule.timeAt(TestPeriod + 1, schedule.earlyWindow - 1.nanoseconds))
+    check ring.publishedEntries == first
+
+    ring.update(schedule.timeAt(TestPeriod + 1, schedule.periodDuration div 2))
+    check:
+      ring.publishedEntries == second
+      changes[] == @[first, second]
+
+  test "a clock stepping back withdraws the entries until it is corrected":
+    ring.update(mid(TestPeriod - 1))
+    ring.update(mid(TestPeriod))
+    let published = Opt.some(ring.entriesFor(TestPeriod))
+    check ring.publishedEntries == published
+
+    ring.update(mid(TestPeriod - 1))
+    check ring.publishedEntries.isNone
+
+    ring.update(mid(TestPeriod))
+    check:
+      ring.publishedEntries == published
+      changes[][^2 ..^ 1] == @[Opt.none(MixKeyEntries), published]
+
+  test "a restarted ring publishes once it can process under both keys":
+    let restarted = MixKeyRing.new(
+      schedule,
+      rng(),
+      replayTableCapacity = 16,
+      publishedThrough = Opt.some(TestPeriod + 1),
+    )
+    restarted.update(mid(TestPeriod))
+    restarted.update(schedule.periodStart(TestPeriod + 1))
+    check restarted.publishedEntries.isNone
+
+    restarted.update(schedule.periodStart(TestPeriod + 2))
+    check restarted.publishedEntries == Opt.some(restarted.entriesFor(TestPeriod + 2))

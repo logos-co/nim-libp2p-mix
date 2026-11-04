@@ -809,6 +809,18 @@ suite "Sphinx Key Rotation":
       match.status == NoKeyMatched
       processSphinxPacket(packet, match).error == "Unmatched packet: NoKeyMatched"
 
+  test "wiping a match leaves nothing to process":
+    let candidates = ring.candidates(earlyWindowStart())
+    let packet = packetFor(candidates[0].publicKey)
+    var match = matchKey(packet, candidates).expect("matchKey error")
+    check match.status == KeyMatched
+
+    match.wipe()
+    check:
+      match.status == NoKeyMatched
+      processSphinxPacket(packet, match).error == "Unmatched packet: NoKeyMatched"
+      candidates[0].tagCount == 0
+
   test "processSphinxPacket rejects an unmatched packet":
     let candidates = ring.candidates(earlyWindowStart())
     let packet = packetFor(candidates[0].publicKey)
