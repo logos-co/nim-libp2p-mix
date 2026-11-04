@@ -15,11 +15,16 @@ proc init*(T: typedesc[MixMessage], message: openArray[byte], codec: string): T 
 proc init*(T: typedesc[MixMessage], message: sink seq[byte], codec: string): T =
   return T(message: move(message), codec: codec)
 
+proc serializedLen*(codec: string, messageLen: int): int =
+  ## The length of a serialized `MixMessage` with `codec` and a message of
+  ## `messageLen` bytes.
+  toBytes(codec.len.uint64, Leb128).len + codec.len + messageLen
+
 proc serialize*(mixMsg: MixMessage): seq[byte] =
   let vbytes = toBytes(mixMsg.codec.len.uint64, Leb128)
   doAssert vbytes.len <= 2, "serialization failed: codec length exceeds 2 bytes"
 
-  var buf = newSeqUninit[byte](vbytes.len + mixMsg.codec.len + mixMsg.message.len)
+  var buf = newSeqUninit[byte](serializedLen(mixMsg.codec, mixMsg.message.len))
   buf[0 ..< vbytes.len] = vbytes.toOpenArray()
   buf[vbytes.len ..< vbytes.len + mixMsg.codec.len] = mixMsg.codec.toBytes()
   buf[vbytes.len + mixMsg.codec.len ..< buf.len] = mixMsg.message
