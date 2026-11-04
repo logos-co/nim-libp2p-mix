@@ -469,16 +469,15 @@ method handleMixMessages*(
         error "could not recover Sphinx reply", id = processedSP.id, err = error.message
         mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
       of ReplyRecoveryErrorKind.PayloadDecodingFailed:
-        # Cryptographic recovery succeeded, so every redundant reply contains
-        # the same malformed payload and the group cannot provide a valid copy.
-        mixProto.surbStore.release(connCred.igroup)
+        # Cryptographic recovery succeeded, so consume this block even though
+        # its payload is malformed. Sibling blocks may carry valid replies.
+        mixProto.surbStore.release(processedSP.id)
         error "could not decode reply payload", id = processedSP.id, err = error.message
         mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
       return
 
-    # The exit replies via every SURB in the group, so N replies race; the
-    # first valid reply invalidates the rest.
-    mixProto.surbStore.release(connCred.igroup)
+    # Each SURB is single-use; other blocks can still deliver their replies.
+    mixProto.surbStore.release(processedSP.id)
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Reply",
