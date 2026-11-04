@@ -11,10 +11,10 @@ import
 import ./tools/[unittest, crypto]
 import ./utils
 
-proc invalidSizeErrors(): float64 =
-  ## The count of INVALID_SIZE entry errors. 0 before the label exists.
+proc entryErrors(reason: string): float64 =
+  ## The count of entry errors with `reason`. 0 before the label exists.
   try:
-    mix_messages_error.value(["Entry", "INVALID_SIZE"])
+    mix_messages_error.value(["Entry", reason])
   except KeyError:
     0.0
 
@@ -139,7 +139,7 @@ suite "mix_message_tests":
       MixProtocol.new(info, createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey)))
     let codec = "/test/1.0.0"
     let capacity = getMaxMessageSizeForCodec(codec, 1).get()
-    let before = invalidSizeErrors()
+    let before = entryErrors("INVALID_SIZE")
     let other = MixNodeInfo.generateRandom(0, rng())
     let sent = waitFor mix.anonymizeLocalProtocolSend(
       newAsyncQueue[seq[byte]](),
@@ -151,7 +151,31 @@ suite "mix_message_tests":
     check:
       sent.isErr
       sent.error.startsWith("message exceeds the codec and reply payload capacity")
-      invalidSizeErrors() == before + 1
+      entryErrors("INVALID_SIZE") == before + 1
+
+  test "a send of exactly the capacity with a reply passes the size check":
+    # The pool is empty, so a send that passes the size check fails at the peer
+    # selection with LOW_MIX_POOL.
+    let info = MixNodeInfo.generateRandom(0, rng())
+    let mix =
+      MixProtocol.new(info, createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey)))
+    let codec = "/test/1.0.0"
+    let capacity = getMaxMessageSizeForCodec(codec, 1).get()
+    let invalidBefore = entryErrors("INVALID_SIZE")
+    let lowPoolBefore = entryErrors("LOW_MIX_POOL")
+    let other = MixNodeInfo.generateRandom(0, rng())
+    let sent = waitFor mix.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      newSeq[byte](capacity),
+      codec,
+      MixDestination.init(other.peerId, other.multiAddr),
+      1,
+    )
+    check:
+      sent.isErr
+      sent.error.startsWith("No. of public mix nodes")
+      entryErrors("INVALID_SIZE") == invalidBefore
+      entryErrors("LOW_MIX_POOL") == lowPoolBefore + 1
 
   test "a codec that leaves no capacity fails and counts INVALID_SIZE":
     let info = MixNodeInfo.generateRandom(0, rng())
@@ -159,7 +183,7 @@ suite "mix_message_tests":
       MixProtocol.new(info, createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey)))
     let codec = "/" & 'x'.repeat(DataSize)
     check getMaxMessageSizeForCodec(codec).isErr
-    let before = invalidSizeErrors()
+    let before = entryErrors("INVALID_SIZE")
     let other = MixNodeInfo.generateRandom(0, rng())
     let sent = waitFor mix.anonymizeLocalProtocolSend(
       newAsyncQueue[seq[byte]](),
@@ -170,4 +194,4 @@ suite "mix_message_tests":
     )
     check:
       sent.isErr
-      invalidSizeErrors() == before + 1
+      entryErrors("INVALID_SIZE") == before + 1
