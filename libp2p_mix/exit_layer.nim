@@ -7,9 +7,7 @@ import libp2p/stream/connection
 import libp2p/varint
 import ./[mix_metrics, reply_connection, serialization, multiaddr]
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  import std/enumerate
-  import ./exit_connection
+import ./exit_connection
 logScope:
   topics = "exit_layer"
 
@@ -70,33 +68,32 @@ proc reply(
     error "could not reply", description = exc.msg
     mix_messages_error.inc(labelValues = ["ExitLayer", "REPLY_FAILED"])
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  proc runHandler(
-      self: ExitLayer, codec: string, message: seq[byte], surbs: seq[SURB]
-  ) {.async: (raises: [CancelledError]).} =
-    let exitConn = MixExitConnection.new(message, surbs)
-    defer:
-      await exitConn.close()
+proc runHandler(
+    self: ExitLayer, codec: string, message: seq[byte], surbs: seq[SURB]
+) {.async: (raises: [CancelledError]).} =
+  let exitConn = MixExitConnection.new(message, surbs)
+  defer:
+    await exitConn.close()
 
-    var hasHandler: bool = false
-    for index, handler in enumerate(self.switch.ms.handlers):
-      if codec in handler.protos:
-        try:
-          hasHandler = true
-          await handler.protocol.handler(exitConn, codec)
-        except CancelledError as e:
-          raise e
-        except CatchableError as e:
-          error "Error during execution of MixProtocol handler: ", err = e.msg
+  var hasHandler: bool = false
+  for handler in self.switch.ms.handlers:
+    if codec in handler.protos:
+      try:
+        hasHandler = true
+        await handler.protocol.handler(exitConn, codec)
+      except CancelledError as e:
+        raise e
+      except CatchableError as e:
+        error "Error during execution of MixProtocol handler: ", err = e.msg
 
-    if not hasHandler:
-      error "Handler doesn't exist", codec = codec
-      return
+  if not hasHandler:
+    error "Handler doesn't exist", codec = codec
+    return
 
-    let response = exitConn.getResponse()
-    let unclaimedSurbs = exitConn.takeSURBs()
-    if unclaimedSurbs.len != 0:
-      await self.reply(unclaimedSurbs, response)
+  let response = exitConn.getResponse()
+  let unclaimedSurbs = exitConn.takeSURBs()
+  if unclaimedSurbs.len != 0:
+    await self.reply(unclaimedSurbs, response)
 
 proc fwdRequest(
     self: ExitLayer,
@@ -172,12 +169,9 @@ proc onMessage*(
     destination: Hop,
     surbs: seq[SURB],
 ) {.async: (raises: [CancelledError]).} =
-  when defined(libp2p_mix_experimental_exit_is_dest):
-    if destination == Hop():
-      trace "onMessage - exit is destination", codec
-      await self.runHandler(codec, message, surbs)
-    else:
-      trace "onMessage - exit is not destination", codec
-      await self.fwdRequest(codec, message, destination, surbs)
+  if destination == Hop():
+    trace "onMessage - exit is destination", codec
+    await self.runHandler(codec, message, surbs)
   else:
+    trace "onMessage - exit is not destination", codec
     await self.fwdRequest(codec, message, destination, surbs)
