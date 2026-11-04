@@ -556,8 +556,7 @@ proc getMaxMessageSizeForCodec*(
   ## Computes the maximum payload size (in bytes) available for a message when encoded  
   ## with the given `codec`, optionally including space for the chosen number of surbs.  
   ## Returns an error if the codec + surb overhead exceeds the data capacity.  
-  let serializedMsg = MixMessage.init(@[], codec).serialize()
-  let totalLen = serializedMsg.len + SurbLenSize + (int(numberOfSurbs) * SurbSize)
+  let totalLen = serializedLen(codec, 0) + SurbLenSize + (int(numberOfSurbs) * SurbSize)
   if totalLen > DataSize:
     return err("cannot encode messages for this codec")
   return ok(DataSize - totalLen)
@@ -852,6 +851,15 @@ proc anonymizeLocalProtocolSend*(
     doAssert destination.kind == ForwardAddr, "Only exit != destination is allowed"
 
   mix_messages_recvd.inc(labelValues = ["Entry"])
+  let capacity = getMaxMessageSizeForCodec(codec, numSurbs).valueOr:
+    mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
+    return err("failure when calling getMaxMessageSizeForCodec: " & error)
+  if msg.len > capacity:
+    mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
+    return err(
+      "message exceeds the codec and reply payload capacity, size: " & $msg.len &
+        ", capacity: " & $capacity
+    )
 
   # Note: the cover-traffic slot is claimed further down, immediately before
   # the packet is sent, so validation failures below never consume one.
