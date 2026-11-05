@@ -147,6 +147,10 @@ proc getConn(
     # Only `stop` cancels a shared dial. A caller cancelled in `join` raises
     # before this line.
     raise newException(DialFailedError, "mix protocol stopped during the dial")
+  if not mixProto.started:
+    # The dial completed after the stop began. The stop closes its stream, so
+    # no caller writes to it.
+    raise newException(DialFailedError, "mix protocol stopped during the dial")
   try:
     return dial.read()
   except FuturePendingError:
