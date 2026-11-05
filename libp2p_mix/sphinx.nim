@@ -3,7 +3,8 @@
 
 import results
 import stew/ctops
-import ./[crypto, curve25519, delay, lioness, serialization, tag_manager]
+import nimcrypto/utils # burnMem
+import ./[crypto, curve25519, delay, key_rotation, lioness, serialization, tag_manager]
 import libp2p/crypto/crypto
 
 const PathLength* = 3 # Path length (L)
@@ -310,15 +311,20 @@ proc computeTag(s: FieldElement): Tag =
   ## Compute replay detection tag as H(s) per spec Section 8.6.1 Step 2.
   sha256_hash(fieldElementToBytes(s))
 
-proc computeSharedSecret(
-    alphaFE: FieldElement, privateKey: FieldElement
-): Result[FieldElement, string] =
+proc checkSharedSecret(s: FieldElement): Result[FieldElement, string] =
   # Low-order public inputs collapse X25519 output to zero; reject after multiplication
   # because that is the point where the subgroup check is observable for X25519.
-  let s = multiplyPointWithScalars(alphaFE, [privateKey])
   if s.isZeroFieldElement():
     return err("Invalid alpha: low-order shared secret")
   ok(s)
+
+proc computeSharedSecret(
+    alphaFE: FieldElement, privateKey: FieldElement
+): Result[FieldElement, string] =
+  var scalars = [privateKey]
+  let s = multiplyPointWithScalars(alphaFE, scalars)
+  burnMem(scalars)
+  checkSharedSecret(s)
 
 proc checkReplay*(
     sphinxPacket: SphinxPacket, privateKey: FieldElement, tm: var TagManager
@@ -342,55 +348,17 @@ proc checkReplay*(
 
   ok((isReplay: isTagSeen(tm, tag), sharedSecret: s))
 
-proc processSphinxPacket*(
-    sphinxPacket: SphinxPacket,
-    privateKey: FieldElement,
-    tm: var TagManager,
-    sharedSecret: Opt[FieldElement] = Opt.none(FieldElement),
-): Result[ProcessedSphinxPacket, string] =
-  let
-    (header, payload) = sphinxPacket.get()
-    (alpha, beta, gamma) = header.get()
-
-  # Validate alpha encoding even when sharedSecret is supplied; alpha still
-  # drives MAC and blinding.
-  let alphaFE = bytesToAlphaFieldElement(alpha).valueOr:
-    return err("Invalid alpha: " & error)
-
-  let s = sharedSecret.valueOr:
-    computeSharedSecret(alphaFE, privateKey).valueOr:
-      return err(error)
-
-  if s.isZeroFieldElement():
-    return err("Invalid alpha: low-order shared secret")
-
-  let sBytes = fieldElementToBytes(s)
-
-  # Compute tag as H(s) per spec Section 8.6.1 Step 2
-  let tag = computeTag(s)
-
-  # Check if the tag has been seen (only if we didn't get pre-validated sharedSecret)
-  if sharedSecret.isNone and isTagSeen(tm, tag):
-    return ok(ProcessedSphinxPacket(status: Duplicate))
-
-  # Compute MAC
+proc isMacValid(beta, gamma, sBytes: seq[byte]): bool =
   let mac_key = deriveKeyMaterial(MacKeyLabel, sBytes).kdf()
 
   let expectedMac = hmac(mac_key, beta)
   # CT.isEqual compares only the shared prefix, so reject unequal lengths first.
-  if gamma.len != expectedMac.len or not CT.isEqual(expectedMac, gamma):
-    # If MAC not verified
-    return ok(ProcessedSphinxPacket(status: InvalidMAC))
+  gamma.len == expectedMac.len and CT.isEqual(expectedMac, gamma)
 
-  # Atomically add the replay tag only after authentication succeeds.
-  case tm.tryAddTag(tag)
-  of TagAlreadyPresent:
-    return ok(ProcessedSphinxPacket(status: Duplicate))
-  of TagCacheFull:
-    return ok(ProcessedSphinxPacket(status: ReplayCacheFull))
-  of TagAdded:
-    discard
-
+proc peelLayer(
+    alpha, beta, payload: seq[byte], alphaFE: FieldElement, sBytes: seq[byte]
+): Result[ProcessedSphinxPacket, string] =
+  ## Remove one layer of an authenticated packet.
   # Derive AES key and IV for the header (beta)
   let
     beta_aes_key = deriveKeyMaterial(AesKeyLabel, sBytes).kdf()
@@ -460,3 +428,144 @@ proc processSphinxPacket*(
         serializedSphinxPacket: sphinxPkt.serialize(),
       )
     )
+
+proc processSphinxPacket*(
+    sphinxPacket: SphinxPacket,
+    privateKey: FieldElement,
+    tm: var TagManager,
+    sharedSecret: Opt[FieldElement] = Opt.none(FieldElement),
+): Result[ProcessedSphinxPacket, string] =
+  let
+    (header, payload) = sphinxPacket.get()
+    (alpha, beta, gamma) = header.get()
+
+  # Validate alpha encoding even when sharedSecret is supplied; alpha still
+  # drives MAC and blinding.
+  let alphaFE = bytesToAlphaFieldElement(alpha).valueOr:
+    return err("Invalid alpha: " & error)
+
+  let s = sharedSecret.valueOr:
+    computeSharedSecret(alphaFE, privateKey).valueOr:
+      return err(error)
+
+  if s.isZeroFieldElement():
+    return err("Invalid alpha: low-order shared secret")
+
+  let sBytes = fieldElementToBytes(s)
+
+  # Compute tag as H(s) per spec Section 8.6.1 Step 2
+  let tag = computeTag(s)
+
+  # Check if the tag has been seen (only if we didn't get pre-validated sharedSecret)
+  if sharedSecret.isNone and isTagSeen(tm, tag):
+    return ok(ProcessedSphinxPacket(status: Duplicate))
+
+  if not isMacValid(beta, gamma, sBytes):
+    return ok(ProcessedSphinxPacket(status: InvalidMAC))
+
+  # Atomically add the replay tag only after authentication succeeds.
+  case tm.tryAddTag(tag)
+  of TagAlreadyPresent:
+    return ok(ProcessedSphinxPacket(status: Duplicate))
+  of TagCacheFull:
+    return ok(ProcessedSphinxPacket(status: ReplayCacheFull))
+  of TagAdded:
+    discard
+
+  peelLayer(alpha, beta, payload, alphaFE, sBytes)
+
+type
+  KeyMatchStatus* = enum
+    NoKeyMatched
+    KeyMatched
+    KeyReplayed
+    KeyTableFull
+
+  KeyMatch* = object
+    case status*: KeyMatchStatus
+    of KeyMatched:
+      key*: MixKey
+      sharedSecret: FieldElement
+    else:
+      discard
+
+proc matchKey*(
+    sphinxPacket: SphinxPacket, candidates: openArray[MixKey]
+): Result[KeyMatch, string] {.raises: [].} =
+  ## Find the candidate key the packet was built for, without storing its tag
+  ## (Mix Key Rotation spec §7). Destroyed keys never match. KeyTableFull means
+  ## the packet was built for a key whose replay table is full (Mix Key
+  ## Rotation spec §4.4). A KeyMatched packet is completed by
+  ## `processSphinxPacket(packet, match)`.
+  let
+    (header, _) = sphinxPacket.get()
+    (alpha, beta, gamma) = header.get()
+
+  let alphaFE = bytesToAlphaFieldElement(alpha).valueOr:
+    return err("Invalid alpha: " & error)
+
+  var match = KeyMatch(status: NoKeyMatched)
+  for key in candidates:
+    if key.isDestroyed:
+      continue
+    var secret = checkSharedSecret(?key.multiply(alphaFE)).valueOr:
+      return err(error)
+    defer:
+      burnMem(secret)
+
+    # Run every candidate, even after one matches, so processing time does not
+    # reveal which key the packet was built for.
+    let
+      seen = key.isTagSeen(computeTag(secret))
+      valid = isMacValid(beta, gamma, fieldElementToBytes(secret))
+
+    if match.status == NoKeyMatched:
+      if seen:
+        match = KeyMatch(status: KeyReplayed)
+      elif valid:
+        match =
+          if key.isReplayTableFull:
+            KeyMatch(status: KeyTableFull)
+          else:
+            KeyMatch(status: KeyMatched, key: key, sharedSecret: secret)
+  ok(match)
+
+proc processSphinxPacket*(
+    sphinxPacket: SphinxPacket, match: var KeyMatch
+): Result[ProcessedSphinxPacket, string] {.raises: [].} =
+  ## Complete a packet `matchKey` matched, storing its tag in the matched key's
+  ## replay table. The match is consumed: its shared secret is wiped and its
+  ## status reset to NoKeyMatched. The key's acceptance window is not rechecked.
+  if match.status != KeyMatched:
+    return err("Unmatched packet: " & $match.status)
+  defer:
+    burnMem(match.sharedSecret)
+    match = KeyMatch(status: NoKeyMatched)
+
+  let
+    (header, payload) = sphinxPacket.get()
+    (alpha, beta, gamma) = header.get()
+    key = match.key
+
+  let alphaFE = bytesToAlphaFieldElement(alpha).valueOr:
+    return err("Invalid alpha: " & error)
+
+  # The key can be destroyed between matchKey and this call.
+  if key.isDestroyed:
+    return err("Destroyed mix key: period " & $key.period)
+
+  let sBytes = fieldElementToBytes(match.sharedSecret)
+
+  # Rechecked so that a match applied to another packet stores no tag.
+  if not isMacValid(beta, gamma, sBytes):
+    return ok(ProcessedSphinxPacket(status: InvalidMAC))
+
+  case key.addTag(computeTag(match.sharedSecret))
+  of TagAlreadyPresent:
+    return ok(ProcessedSphinxPacket(status: Duplicate))
+  of TagCacheFull:
+    return ok(ProcessedSphinxPacket(status: ReplayCacheFull))
+  of TagAdded:
+    discard
+
+  peelLayer(alpha, beta, payload, alphaFE, sBytes)
