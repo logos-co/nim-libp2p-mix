@@ -970,31 +970,23 @@ proc anonymizeLocalProtocolSend*(
 
   var nextHopAddr: MultiAddress
   var nextHopPeerId: PeerId
+  # The backed off peers that the draw of the first hop skipped.
+  var skipped: seq[int]
   while hop.len < PathLength:
     if availableIndices.len == 0:
       mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
       return err("Ran out of available mix nodes while constructing path")
 
-    let randomIndexPosition =
-      if hop.len == 0:
-        var positions: seq[int]
-        for position, poolIndex in availableIndices:
-          if not mixProto.hopIsBackedOff(poolPeerIds[poolIndex]):
-            positions.add(position)
-        if positions.len == 0:
-          mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
-          return err("Every first hop candidate is backed off")
-        let randomPosition = cryptoRandomInt(mixProto.rng, positions.len).valueOr:
-          mix_messages_error.inc(labelValues = ["Entry", "NON_RECOVERABLE"])
-          return err(fmt"Failed to generate random number: {error}")
-        positions[randomPosition]
-      else:
-        cryptoRandomInt(mixProto.rng, availableIndices.len).valueOr:
-          mix_messages_error.inc(labelValues = ["Entry", "NON_RECOVERABLE"])
-          return err(fmt"Failed to generate random number: {error}")
+    let randomIndexPosition = cryptoRandomInt(mixProto.rng, availableIndices.len).valueOr:
+      mix_messages_error.inc(labelValues = ["Entry", "NON_RECOVERABLE"])
+      return err(fmt"Failed to generate random number: {error}")
     let selectedIndex = availableIndices[randomIndexPosition]
     var randPeerId = poolPeerIds[selectedIndex]
     availableIndices.del(randomIndexPosition)
+
+    if hop.len == 0 and mixProto.hopIsBackedOff(randPeerId):
+      skipped.add(selectedIndex)
+      continue
 
     if destination.kind == ForwardAddr and randPeerId == destination.peerId:
       continue
@@ -1029,6 +1021,8 @@ proc anonymizeLocalProtocolSend*(
     if hop.len == 0:
       nextHopAddr = multiAddr
       nextHopPeerId = peerId
+      # The later hops draw from the whole pool.
+      availableIndices.add(skipped)
 
     delays.add(
       if hop.len != PathLength - 1:

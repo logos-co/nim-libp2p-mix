@@ -76,6 +76,41 @@ when defined(libp2p_mix_experimental_exit_is_dest):
         await nodes[0].coverSelects(nodes[4].switch.peerInfo.peerId, 40)
       check not coverSelected
 
+    asyncTest "a send succeeds when its later hops need a backed off hop":
+      # Five nodes leave three candidates, nodes[1 .. 3], and a path draws all
+      # three. So the backed off nodes[3] must be a later hop.
+      let nodes = await setupMixNodes(5)
+      await startNodes(nodes)
+      defer:
+        await stopNodes(nodes)
+      await nodes[3].switch.stop()
+      let first = await nodes[0].sendUntilFirstHopFails(nodes[4], 40)
+      check first
+      let later = await nodes[0].firstHopFailures(nodes[4], 30)
+      check later == 0
+
+    asyncTest "a send fails when each first hop candidate is backed off":
+      let nodes = await setupMixNodes(5)
+      await startNodes(nodes)
+      defer:
+        await stopNodes(nodes)
+      for i in 1 .. 3:
+        await nodes[i].switch.stop()
+      # Each failed dial backs one more candidate off.
+      for _ in 1 .. 3:
+        let failed = await nodes[0].sendUntilFirstHopFails(nodes[4], 40)
+        check failed
+      let sent = await nodes[0].anonymizeLocalProtocolSend(
+        newAsyncQueue[seq[byte]](),
+        @[1.byte],
+        TestCodec,
+        MixDestination.exitNode(nodes[4].switch.peerInfo.peerId),
+        0,
+      )
+      check:
+        sent.isErr
+        "Ran out of available mix nodes" in sent.error
+
     asyncTest "a hop whose backoff ended is selected again":
       # A zero backoff ends at once, so the next send can select the hop again.
       let nodes = await setupMixNodes(6, hopBackoff = ZeroDuration)
