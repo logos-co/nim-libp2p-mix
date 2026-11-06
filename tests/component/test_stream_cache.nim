@@ -113,7 +113,8 @@ suite "Hop stream cache":
     await sender.stop()
     check outgoingMixStreams(sender.switch).len == 0
 
-  asyncTest "protocol stop fails a send that waits on a dial and refunds its slot and proof":
+  template sendInItsDial() {.dirty.} =
+    ## A node with one send that waits on its first dial, with one claimed slot.
     # A node that counts the proofs it reclaims, with a slot pool whose epochs
     # change only when the test says so.
     let info = MixNodeInfo.generateRandom(0, rng())
@@ -156,11 +157,23 @@ suite "Hop stream cache":
       hold.connections.len == 1
     check cover.slotPool.nonCoverClaimed == 1
 
+  asyncTest "protocol stop fails a send that waits on a dial and refunds its slot and proof":
+    sendInItsDial()
+
     # The packet never left this node, so the send gives its slot and proof back.
     await node.stop()
     let stopped = await sending.wait(2.seconds)
     check:
       stopped.isErr
+      errorCount("Entry", "SEND_FAILED") == errorsBefore
+      cover.slotPool.nonCoverClaimed == 0
+      spam.reclaimCount == 1
+
+  asyncTest "a cancel of a send that waits on a dial refunds its slot and proof":
+    sendInItsDial()
+
+    await sending.cancelAndWait()
+    check:
       errorCount("Entry", "SEND_FAILED") == errorsBefore
       cover.slotPool.nonCoverClaimed == 0
       spam.reclaimCount == 1

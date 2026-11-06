@@ -240,3 +240,161 @@ suite "Slot refund - local send":
 
     check (await send).isErr
     check ct.slotPool.nonCoverClaimed == 1
+
+type
+  HeldProofs = ref object of ReclaimCountingSpamProtection
+    ## Counts the proofs that it makes. With a gate, a proof waits for the gate.
+    generated: int
+    gate: AsyncEvent
+    waiting: bool
+    failing: bool
+
+  HoldStrategy = ref object of DelayStrategy
+    ## The hold of a node before it writes a packet. A test sets it.
+    hold: Delay
+
+method generateProofAsync(
+    self: HeldProofs, bindingData: seq[byte]
+): Future[Result[ProofResult, string]] {.async: (raises: [CancelledError]).} =
+  if not self.gate.isNil:
+    self.waiting = true
+    await self.gate.wait()
+  if self.failing:
+    return err("no proof")
+  inc self.generated
+  return ok(ProofResult(proof: newSeq[byte](self.proofSize), token: @[1.byte]))
+
+method generateForEntry(self: HoldStrategy): Delay {.gcsafe, raises: [].} =
+  NoDelay
+
+method generateForIntermediate(
+    self: HoldStrategy, encodedDelay: Delay
+): Delay {.gcsafe, raises: [].} =
+  self.hold
+
+method generateForSender(self: HoldStrategy): Delay {.gcsafe, raises: [].} =
+  self.hold
+
+const LongHold = Delay(60_000)
+
+proc setupHeldNodes(
+    numNodes: int
+): tuple[nodes: seq[MixProtocol], spam: seq[HeldProofs], delays: seq[HoldStrategy]] =
+  ## As setupCountingNodes, with a proof provider and a hold that a test controls.
+  let nodeInfos = MixNodeInfo.generateRandomMany(numNodes, rng())
+  for mixNodeInfo in nodeInfos:
+    let
+      switch = createSwitch(mixNodeInfo.multiAddr, Opt.some(mixNodeInfo.libp2pPrivKey))
+      spam = HeldProofs(proofSize: newReclaimCountingSpamProtection().proofSize)
+      delay = HoldStrategy()
+      node = MixProtocol.new(
+        mixNodeInfo,
+        switch,
+        spamProtection = Opt.some(SpamProtection(spam)),
+        delayStrategy = Opt.some(DelayStrategy(delay)),
+      )
+    node.registerDestReadBehavior(TestCodec, readLp(1024))
+    switch.mount(node)
+    node.nodePool.add(nodeInfos.includeAllExcept(mixNodeInfo))
+    result.nodes.add(node)
+    result.spam.add(spam)
+    result.delays.add(delay)
+
+suite "Slot refund - cancelled packet":
+  asyncTeardown:
+    checkTrackers()
+
+  asyncTest "a send cancelled in its hold with a ready proof gets its slot and proof back":
+    let (nodes, spam, delays) = setupHeldNodes(5)
+    startAndDeferStop(nodes)
+    let ct = nodes[0].attachCover()
+    delays[0].hold = LongHold
+
+    let send = nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](), @[1.byte], TestCodec, nodes[^1].toMixDestination(), 0
+    )
+    checkUntilTimeout:
+      spam[0].generated == 1
+    check ct.slotPool.nonCoverClaimed == 1
+
+    await send.cancelAndWait()
+    check:
+      ct.slotPool.nonCoverClaimed == 0
+      spam[0].reclaimCount == 1
+
+  asyncTest "a send cancelled in its hold with a proof in work keeps its slot":
+    ## The provider can have used the message ID of a proof that it did not
+    ## finish, so the slot stays with it.
+    let (nodes, spam, _) = setupHeldNodes(5)
+    startAndDeferStop(nodes)
+    let ct = nodes[0].attachCover()
+    spam[0].gate = newAsyncEvent()
+
+    let send = nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](), @[1.byte], TestCodec, nodes[^1].toMixDestination(), 0
+    )
+    checkUntilTimeout:
+      spam[0].waiting
+    check ct.slotPool.nonCoverClaimed == 1
+
+    await send.cancelAndWait()
+    check:
+      ct.slotPool.nonCoverClaimed == 1
+      spam[0].reclaimCount == 0
+
+  asyncTest "a send whose proof fails gets its slot back":
+    let (nodes, spam, _) = setupHeldNodes(5)
+    startAndDeferStop(nodes)
+    let ct = nodes[0].attachCover()
+    spam[0].failing = true
+
+    let sent = await nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](), @[1.byte], TestCodec, nodes[^1].toMixDestination(), 0
+    )
+    check:
+      sent.isErr
+      ct.slotPool.nonCoverClaimed == 0
+      spam[0].reclaimCount == 0
+
+  asyncTest "a reply cancelled in its hold with a ready proof gets its slot and proof back":
+    let (nodes, spam, delays) = setupHeldNodes(5)
+    startAndDeferStop(nodes)
+    var id: SURBIdentifier
+    id[0] = 1
+    let exitPeerId = nodes[^1].switch.peerInfo.peerId
+    let surb = nodes[0].buildSurb(id, exitPeerId, exitPeerId).expect("SURB")
+    let ct = nodes[^1].attachCover()
+    delays[^1].hold = LongHold
+
+    let reply = nodes[^1].sendSurbReply(surb, ReplyPayload)
+    checkUntilTimeout:
+      spam[^1].generated == 1
+    check ct.slotPool.nonCoverClaimed == 1
+
+    await reply.cancelAndWait()
+    check:
+      ct.slotPool.nonCoverClaimed == 0
+      spam[^1].reclaimCount == 1
+
+  asyncTest "a forward that a stop cancels in its hold with a ready proof gets its slot and proof back":
+    ## The path is the three middle nodes in random order. The first of them
+    ## holds the packet.
+    let (nodes, spam, delays) = setupHeldNodes(5)
+    startAndDeferStop(nodes)
+    let covers = nodes[1 .. 3].mapIt(it.attachCover())
+    for delay in delays[1 .. 3]:
+      delay.hold = LongHold
+
+    let sent = await nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](), @[1.byte], TestCodec, nodes[^1].toMixDestination(), 0
+    )
+    check sent.isOk
+    checkUntilTimeout:
+      spam[1 .. 3].mapIt(it.generated).foldl(a + b) == 1
+    let hop = toSeq(1 .. 3).filterIt(spam[it].generated == 1)[0]
+    check covers[hop - 1].slotPool.nonCoverClaimed == 1
+
+    await nodes[hop].stop()
+    check:
+      covers[hop - 1].slotPool.nonCoverClaimed == 0
+      spam[hop].reclaimCount == 1
