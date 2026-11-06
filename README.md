@@ -114,6 +114,31 @@ let response = await conn.readLp(maxBytes)
 
 For a complete worked example, see [`examples/mix_ping.nim`](examples/mix_ping.nim).
 
+### Hop address classes
+
+Each node on a mix path is dialed by the node before it, at the address that the sender wrote in the packet. For example, a node at home has the address `192.168.1.20`, and a sender on the internet puts that node on a path. The node before it dials `192.168.1.20` from another network, the dial fails, and the message is lost.
+
+`hopAddressClasses` tells Mix which classes of address it can write in a packet. Mix never puts a pool member (a mix node that this node can put on a path) on a path when that pool member has no address of an accepted class.
+
+| Class | Address |
+| --- | --- |
+| `Public` | An IP address that the public network routes |
+| `Relayed` | A circuit relay route through a relay with a public address |
+| `Private` | An IP address that the public network does not route, such as `192.168.1.20` |
+| `Loopback` | An address of the local host, such as `127.0.0.1` or the wildcard address `0.0.0.0` |
+
+The default accepts each class, so tests, a single host and a private network work with no setting. A node on the public network accepts only the first two classes:
+
+```nim
+let mix = MixProtocol.new(
+  mixNodeInfo,
+  switch,
+  hopAddressClasses = {MixAddressClass.Public, MixAddressClass.Relayed},
+)
+```
+
+When a pool member has more than one accepted address, Mix uses the address whose class comes first in the table. `hopAddressClasses` does not check the address of this node. Give Mix an address that other nodes can dial, so that replies reach this node.
+
 ### Pluggable spam protection
 
 Spam protection is a `SpamProtection` abstract base class
