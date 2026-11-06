@@ -111,7 +111,7 @@ suite "Hop stream cache":
     check:
       stopped.isErr
       errorCount("Cover", "SEND_FAILED") == errorsBefore
-    # A dial refused by the stop counts nothing either.
+    # A send that the stop refuses counts nothing either.
     let refused = await nodes[0].sendCoverPacket(hopPeerId, hopAddr, @[1.byte])
     check:
       refused.isErr
@@ -133,6 +133,20 @@ suite "Hop stream cache":
     checkUntilTimeout:
       hold.connections.len == 1
     await sending.cancelAndWait()
+
+  asyncTest "protocol stop closes the cached hop streams":
+    let echoProto = EchoProtocol.new()
+    let nodes = await setupMixNodes(
+      5, destReadBehavior = Opt.some((codec: echoProto.codec, callback: readLp(1024)))
+    )
+    nodes[^1].switch.mount(echoProto)
+    startAndDeferStop(nodes)
+    let sender = nodes[0]
+
+    await exchange(sender, nodes[^1].toMixDestination(), echoProto.codec, 7)
+    check outgoingMixStreams(sender.switch).len > 0
+    await sender.stop()
+    check outgoingMixStreams(sender.switch).len == 0
 
   asyncTest "protocol stop fails a send that waits on a dial and refunds its slot and proof":
     # A node that counts the proofs it reclaims, with a slot pool whose epochs
