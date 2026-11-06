@@ -12,6 +12,7 @@ import results
 import libp2p/peerstore
 import libp2p/peerid
 import libp2p/multiaddress
+import libp2p/wire
 import libp2p/crypto/crypto
 import libp2p/crypto/curve25519
 import ./mix_node
@@ -24,6 +25,16 @@ type MixPubKeyBook* = ref object of PeerBook[Curve25519Key]
   ## package owns its peer-store extension and libp2p core stays free of
   ## mix-specific types.
 
+type MixAddressClass* {.pure.} = enum
+  ## The class of a hop address. The order is the order of preference for the
+  ## hop address of one peer.
+  Public ## An IP address that the public network routes.
+  Relayed ## A circuit relay route through a relay with a public address.
+  Private ## Each other IP address that a node can dial.
+  Loopback ## An address of the local host. The wildcard address is in this class.
+
+const AllMixAddressClasses* = {MixAddressClass.low .. MixAddressClass.high}
+
 func isSupportedMultiaddr(maddr: MultiAddress): bool =
   ## Returns true if the multiaddress is supported by the mix protocol.
   ## Mix protocol supports IPv4 addresses with TCP or QUIC-v1 transports,
@@ -32,12 +43,25 @@ func isSupportedMultiaddr(maddr: MultiAddress): bool =
     return false
   TCP_IP4.match(baseAddr) or QUIC_V1_IP4.match(baseAddr)
 
-func findSupportedMultiaddr(maddrs: seq[MultiAddress]): Opt[MultiAddress] =
-  ## Returns the first multiaddress that is supported by the mix protocol.
-  for maddr in maddrs:
-    if isSupportedMultiaddr(maddr):
-      return Opt.some(maddr)
-  Opt.none(MultiAddress)
+proc addressClass*(maddr: MultiAddress): Opt[MixAddressClass] =
+  ## Returns the class of `maddr`. A circuit relay route has the class of the
+  ## relay address, and `Relayed` replaces `Public` for it. The result is none
+  ## for an address that no node can dial, and for an address that is not an
+  ## IP transport address with an optional circuit relay suffix.
+  let transport = mix_multiaddr.getBaseTransport(maddr).valueOr:
+    return Opt.none(MixAddressClass)
+  let host = initTAddress(transport).valueOr:
+    return Opt.none(MixAddressClass)
+  if host.isMulticast() or host.isBroadcast():
+    Opt.none(MixAddressClass)
+  elif host.isLoopback() or host.isAnyLocal():
+    Opt.some(MixAddressClass.Loopback)
+  elif not host.isGlobal():
+    Opt.some(MixAddressClass.Private)
+  elif isCircuitRelayMA(maddr):
+    Opt.some(MixAddressClass.Relayed)
+  else:
+    Opt.some(MixAddressClass.Public)
 
 type MixNodePool* = ref object
   ## Manages mix node public information through the peerStore.
@@ -48,10 +72,18 @@ type MixNodePool* = ref object
   ## - Peer scoring: Track node reliability, latency, and performance metrics
   ## - Pool maintenance: Automatic pruning of stale/unresponsive nodes
   peerStore: PeerStore
+  addressClasses: set[MixAddressClass]
+    ## The classes that the hop address of a pool member can have. A different
+    ## node dials a hop address, so the classes say which addresses each node of
+    ## the network can dial.
 
-proc new*(T: typedesc[MixNodePool], peerStore: PeerStore): T =
+proc new*(
+    T: typedesc[MixNodePool],
+    peerStore: PeerStore,
+    addressClasses: set[MixAddressClass] = AllMixAddressClasses,
+): T =
   ## Create a new MixNodePool instance backed by the given peerStore.
-  T(peerStore: peerStore)
+  T(peerStore: peerStore, addressClasses: addressClasses)
 
 proc add*(pool: MixNodePool, info: MixPubInfo) =
   ## Add a mix node to the pool.
@@ -86,28 +118,46 @@ proc remove*(pool: MixNodePool, peerId: PeerId): bool =
   pool.peerStore[MixPubKeyBook].del(peerId)
   # Preserve AddressBook/KeyBook entries used by other protocols.
 
+proc selectHopAddress(pool: MixNodePool, peerId: PeerId): Opt[MultiAddress] =
+  ## Returns the address of the best accepted class that the Sphinx header can
+  ## carry. In one class, the last dialed address comes before the AddressBook.
+  var candidates: seq[MultiAddress]
+  pool.peerStore[LastSeenOutboundBook][peerId].withValue(lastDialed):
+    candidates.add(lastDialed)
+  candidates.add(pool.peerStore[AddressBook][peerId])
+
+  var best = Opt.none(MultiAddress)
+  var bestClass: MixAddressClass
+  for candidate in candidates:
+    if not isSupportedMultiaddr(candidate):
+      continue
+    let addrClass = candidate.addressClass().valueOr:
+      continue
+    if addrClass notin pool.addressClasses:
+      continue
+    if best.isSome() and addrClass >= bestClass:
+      continue
+    if mix_multiaddr.multiAddrToBytes(peerId, candidate).isErr():
+      continue
+    best = Opt.some(candidate)
+    bestClass = addrClass
+  best
+
 proc get*(pool: MixNodePool, peerId: PeerId): Opt[MixPubInfo] =
-  ## Get MixPubInfo for a peer. Returns none if peer is not in the pool
-  ## or if required information (address, key) is missing.
+  ## Get MixPubInfo for a peer. Returns none if the peer is not in the pool, or
+  ## if it has no key or no hop address (see `selectHopAddress`).
   let mixPubKey = pool.peerStore[MixPubKeyBook][peerId]
   if mixPubKey == default(Curve25519Key):
     return Opt.none(MixPubInfo)
 
-  # Get the address - prefer LastSeenOutboundBook, fall back to AddressBook
-  # Mix protocol only supports IPv4 addresses with TCP or QUIC-v1 transports
-  var supportedAddr: MultiAddress
-  let lastSeenAddr = pool.peerStore[LastSeenOutboundBook][peerId]
-  if lastSeenAddr.isSome and isSupportedMultiaddr(lastSeenAddr.get):
-    supportedAddr = lastSeenAddr.get
-  else:
-    supportedAddr = findSupportedMultiaddr(pool.peerStore[AddressBook][peerId]).valueOr:
-      return Opt.none(MixPubInfo)
+  let hopAddr = pool.selectHopAddress(peerId).valueOr:
+    return Opt.none(MixPubInfo)
 
   let pubKey = pool.peerStore[KeyBook][peerId]
   if pubKey.scheme != Secp256k1:
     return Opt.none(MixPubInfo)
 
-  Opt.some(MixPubInfo.init(peerId, supportedAddr, mixPubKey, pubKey.skkey))
+  Opt.some(MixPubInfo.init(peerId, hopAddr, mixPubKey, pubKey.skkey))
 
 proc peerIds*(pool: MixNodePool): seq[PeerId] =
   ## Get all peer IDs in the mix node pool.

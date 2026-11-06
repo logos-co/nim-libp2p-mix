@@ -4,9 +4,8 @@
 {.used.}
 
 import chronos, results, sets, sequtils
-import libp2p/[peerid, switch, stream/lpstream]
+import libp2p/[crypto/curve25519, peerid, peerstore, switch, stream/lpstream]
 import libp2p_mix
-import libp2p_mix/mix_node
 import libp2p_mix/mix_protocol
 import libp2p_mix/pool
 import libp2p_mix/serialization
@@ -51,16 +50,19 @@ method buildSurb*(
   # exit node. buildSurb's own filter removes the exit, leaving exactly our 2.
   let keepInPool = (peers & exitPeerId).toHashSet()
 
-  var removed: seq[MixPubInfo]
+  # `remove` deletes only the mix key, so the mix key is what comes back. A
+  # member with no hop address has no MixPubInfo to keep.
+  let mixKeys = mock.switch.peerStore[MixPubKeyBook]
+  var removed: seq[(PeerId, Curve25519Key)]
   for peerId in mock.nodePool.peerIds():
     if peerId notin keepInPool:
-      removed.add(mock.nodePool.get(peerId).get())
+      removed.add((peerId, mixKeys[peerId]))
       discard mock.nodePool.remove(peerId)
 
   let surb = procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId)
 
-  for info in removed:
-    mock.nodePool.add(info)
+  for (peerId, mixPubKey) in removed:
+    mixKeys[peerId] = mixPubKey
 
   mock.actualSurbPeers.add(peers)
   mock.surbCallIndex.inc

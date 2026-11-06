@@ -39,10 +39,11 @@ export SpamProtectionDelayStrategy
 
 export mix_node
 
-export MixNodePool
+export MixNodePool, MixAddressClass, AllMixAddressClasses
 export add
 export remove
 export peerIds
+export addressClass
 
 proc readLp*(maxSize: int): DestReadBehavior =
   ## Create a read behavior that reads length-prefixed messages (varint-encoded length).
