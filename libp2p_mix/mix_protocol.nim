@@ -651,6 +651,19 @@ proc getMaxMessageSizeForCodec*(
     return err("cannot encode messages for this codec")
   return ok(DataSize - totalLen)
 
+proc drawUsable(
+    mixProto: MixProtocol, peerIds: var seq[PeerId]
+): Result[MixPubInfo, string] {.gcsafe, raises: [].} =
+  ## Draws peers from `peerIds` until the pool has a hop address for one, and
+  ## removes each peer that it draws. So each peer that a path can use has the
+  ## same chance, and a peer with no hop address keeps its mix key.
+  while true:
+    let drawn = mixProto.rng.pick(peerIds, 1).valueOr:
+      return err("Ran out of usable mix nodes")
+    peerIds.del(peerIds.find(drawn[0]))
+    mixProto.nodePool.get(drawn[0]).withValue(mixPubInfo):
+      return ok(mixPubInfo)
+
 method buildSurb*(
     mixProto: MixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
 ): Result[SURB, string] {.base, gcsafe, raises: [].} =
@@ -665,20 +678,14 @@ method buildSurb*(
   # Remove exit and dest node from nodes to consider for surbs
   var poolPeerIds =
     mixProto.nodePool.peerIds().filterIt(it != exitPeerId and it != destPeerId)
-  var availableIndices = toSeq(0 ..< poolPeerIds.len)
 
   # Select L mix nodes at random
   for i in 0 ..< PathLength:
     let (peerId, multiAddr, mixPubKey, hopDelay) =
       if i < PathLength - 1:
-        let randomIndexPosition = cryptoRandomInt(mixProto.rng, availableIndices.len).valueOr:
-          return err("failed to generate random num: " & error)
-        let selectedIndex = availableIndices[randomIndexPosition]
-        let randPeerId = poolPeerIds[selectedIndex]
-        availableIndices.del(randomIndexPosition)
+        let mixPubInfo = mixProto.drawUsable(poolPeerIds).valueOr:
+          return err(error)
         debug "Selected mix node for surbs: ", indexInPath = i
-        let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
-          return err("could not get mix pub info for peer: " & $randPeerId)
         (
           mixPubInfo.peerId,
           mixPubInfo.multiAddr,
@@ -982,7 +989,10 @@ proc anonymizeLocalProtocolSend*(
   let numMixNodes = mixProto.nodePool.len
   var numAvailableNodes = numMixNodes
 
-  if mixProto.nodePool.get(destination.peerId).isSome:
+  # The destination is usable when the pool has a hop address for it. A usable
+  # destination is not a hop on the way to itself, so one node less is available.
+  let destinationUsable = mixProto.nodePool.get(destination.peerId).isSome()
+  if destinationUsable:
     numAvailableNodes = numMixNodes - 1
 
   if numAvailableNodes < PathLength:
@@ -997,8 +1007,8 @@ proc anonymizeLocalProtocolSend*(
   let index = poolPeerIds.find(destination.peerId)
   if index != -1:
     availableIndices.del(index)
-  elif destination.kind == MixNode:
-    return err("Destination does not support mix")
+  if destination.kind == MixNode and not destinationUsable:
+    return err("Destination is not a mix node with a usable address")
 
   var nextHopAddr: MultiAddress
   var nextHopPeerId: PeerId
@@ -1034,18 +1044,18 @@ proc anonymizeLocalProtocolSend*(
     debug "Selected mix node: ", indexInPath = hop.len
 
     let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
-      mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
-      trace "Failed to get mix pub info for peer, skipping and removing node from pool",
-        peerId = randPeerId
-      discard mixProto.nodePool.remove(randPeerId)
+      # This is not an error. The peer has no address that a path can use now,
+      # and a later record can give it one. So it stays in the pool, and the
+      # draw continues with no error count.
+      trace "Skipping a pool member with no usable address", peerId = randPeerId
       continue
     let (peerId, multiAddr, mixPubKey, _) = mixPubInfo.get()
 
     let multiAddrBytes = multiAddrToBytes(peerId, multiAddr).valueOr:
-      mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
-      trace "Failed to convert multiaddress to bytes, skipping and removing node from pool",
+      # See above. The peer stays in the pool, and the draw continues. The pool
+      # returns only an address that the header can carry, so this is a guard.
+      trace "Failed to convert multiaddress to bytes, skipping node",
         error = error, peerId = peerId, multiAddr = multiAddr
-      discard mixProto.nodePool.remove(randPeerId)
       continue
 
     publicKeys.add(mixPubKey)
@@ -1167,28 +1177,26 @@ type PathNode = object
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]
 ): Result[seq[PathNode], string] {.raises: [].} =
-  let available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
+  var available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
   if available.len < count:
     return err(
       "Not enough mix nodes in pool (available=" & $available.len & ", needed=" & $count &
         ")"
     )
 
-  let firstCandidates = available.filterIt(not mixProto.hopIsBackedOff(it))
+  var firstCandidates = available.filterIt(not mixProto.hopIsBackedOff(it))
   if firstCandidates.len == 0:
     return err("Every first hop candidate is backed off")
-  let first = mixProto.rng.pickOne(firstCandidates).valueOr:
-    return err("No mix nodes available in pool")
-  var selectedPeerIds = @[first]
-  if count > 1:
-    let rest = mixProto.rng.pick(available.filterIt(it != first), count - 1).valueOr:
-      return err("No mix nodes available in pool")
-    selectedPeerIds.add(rest)
+  let first = ?mixProto.drawUsable(firstCandidates)
+  available.keepItIf(it != first.peerId)
+
+  # Only the first hop skips a backed off peer.
+  var mixPubInfos = @[first]
+  while mixPubInfos.len < count:
+    mixPubInfos.add(?mixProto.drawUsable(available))
 
   var selected: seq[PathNode]
-  for peerId in selectedPeerIds:
-    let mixPubInfo = mixProto.nodePool.get(peerId).valueOr:
-      return err("Could not get mix pub info for peer: " & $peerId)
+  for mixPubInfo in mixPubInfos:
     selected.add(
       PathNode(
         peerId: mixPubInfo.peerId,
@@ -1350,6 +1358,7 @@ proc init*(
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
     hopBackoff: Duration = DefaultHopBackoff,
+    hopAddressClasses: set[MixAddressClass] = AllMixAddressClasses,
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
   ##
@@ -1360,6 +1369,24 @@ proc init*(
   ## Mix node public keys should be populated via the nodePool after
   ## initialization using `mixProto.nodePool.add(mixPubInfo)`.
   ##
+  ## `hopAddressClasses` are the address classes that the hop address of a
+  ## pool member can have. A pool member with no address of these classes is
+  ## on no path that this node builds. The default accepts each class.
+  ##
+  ## The classes do not apply to the address of this node or to a destination
+  ## address, because the library does not select these addresses. The host
+  ## gives the address of this node in `mixNodeInfo` or with
+  ## `setLocalMultiAddr`. The caller of a send gives the destination address.
+  ## In each case the library has one address and no other address to use in
+  ## its place. So the host makes sure that other nodes can dial the address
+  ## of this node. If they cannot, no reply and no cover packet comes back to
+  ## this node. A destination that is a mix node has no address from the
+  ## caller. It is a pool member, so the classes apply to it.
+  ##
+  ## The classes also do not apply to an address that this node reads from
+  ## the header of a packet that it forwards. The sender of that packet built
+  ## the path.
+  ##
   ## Default delay strategy is `ExponentialDelayStrategy` (mean 100 ms for both
   ## per-hop encoding and the sender pre-send hold). When `spamProtection` is
   ## enabled the default is `SpamProtectionDelayStrategy` instead (same means,
@@ -1369,6 +1396,7 @@ proc init*(
   ## A first hop that fails a dial is not the first hop for `hopBackoff`.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
+  doAssert hopAddressClasses != {}, "hopAddressClasses must have one class or more"
 
   let store =
     if surbStore.isNil:
@@ -1385,7 +1413,7 @@ proc init*(
   mixProto.hopBackoff = hopBackoff
   mixProto.switch = switch
   mixProto.rng = switch.rng
-  mixProto.nodePool = MixNodePool.new(switch.peerStore)
+  mixProto.nodePool = MixNodePool.new(switch.peerStore, hopAddressClasses)
   mixProto.tagManager = tagManager
   mixProto.surbStore = store
   mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
@@ -1470,6 +1498,7 @@ proc new*(
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
     hopBackoff: Duration = DefaultHopBackoff,
+    hopAddressClasses: set[MixAddressClass] = AllMixAddressClasses,
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
   ##
@@ -1482,6 +1511,6 @@ proc new*(
   let mixProto = new(T)
   mixProto.init(
     mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic,
-    surbStore, hopBackoff,
+    surbStore, hopBackoff, hopAddressClasses,
   )
   mixProto

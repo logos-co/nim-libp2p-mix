@@ -5,7 +5,7 @@
 
 import results, sequtils
 import libp2p/[crypto/crypto, crypto/secp, multiaddress, peerid, peerstore]
-import libp2p_mix/[mix_node, pool]
+import libp2p_mix/[mix_node, mix_protocol, pool]
 import ./tools/unittest
 import ./tools/crypto
 import ./utils
@@ -208,6 +208,197 @@ suite "MixNodePool Tests":
     # When LastSeenOutboundBook is empty, fall back to AddressBook
     peerStore[LastSeenOutboundBook][pubInfo.peerId] = Opt.none(MultiAddress)
     check pool.get(pubInfo.peerId).get().multiAddr == addressBookAddr
+
+  test "get returns the address of the best class":
+    ## A different node dials the hop address, so the address that the most
+    ## nodes can dial comes first. The order of the AddressBook does not change
+    ## the result.
+    let pubInfo = mixNodes[0].toMixPubInfo()
+    let relayPeerId = PeerId.random(rng()).expect("could not generate relay peerId")
+    let publicAddr =
+      MultiAddress.init("/ip4/8.8.8.8/tcp/4242").expect("could not create multiaddr")
+    let relayedAddr = MultiAddress
+      .init("/ip4/8.8.8.8/tcp/4243/p2p/" & $relayPeerId & "/p2p-circuit")
+      .expect("could not create multiaddr")
+    let privateAddr = MultiAddress.init("/ip4/192.168.1.1/tcp/4244").expect(
+        "could not create multiaddr"
+      )
+    let loopbackAddr =
+      MultiAddress.init("/ip4/127.0.0.1/tcp/4245").expect("could not create multiaddr")
+
+    peerStore[MixPubKeyBook][pubInfo.peerId] = pubInfo.mixPubKey
+    peerStore[KeyBook][pubInfo.peerId] =
+      PublicKey(scheme: Secp256k1, skkey: pubInfo.libp2pPubKey)
+
+    peerStore[AddressBook][pubInfo.peerId] =
+      @[loopbackAddr, privateAddr, relayedAddr, publicAddr]
+    check pool.get(pubInfo.peerId).get().multiAddr == publicAddr
+
+    peerStore[AddressBook][pubInfo.peerId] =
+      @[publicAddr, relayedAddr, privateAddr, loopbackAddr]
+    check pool.get(pubInfo.peerId).get().multiAddr == publicAddr
+
+    peerStore[AddressBook][pubInfo.peerId] = @[loopbackAddr, privateAddr, relayedAddr]
+    check pool.get(pubInfo.peerId).get().multiAddr == relayedAddr
+
+    peerStore[AddressBook][pubInfo.peerId] = @[relayedAddr, privateAddr, loopbackAddr]
+    check pool.get(pubInfo.peerId).get().multiAddr == relayedAddr
+
+    peerStore[AddressBook][pubInfo.peerId] = @[loopbackAddr, privateAddr]
+    check pool.get(pubInfo.peerId).get().multiAddr == privateAddr
+
+    peerStore[AddressBook][pubInfo.peerId] = @[loopbackAddr]
+    check pool.get(pubInfo.peerId).get().multiAddr == loopbackAddr
+
+  test "get prefers the last dialed address only within its class":
+    ## The last dialed address is correct for this node. A node of another
+    ## network cannot dial it when its class is private.
+    let pubInfo = mixNodes[0].toMixPubInfo()
+    let publicAddr =
+      MultiAddress.init("/ip4/8.8.8.8/tcp/4242").expect("could not create multiaddr")
+    let otherPublicAddr =
+      MultiAddress.init("/ip4/1.1.1.1/tcp/4243").expect("could not create multiaddr")
+    let privateAddr = MultiAddress.init("/ip4/192.168.1.1/tcp/4244").expect(
+        "could not create multiaddr"
+      )
+
+    peerStore[MixPubKeyBook][pubInfo.peerId] = pubInfo.mixPubKey
+    peerStore[KeyBook][pubInfo.peerId] =
+      PublicKey(scheme: Secp256k1, skkey: pubInfo.libp2pPubKey)
+    peerStore[AddressBook][pubInfo.peerId] = @[publicAddr]
+
+    peerStore[LastSeenOutboundBook][pubInfo.peerId] = Opt.some(privateAddr)
+    check pool.get(pubInfo.peerId).get().multiAddr == publicAddr
+
+    peerStore[LastSeenOutboundBook][pubInfo.peerId] = Opt.some(otherPublicAddr)
+    check pool.get(pubInfo.peerId).get().multiAddr == otherPublicAddr
+
+  test "get returns none for a peer with no address of an allowed class":
+    let pubInfo = mixNodes[0].toMixPubInfo()
+    let publicPool = MixNodePool.new(peerStore, {MixAddressClass.Public})
+    let relayPeerId = PeerId.random(rng()).expect("could not generate relay peerId")
+    let publicAddr =
+      MultiAddress.init("/ip4/8.8.8.8/tcp/4242").expect("could not create multiaddr")
+    let relayedAddr = MultiAddress
+      .init("/ip4/8.8.8.8/tcp/4243/p2p/" & $relayPeerId & "/p2p-circuit")
+      .expect("could not create multiaddr")
+    let privateAddr = MultiAddress.init("/ip4/192.168.1.1/tcp/4244").expect(
+        "could not create multiaddr"
+      )
+    let loopbackAddr =
+      MultiAddress.init("/ip4/127.0.0.1/tcp/4245").expect("could not create multiaddr")
+
+    peerStore[MixPubKeyBook][pubInfo.peerId] = pubInfo.mixPubKey
+    peerStore[KeyBook][pubInfo.peerId] =
+      PublicKey(scheme: Secp256k1, skkey: pubInfo.libp2pPubKey)
+
+    peerStore[AddressBook][pubInfo.peerId] = @[loopbackAddr, privateAddr, relayedAddr]
+    check:
+      publicPool.get(pubInfo.peerId).isNone
+      pool.get(pubInfo.peerId).isSome
+
+    peerStore[AddressBook][pubInfo.peerId] =
+      @[loopbackAddr, privateAddr, relayedAddr, publicAddr]
+    check publicPool.get(pubInfo.peerId).get().multiAddr == publicAddr
+
+  test "get gives a relay route the class of the relay address":
+    ## The previous hop dials the relay. A relay with a private or loopback
+    ## address is not a public route.
+    let pubInfo = mixNodes[0].toMixPubInfo()
+    let publicPool =
+      MixNodePool.new(peerStore, {MixAddressClass.Public, MixAddressClass.Relayed})
+    let relayPeerId = PeerId.random(rng()).expect("could not generate relay peerId")
+    let relaySuffix = "/p2p/" & $relayPeerId & "/p2p-circuit"
+    let publicRelayAddr = MultiAddress
+      .init("/ip4/8.8.8.8/tcp/4242" & relaySuffix)
+      .expect("could not create multiaddr")
+    let privateRelayAddr = MultiAddress
+      .init("/ip4/192.168.1.1/tcp/4243" & relaySuffix)
+      .expect("could not create multiaddr")
+    let loopbackRelayAddr = MultiAddress
+      .init("/ip4/127.0.0.1/tcp/4244" & relaySuffix)
+      .expect("could not create multiaddr")
+    let privateAddr =
+      MultiAddress.init("/ip4/10.0.0.1/tcp/4245").expect("could not create multiaddr")
+
+    peerStore[MixPubKeyBook][pubInfo.peerId] = pubInfo.mixPubKey
+    peerStore[KeyBook][pubInfo.peerId] =
+      PublicKey(scheme: Secp256k1, skkey: pubInfo.libp2pPubKey)
+
+    peerStore[AddressBook][pubInfo.peerId] =
+      @[loopbackRelayAddr, privateRelayAddr, privateAddr]
+    check:
+      publicPool.get(pubInfo.peerId).isNone
+      pool.get(pubInfo.peerId).get().multiAddr == privateRelayAddr
+
+    peerStore[AddressBook][pubInfo.peerId] = @[loopbackRelayAddr, privateAddr]
+    check pool.get(pubInfo.peerId).get().multiAddr == privateAddr
+
+    peerStore[AddressBook][pubInfo.peerId] =
+      @[loopbackRelayAddr, privateRelayAddr, privateAddr, publicRelayAddr]
+    check:
+      publicPool.get(pubInfo.peerId).get().multiAddr == publicRelayAddr
+      pool.get(pubInfo.peerId).get().multiAddr == publicRelayAddr
+
+  test "addressClass returns the class of an address":
+    let relayPeerId = PeerId.random(rng()).expect("could not generate relay peerId")
+    let relaySuffix = "/p2p/" & $relayPeerId & "/p2p-circuit"
+    proc classOf(address: string): Opt[MixAddressClass] =
+      MultiAddress.init(address).expect("could not create multiaddr").addressClass()
+
+    check:
+      classOf("/ip4/8.8.8.8/tcp/4242") == Opt.some(MixAddressClass.Public)
+      classOf("/ip4/8.8.8.8/udp/4242/quic-v1") == Opt.some(MixAddressClass.Public)
+      classOf("/ip6/2001:4860:4860::8888/tcp/4242") == Opt.some(MixAddressClass.Public)
+      classOf("/ip4/8.8.8.8/tcp/4242" & relaySuffix) == Opt.some(
+        MixAddressClass.Relayed
+      )
+      classOf("/ip4/8.8.8.8/udp/4242/quic-v1" & relaySuffix) ==
+        Opt.some(MixAddressClass.Relayed)
+      classOf("/ip4/192.168.1.1/tcp/4242") == Opt.some(MixAddressClass.Private)
+      classOf("/ip4/10.0.0.1/tcp/4242") == Opt.some(MixAddressClass.Private)
+      classOf("/ip4/100.64.0.1/tcp/4242") == Opt.some(MixAddressClass.Private)
+      classOf("/ip4/169.254.0.1/tcp/4242") == Opt.some(MixAddressClass.Private)
+      classOf("/ip4/192.168.1.1/tcp/4242" & relaySuffix) ==
+        Opt.some(MixAddressClass.Private)
+      classOf("/ip4/127.0.0.1/tcp/4242") == Opt.some(MixAddressClass.Loopback)
+      classOf("/ip6/::1/tcp/4242") == Opt.some(MixAddressClass.Loopback)
+      classOf("/ip4/0.0.0.0/tcp/4242") == Opt.some(MixAddressClass.Loopback)
+      classOf("/ip4/127.0.0.1/tcp/4242" & relaySuffix) ==
+        Opt.some(MixAddressClass.Loopback)
+      classOf("/ip4/224.0.0.1/tcp/4242").isNone
+      classOf("/ip4/255.255.255.255/tcp/4242").isNone
+      classOf("/dns4/example.com/tcp/4242").isNone
+      classOf("/ip4/8.8.8.8").isNone
+
+  test "MixProtocol.new refuses an empty set of hop address classes":
+    let info = mixNodes[0]
+    let switch = createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey))
+    expect AssertionDefect:
+      discard MixProtocol.new(info, switch, hopAddressClasses = {})
+
+  test "get skips an address that the Sphinx header cannot carry":
+    ## A relay route through an Ed25519 relay has a supported transport, and
+    ## the header has no encoding for the ID of the relay.
+    let pubInfo = mixNodes[0].toMixPubInfo()
+    let relayKey = PrivateKey.random(PKScheme.Ed25519, rng()).expect("relay key")
+    let relayPeerId = PeerId.init(relayKey).expect("relay peerId")
+    let relayedAddr = MultiAddress
+      .init("/ip4/8.8.8.8/tcp/4242/p2p/" & $relayPeerId & "/p2p-circuit")
+      .expect("could not create multiaddr")
+    let privateAddr = MultiAddress.init("/ip4/192.168.1.1/tcp/4243").expect(
+        "could not create multiaddr"
+      )
+
+    peerStore[MixPubKeyBook][pubInfo.peerId] = pubInfo.mixPubKey
+    peerStore[KeyBook][pubInfo.peerId] =
+      PublicKey(scheme: Secp256k1, skkey: pubInfo.libp2pPubKey)
+
+    peerStore[AddressBook][pubInfo.peerId] = @[relayedAddr]
+    check pool.get(pubInfo.peerId).isNone
+
+    peerStore[AddressBook][pubInfo.peerId] = @[relayedAddr, privateAddr]
+    check pool.get(pubInfo.peerId).get().multiAddr == privateAddr
 
   test "multiple operations sequence":
     # Add 3 nodes
