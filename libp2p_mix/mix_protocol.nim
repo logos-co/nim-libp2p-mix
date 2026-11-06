@@ -338,6 +338,32 @@ proc verifyProof(
   trace "Spam protection proof verified successfully"
   return ok()
 
+type ProofGenFuture =
+  Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]]
+
+proc refundUnwritten(
+    mixProto: MixProtocol, claimEpoch: uint64, proofToken: seq[byte] = @[]
+) =
+  ## Give back the slot and the proof of a packet that this node did not write.
+  ## The two go together, so the claimed slots stay in step with the message
+  ## IDs that the proofs use.
+  if proofToken.len > 0:
+    mixProto.spamProtection.withValue(sp):
+      sp.reclaimProofToken(proofToken)
+  mixProto.coverTraffic.withValue(ct):
+    ct.slotPool.unclaimSlot(claimEpoch)
+
+proc refundCancelledHold(
+    mixProto: MixProtocol, claimEpoch: uint64, proofGen: ProofGenFuture
+) =
+  ## Refund a packet that a cancel ends in its hold, when its proof is ready.
+  ## A proof that is still in work keeps the slot, because its provider can
+  ## have used the message ID already.
+  if proofGen.completed():
+    mixProto.refundUnwritten(
+      claimEpoch, proofGen.value().valueOr((@[], @[])).proofToken
+    )
+
 method handleMixMessages*(
     mixProto: MixProtocol,
     fromPeerId: PeerId,
@@ -502,10 +528,6 @@ method handleMixMessages*(
         mixProto.spamProtection.withValue(sp):
           sp.reclaimProofToken(claim.reclaimedToken)
 
-    template refundSlot(): untyped =
-      mixProto.coverTraffic.withValue(ct):
-        ct.slotPool.unclaimSlot(claimEpoch)
-
     let actualDelay = mixProto.delayStrategy.generateForIntermediate(processedSP.delay)
     trace "Computed delay", encodedDelay = processedSP.delay, actualDelay
 
@@ -515,7 +537,7 @@ method handleMixMessages*(
     let (nextPeerId, nextAddr) = bytesToMultiAddr(nextHopBytes).valueOr:
       trace "Failed to convert bytes to multiaddress", err = error
       mix_messages_error.inc(labelValues = ["Intermediate", "INVALID_DEST"])
-      refundSlot()
+      mixProto.refundUnwritten(claimEpoch)
       return
 
     when defined(enable_mix_benchmarks):
@@ -549,7 +571,11 @@ method handleMixMessages*(
 
     defer:
       await cancelAndWait(proofGenFut, delayFut)
-    await allFutures(proofGenFut, delayFut)
+    try:
+      await allFutures(proofGenFut, delayFut)
+    except CancelledError as exc:
+      mixProto.refundCancelledHold(claimEpoch, proofGenFut)
+      raise exc
 
     mixProto.spamProtection.withValue(sp):
       if proofGenTimeMs > actualDelay.int64:
@@ -560,7 +586,7 @@ method handleMixMessages*(
 
     let (outgoingPacket, proofToken) = (await proofGenFut).valueOr:
       error "Failed to generate spam protection proof for next hop", err = error
-      refundSlot()
+      mixProto.refundUnwritten(claimEpoch)
       return
 
     # Only a failed first dial proves the packet never left this node, so its
@@ -575,10 +601,7 @@ method handleMixMessages*(
         if mixProto.started:
           error "Failed to dial next hop: ", err = exc.msg
           mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
-        if proofToken.len > 0:
-          mixProto.spamProtection.withValue(sp):
-            sp.reclaimProofToken(proofToken)
-        refundSlot()
+        mixProto.refundUnwritten(claimEpoch, proofToken)
         return
 
     try:
@@ -825,22 +848,21 @@ type SendPacketLogConfig = object
     startTime: Time
     metadata: Metadata
 
-type SendPacketError = object
-  msg: string
-  neverWritten: bool
-    ## True only when no byte of the packet can have left this node, which is
-    ## the one case where its slot may be refunded and its proof reused.
-
 proc sendPacket(
     mixProto: MixProtocol,
     peerId: PeerId,
     multiAddress: MultiAddress,
     sphinxPacket: SphinxPacket,
     logConfig: SendPacketLogConfig,
-): Future[Result[void, SendPacketError]] {.async: (raises: [CancelledError]).} =
+    claimEpoch: uint64,
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   ## Send the wrapped message to the first mix node in the selected path.
   ## Applies the sender pre-send delay (mix.md §8.5.2 step 3.f) before the
   ## first-hop write to break burst timing correlation.
+  ##
+  ## The caller claimed a slot in `claimEpoch`. An exit before the first write,
+  ## an error or a cancel, refunds that slot and reclaims the proof. Only this
+  ## procedure knows if a write started.
 
   let label = $logConfig.logType
   let serialized = sphinxPacket.serialize()
@@ -866,7 +888,11 @@ proc sendPacket(
 
   defer:
     await cancelAndWait(proofGenFut, delayFut)
-  await allFutures(proofGenFut, delayFut)
+  try:
+    await allFutures(proofGenFut, delayFut)
+  except CancelledError as exc:
+    mixProto.refundCancelledHold(claimEpoch, proofGenFut)
+    raise exc
 
   mixProto.spamProtection.withValue(sp):
     if proofGenTimeMs > initialDelay.int64:
@@ -876,7 +902,8 @@ proc sendPacket(
         hint = "Increase the minimum delay floor or reduce proof generation time"
 
   let (packetToSend, proofToken) = (await proofGenFut).valueOr:
-    return err(SendPacketError(msg: error, neverWritten: true))
+    mixProto.refundUnwritten(claimEpoch)
+    return err(error)
 
   when defined(enable_mix_benchmarks):
     if logConfig.logType == Entry:
@@ -904,15 +931,11 @@ proc sendPacket(
         mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
         if ownFirstHop:
           mixProto.backOffHop(peerId, exc)
-      if proofToken.len > 0:
-        mixProto.spamProtection.withValue(sp):
-          sp.reclaimProofToken(proofToken)
-      return err(
-        SendPacketError(
-          msg: fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}",
-          neverWritten: true,
-        )
-      )
+      mixProto.refundUnwritten(claimEpoch, proofToken)
+      return err(fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}")
+    except CancelledError as exc:
+      mixProto.refundUnwritten(claimEpoch, proofToken)
+      raise exc
 
   try:
     when defined(enable_mix_benchmarks):
@@ -928,18 +951,10 @@ proc sendPacket(
       mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
       if ownFirstHop:
         mixProto.backOffHop(peerId, exc)
-    return err(
-      SendPacketError(
-        msg: fmt"Failed to redial next hop ({peerId}, {multiAddress}): {exc.msg}"
-      )
-    )
+    return err(fmt"Failed to redial next hop ({peerId}, {multiAddress}): {exc.msg}")
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
-    return err(
-      SendPacketError(
-        msg: fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}"
-      )
-    )
+    return err(fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}")
   except CancelledError as exc:
     raise exc
 
@@ -1131,13 +1146,12 @@ proc sendLocal(
         sp.reclaimProofToken(claim.reclaimedToken)
 
   # Send the wrapped message to the first mix node in the selected path
-  (await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)).isOkOr:
-    # A packet that may have reached the next hop keeps its slot, matching its
-    # proof, which sendPacket only reclaims when nothing was written.
-    if error.neverWritten:
-      mixProto.coverTraffic.withValue(ct):
-        ct.slotPool.unclaimSlot(claimEpoch)
-    return err(error.msg)
+  (
+    await mixProto.sendPacket(
+      nextHopPeerId, nextHopAddr, sphinxPacket, logConfig, claimEpoch
+    )
+  ).isOkOr:
+    return err(error)
 
   sent = true
   return ok(session)
@@ -1199,15 +1213,10 @@ proc sendSurbReply*(
 
   (
     await mixProto.sendPacket(
-      peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
+      peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply), claimEpoch
     )
   ).isOkOr:
-    # A packet that may have reached the next hop keeps its slot, matching its
-    # proof, which sendPacket only reclaims when nothing was written.
-    if error.neverWritten:
-      mixProto.coverTraffic.withValue(ct):
-        ct.slotPool.unclaimSlot(claimEpoch)
-    return err("could not send reply: " & error.msg)
+    return err("could not send reply: " & error)
   return ok()
 
 proc selectRandomNodes(
