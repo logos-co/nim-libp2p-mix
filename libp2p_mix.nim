@@ -4,7 +4,7 @@
 import
   ./libp2p_mix/[
     mix_protocol, mix_node, entry_connection, exit_layer, spam_protection,
-    delay_strategy, pool,
+    delay_strategy, pool, key_rotation,
   ]
 import libp2p/stream/connection
 import chronos
@@ -32,6 +32,13 @@ export sendSurbReply
 export SpamProtection
 export generateProof
 export verifyProof
+
+# Key rotation exports
+export KeyRotationConfig
+export acceptanceWindow
+export MixKeyRing
+export KeyHandler
+export setKeyHandler
 
 export NoSamplingDelayStrategy
 export ExponentialDelayStrategy

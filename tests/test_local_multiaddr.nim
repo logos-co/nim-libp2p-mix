@@ -77,12 +77,12 @@ suite "setLocalMultiAddr":
     startAndDeferStop(nodes)
 
     let mix = nodes[0]
-    let original = mix.localMixPubInfo().multiAddr
+    let original = mix.localMixPubInfo().expect("local mix info").multiAddr
     let updated = MultiAddress.init("/ip4/203.0.113.10/tcp/9000").tryGet()
 
     check mix.setLocalMultiAddr(updated).isOk
-    check mix.localMixPubInfo().multiAddr == updated
-    check mix.localMixPubInfo().multiAddr != original
+    check mix.localMixPubInfo().expect("local mix info").multiAddr == updated
+    check mix.localMixPubInfo().expect("local mix info").multiAddr != original
 
     # Force the SURB intermediate path onto infos[3] and infos[4] so we can
     # peel Sphinx layers with known private keys. Pool must still have
@@ -109,19 +109,22 @@ suite "setLocalMultiAddr":
     startAndDeferStop(nodes)
 
     let mix = nodes[0]
-    let before = mix.localMixPubInfo().multiAddr
+    let before = mix.localMixPubInfo().expect("local mix info").multiAddr
 
     # Missing transport (ip4 only)
     let noTransport = MultiAddress.init("/ip4/203.0.113.10").tryGet()
     check mix.setLocalMultiAddr(noTransport).isErr
-    check mix.localMixPubInfo().multiAddr == before
+    check mix.localMixPubInfo().expect("local mix info").multiAddr == before
 
     # Trailing destination /p2p/<peerId> is not a mix-encodable hop address
     let withP2p = MultiAddress
-      .init("/ip4/203.0.113.10/tcp/9000/p2p/" & $mix.localMixPubInfo().peerId)
+      .init(
+        "/ip4/203.0.113.10/tcp/9000/p2p/" &
+          $mix.localMixPubInfo().expect("local mix info").peerId
+      )
       .tryGet()
     check mix.setLocalMultiAddr(withP2p).isErr
-    check mix.localMixPubInfo().multiAddr == before
+    check mix.localMixPubInfo().expect("local mix info").multiAddr == before
 
   asyncTest "cover packet build uses updated self multiaddr":
     let (nodes, infos) = await setupNodesWithInfos(PathLength + 1)

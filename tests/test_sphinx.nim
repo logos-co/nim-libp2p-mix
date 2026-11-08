@@ -4,8 +4,9 @@
 {.used.}
 
 import random, results
+import chronos
 import libp2p/crypto/crypto
-import libp2p_mix/[curve25519, serialization, sphinx, tag_manager, delay]
+import libp2p_mix/[curve25519, key_rotation, serialization, sphinx, tag_manager, delay]
 import ./tools/[unittest, crypto]
 
 # Helper function to pad/truncate message
@@ -723,3 +724,207 @@ suite "Sphinx Tests":
     check:
       normal.status == reused.status
       normal.serializedSphinxPacket == reused.serializedSphinxPacket
+
+suite "Sphinx Key Rotation":
+  let start = Moment.init(1_000_000, Second)
+
+  var
+    config: KeyRotationConfig
+    ring: MixKeyRing
+
+  template rotated(): Moment =
+    ## After the first rotation: the current key, and the key it replaced.
+    start + config.rotationInterval
+
+  setup:
+    config = KeyRotationConfig.init().expect("default config")
+    ring = MixKeyRing.new(config, rng(), replayTableCapacity = 16)
+    ring.update(start)
+    ring.update(rotated())
+
+  proc packetFor(firstHopKey: FieldElement): SphinxPacket =
+    ## A packet whose first hop is built for firstHopKey.
+    var (message, _, publicKeys, delay, hops, dest) = createDummyData()
+    publicKeys[0] = firstHopKey
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    SphinxPacket.deserialize(sp.serialize()).expect("deserialize error")
+
+  test "matchKey finds the key the packet was built for":
+    let candidates = ring.candidates(rotated())
+    check candidates.len == 2
+
+    for key in candidates:
+      let match =
+        matchKey(packetFor(key.publicKey), candidates).expect("matchKey error")
+      check:
+        match.status == KeyMatched
+        match.key == key
+
+  test "matchKey stores no tag":
+    let candidates = ring.candidates(rotated())
+    let match =
+      matchKey(packetFor(candidates[1].publicKey), candidates).expect("matchKey error")
+    check:
+      match.status == KeyMatched
+      candidates[0].tagCount == 0
+      candidates[1].tagCount == 0
+
+  test "a packet built for no candidate stores no tag":
+    let candidates = ring.candidates(rotated())
+    let (_, otherKey) = generateKeyPair().expect("generate keypair error")
+    let packet = packetFor(otherKey)
+
+    check:
+      matchKey(packet, candidates).expect("matchKey error").status == NoKeyMatched
+      candidates[0].tagCount == 0
+      candidates[1].tagCount == 0
+
+  test "the tag is stored only in the matched key's replay table":
+    let candidates = ring.candidates(rotated())
+    let packet = packetFor(candidates[1].publicKey)
+    var match = matchKey(packet, candidates).expect("matchKey error")
+
+    let processed = processSphinxPacket(packet, match).expect("processing error")
+    check:
+      processed.status == Intermediate
+      candidates[0].tagCount == 0
+      candidates[1].tagCount == 1
+
+  test "processing a match consumes it":
+    let candidates = ring.candidates(rotated())
+    let packet = packetFor(candidates[0].publicKey)
+    var match = matchKey(packet, candidates).expect("matchKey error")
+
+    discard processSphinxPacket(packet, match).expect("processing error")
+    check:
+      match.status == NoKeyMatched
+      processSphinxPacket(packet, match).error == "Unmatched packet: NoKeyMatched"
+
+  test "wiping a match leaves nothing to process":
+    let candidates = ring.candidates(rotated())
+    let packet = packetFor(candidates[0].publicKey)
+    var match = matchKey(packet, candidates).expect("matchKey error")
+    check match.status == KeyMatched
+
+    match.wipe()
+    check:
+      match.status == NoKeyMatched
+      processSphinxPacket(packet, match).error == "Unmatched packet: NoKeyMatched"
+      candidates[0].tagCount == 0
+
+  test "processSphinxPacket rejects an unmatched packet":
+    let candidates = ring.candidates(rotated())
+    let packet = packetFor(candidates[0].publicKey)
+    var first = matchKey(packet, candidates).expect("matchKey error")
+    discard processSphinxPacket(packet, first).expect("processing error")
+
+    var match = matchKey(packet, candidates).expect("matchKey error")
+    check:
+      match.status == KeyReplayed
+      processSphinxPacket(packet, match).error == "Unmatched packet: KeyReplayed"
+
+  test "matchKey rejects a low-order alpha":
+    var packetBytes = packetFor(ring.currentPublicKey().get()).serialize()
+    for i in 0 ..< FieldElementSize:
+      packetBytes[i] = 0
+    let packet = SphinxPacket.deserialize(packetBytes).expect("deserialize error")
+
+    check matchKey(packet, ring.candidates(rotated())).isErr
+
+  test "a match applied to another packet stores no tag":
+    let candidates = ring.candidates(rotated())
+    let packet = packetFor(candidates[0].publicKey)
+    var match = matchKey(packet, candidates).expect("matchKey error")
+
+    check:
+      processSphinxPacket(packetFor(candidates[0].publicKey), match)
+        .expect("processing error").status == InvalidMAC
+      candidates[0].tagCount == 0
+
+  test "a replay is detected under the current key":
+    let candidates = ring.candidates(rotated())
+    let packet = packetFor(candidates[0].publicKey)
+    var match = matchKey(packet, candidates).expect("matchKey error")
+    discard processSphinxPacket(packet, match).expect("processing error")
+
+    check matchKey(packet, candidates).expect("matchKey error").status == KeyReplayed
+
+  test "a replay is detected under an old key":
+    let candidates = ring.candidates(rotated())
+    let packet = packetFor(candidates[1].publicKey)
+    var
+      match = matchKey(packet, candidates).expect("matchKey error")
+      matchedBeforeFirst = matchKey(packet, candidates).expect("matchKey error")
+    discard processSphinxPacket(packet, match).expect("processing error")
+
+    check:
+      matchKey(packet, candidates).expect("matchKey error").status == KeyReplayed
+      processSphinxPacket(packet, matchedBeforeFirst).expect("processing error").status ==
+        Duplicate
+
+  test "a key destroyed after matchKey does not process the packet":
+    let candidates = ring.candidates(rotated())
+    let replaced = candidates[1]
+
+    let packet = packetFor(replaced.publicKey)
+    var match = matchKey(packet, candidates).expect("matchKey error")
+    check match.key == replaced
+
+    ring.update(rotated() + config.graceWindow)
+    check:
+      replaced.isDestroyed
+      processSphinxPacket(packet, match).error == "Destroyed mix key"
+      matchKey(packet, candidates).expect("matchKey error").status == NoKeyMatched
+
+  test "a full replay table discards new packets and still detects replays":
+    let small = MixKeyRing.new(config, rng(), replayTableCapacity = 1)
+    small.update(start)
+    let key = small.candidates(start)[0]
+    let
+      candidates = @[key]
+      first = packetFor(key.publicKey)
+      second = packetFor(key.publicKey)
+    var
+      firstMatch = matchKey(first, candidates).expect("matchKey error")
+      secondMatch = matchKey(second, candidates).expect("matchKey error")
+
+    check:
+      processSphinxPacket(first, firstMatch).expect("processing error").status ==
+        Intermediate
+      processSphinxPacket(second, secondMatch).expect("processing error").status ==
+        ReplayCacheFull
+      key.tagCount == 1
+      matchKey(second, candidates).expect("matchKey error").status == KeyTableFull
+      matchKey(first, candidates).expect("matchKey error").status == KeyReplayed
+
+  test "a packet is processed end to end under each hop's current key":
+    let (message, _, _, delay, hops, dest) = createDummyData()
+    var
+      rings: seq[MixKeyRing]
+      publicKeys: seq[FieldElement]
+    for _ in 0 ..< PathLength:
+      let hopRing = MixKeyRing.new(config, rng(), replayTableCapacity = 16)
+      hopRing.update(start)
+      rings.add(hopRing)
+      publicKeys.add(hopRing.currentPublicKey().get())
+
+    let sp = wrapInSphinxPacket(message, publicKeys, delay, hops, dest).expect(
+        "sphinx wrap error"
+      )
+    var packet = SphinxPacket.deserialize(sp.serialize()).expect("deserialize error")
+
+    for i, hopRing in rings:
+      var match = matchKey(packet, hopRing.candidates(start)).expect("matchKey error")
+      check match.status == KeyMatched
+      let processed = processSphinxPacket(packet, match).expect("processing error")
+      if i < rings.high:
+        check processed.status == Intermediate
+        packet = SphinxPacket.deserialize(processed.serializedSphinxPacket).expect(
+            "deserialize error"
+          )
+      else:
+        check:
+          processed.status == Exit
+          processed.messageChunk == message
