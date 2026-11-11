@@ -30,6 +30,7 @@ type
     firstHopPeerId*: PeerId
     firstHopAddr*: MultiAddress
     proofToken*: seq[byte]
+    recordsStaleAt*: Opt[Moment]
 
   BuildCoverPacketProc* = proc(epoch: uint64): Future[Result[CoverPacketBuild, string]] {.
     async: (raises: [CancelledError])
@@ -50,6 +51,9 @@ type
     firstHopPeerId*: PeerId
     firstHopAddr*: MultiAddress
     proofToken*: seq[byte] ## Opaque token from spam protection proof generation
+    recordsStaleAt*: Opt[Moment]
+      ## When the oldest record of its hops' keys becomes too old to use, none
+      ## without a key ring
 
   ClaimResult* = object
     success*: bool
@@ -418,6 +422,15 @@ proc emitCoverPacket*(
       return
     ct.slotPool.dequeue().withValue(pkt):
       let claimEpoch = ct.slotPool.epoch
+      # A pre-built packet whose records became too old is rebuilt before it is
+      # sent (Mix Key Rotation spec §5).
+      if pkt.recordsStaleAt.isSome and Moment.now() > pkt.recordsStaleAt.get():
+        trace "Prebuilt cover packet uses stale records, rebuilding on-demand"
+        mix_cover_error.inc(labelValues = ["STALE_RECORDS"])
+        if pkt.proofToken.len > 0 and ct.reclaimProofToken != nil:
+          ct.reclaimProofToken(pkt.proofToken)
+        await ct.buildOnDemandOverlapped(claimEpoch)
+        return
       let delayFut = ct.applySendDelay()
       let proofFut = ct.generateAndAppendCoverProof(pkt.packet, claimEpoch)
       defer:
@@ -527,6 +540,7 @@ proc runPrecomputeLoop(
             firstHopPeerId: coverBuild.firstHopPeerId,
             firstHopAddr: coverBuild.firstHopAddr,
             proofToken: coverBuild.proofToken,
+            recordsStaleAt: coverBuild.recordsStaleAt,
           )
         )
         if not added:

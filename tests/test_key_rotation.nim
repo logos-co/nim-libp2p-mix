@@ -33,6 +33,8 @@ suite "Key Rotation Config":
       config.rotationInterval == chronos.hours(1)
       config.graceWindow == chronos.minutes(90)
       config.acceptanceWindow == chronos.minutes(150)
+      config.surbLifetime == chronos.minutes(15)
+      config.surbHoldTime == chronos.minutes(13)
 
   test "init rejects timings that violate the constraints":
     check:
@@ -81,7 +83,7 @@ suite "Mix Key Ring":
       published[][1] == ring.currentPublicKey().get()
       ring.candidates(rotations(1))[1] == first
 
-  test "a replaced key is accepted for the grace window, then destroyed":
+  test "an old key is accepted for the grace window, then destroyed":
     ring.update(start)
     let first = ring.candidates(start)[0]
     ring.update(rotations(1))
@@ -97,7 +99,7 @@ suite "Mix Key Ring":
       first.isDestroyed
       ring.len == 2
 
-  test "keys are tried from the current to the most recently replaced":
+  test "keys are tried from the current key to the old keys, newest first":
     for n in 0 .. 2:
       ring.update(rotations(n))
 

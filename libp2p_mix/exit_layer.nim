@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 # Copyright (c) Status Research & Development GmbH
 
-import chronicles, chronos, metrics, std/sequtils, std/tables
+import chronicles, chronos, metrics, results, std/sequtils, std/tables
 import libp2p/builders
 import libp2p/stream/connection
 import libp2p/varint
@@ -33,16 +33,28 @@ type ExitLayer* = object
   switch: Switch
   onReplyDialer: OnReplyDialer
   destReadBehaviors: TableRef[string, DestReadBehavior]
+  surbHoldTime: Opt[Duration]
 
 proc init*(
     T: typedesc[ExitLayer],
     switch: Switch,
     onReplyDialer: OnReplyDialer,
     destReadBehaviors: TableRef[string, DestReadBehavior],
+    surbHoldTime: Opt[Duration] = Opt.none(Duration),
 ): T =
+  ## surbHoldTime bounds how long received SURBs are held before the reply is
+  ## sent; none holds them until the destination responds.
   ExitLayer(
-    switch: switch, onReplyDialer: onReplyDialer, destReadBehaviors: destReadBehaviors
+    switch: switch,
+    onReplyDialer: onReplyDialer,
+    destReadBehaviors: destReadBehaviors,
+    surbHoldTime: surbHoldTime,
   )
+
+proc untilSurbsExpire(self: ExitLayer, receivedAt: Moment): Duration {.raises: [].} =
+  let holdTime = self.surbHoldTime.valueOr:
+    return InfiniteDuration
+  receivedAt + holdTime - Moment.now()
 
 proc replyDialerCbFactory(self: ExitLayer): MixReplyDialer =
   return proc(
@@ -54,9 +66,13 @@ proc replyDialerCbFactory(self: ExitLayer): MixReplyDialer =
     await allFutures(respFuts)
 
 proc reply(
-    self: ExitLayer, surbs: seq[SURB], response: sink seq[byte]
+    self: ExitLayer, surbs: seq[SURB], response: sink seq[byte], receivedAt: Moment
 ) {.async: (raises: [CancelledError]).} =
   if surbs.len == 0:
+    return
+  if self.untilSurbsExpire(receivedAt) == ZeroDuration:
+    debug "SURBs expired before the reply was sent"
+    mix_messages_error.inc(labelValues = ["ExitLayer", "SURB_EXPIRED"])
     return
 
   let replyConn = MixReplyConnection.new(surbs, self.replyDialerCbFactory())
@@ -74,6 +90,7 @@ when defined(libp2p_mix_experimental_exit_is_dest):
   proc runHandler(
       self: ExitLayer, codec: string, message: seq[byte], surbs: seq[SURB]
   ) {.async: (raises: [CancelledError]).} =
+    let receivedAt = Moment.now()
     let exitConn = MixExitConnection.new(message, surbs)
     defer:
       await exitConn.close()
@@ -96,7 +113,7 @@ when defined(libp2p_mix_experimental_exit_is_dest):
     let response = exitConn.getResponse()
     let unclaimedSurbs = exitConn.takeSURBs()
     if unclaimedSurbs.len != 0:
-      await self.reply(unclaimedSurbs, response)
+      await self.reply(unclaimedSurbs, response, receivedAt)
 
 proc fwdRequest(
     self: ExitLayer,
@@ -110,6 +127,7 @@ proc fwdRequest(
   # for now
   # https://github.com/vacp2p/mix/issues/86
 
+  let receivedAt = Moment.now()
   if destination == Hop():
     error "no destination available"
     mix_messages_error.inc(labelValues = ["Exit", "NO_DESTINATION"])
@@ -140,7 +158,8 @@ proc fwdRequest(
       except KeyError:
         raiseAssert "checked with HasKey"
 
-      let rawResponse = await behavior.callback(destConn)
+      let rawResponse =
+        await behavior.callback(destConn).wait(self.untilSurbsExpire(receivedAt))
 
       # Add length prefix back only if the behavior callback uses length-prefixed reads
       # (e.g., readLp). This ensures that when application code calls readLp() on the
@@ -160,10 +179,14 @@ proc fwdRequest(
     error "Failed to dial next hop: ", err = exc.msg
     mix_messages_error.inc(labelValues = ["ExitLayer", "DIAL_FAILED"])
     return
+  except AsyncTimeoutError:
+    debug "SURBs expired before the destination responded"
+    mix_messages_error.inc(labelValues = ["ExitLayer", "SURB_EXPIRED"])
+    return
   except CancelledError as exc:
     raise exc
 
-  await self.reply(surbs, response)
+  await self.reply(surbs, response, receivedAt)
 
 proc onMessage*(
     self: ExitLayer,

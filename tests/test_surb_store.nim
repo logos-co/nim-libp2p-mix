@@ -3,6 +3,7 @@
 
 {.used.}
 
+import std/sequtils
 import chronos
 import libp2p_mix/[serialization, surb_store]
 import ./tools/unittest
@@ -119,6 +120,20 @@ suite "SURB Store":
 
     check store.purgeExpired(base + chronos.minutes(30)) == 5
     check store.len == 0
+
+  test "wiping credentials makes their reply keys unrecoverable":
+    var creds = makeCreds(store.newGroup(base))
+    creds.wipe()
+    check:
+      creds.surbKey.allIt(it == 0)
+      creds.surbSecret.allIt(it.allIt(it == 0))
+
+  test "a group expires after its lifetime when shorter than the TTL":
+    let igroup = store.newGroup(base, lifetime = chronos.minutes(10))
+    check:
+      igroup.expiresAt == base + chronos.minutes(10)
+      store.newGroup(base, lifetime = chronos.hours(1)).expiresAt ==
+        base + chronos.minutes(30)
 
   test "purge only removes groups past their own deadline":
     let old = store.newGroup(base)

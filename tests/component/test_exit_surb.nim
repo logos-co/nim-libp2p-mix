@@ -4,12 +4,85 @@
 {.used.}
 
 import std/tables
-import chronos
+import chronos, results
 import libp2p/[builders, switch]
 import libp2p/protocols/protocol
 import libp2p/stream/connection
-import libp2p_mix/[exit_layer, exit_connection, serialization]
+import libp2p_mix/[exit_layer, exit_connection, multiaddr, serialization]
 import ../tools/unittest
+import ../utils
+
+const SurbHoldCodec = "/mix/test/surb-hold"
+
+proc setupExit(
+    destHandler: LPProtoHandler, replies: ref int
+): Future[tuple[exit, dest: Switch, layer: ExitLayer, destHop: Hop]] {.async.} =
+  ## An exit with a 100 ms SURB hold time, and a destination that runs
+  ## destHandler for SurbHoldCodec.
+  let dest = createSwitch()
+  dest.mount(LPProtocol.new(codecs = @[SurbHoldCodec], handler = destHandler))
+  await dest.start()
+  let exit = createSwitch()
+  await exit.start()
+
+  let behaviors = newTable[string, DestReadBehavior]()
+  behaviors[SurbHoldCodec] = DestReadBehavior(
+    callback: proc(
+        conn: Connection
+    ): Future[seq[byte]] {.async: (raises: [CancelledError, LPStreamError]).} =
+      await conn.readLp(1024)
+  )
+  let layer = ExitLayer.init(
+    exit,
+    proc(surb: SURB, message: seq[byte]) {.async: (raises: [CancelledError]).} =
+      replies[] += 1,
+    behaviors,
+    surbHoldTime = Opt.some(100.milliseconds),
+  )
+  let destHop = Hop.init(
+    multiAddrToBytes(dest.peerInfo.peerId, dest.peerInfo.addrs[0]).expect("dest hop")
+  )
+  (exit, dest, layer, destHop)
+
+suite "Exit SURB hold time":
+  asyncTest "an exit replies when the destination responds within the hold time":
+    let replies = new int
+    let (exit, dest, layer, destHop) = await setupExit(
+      proc(conn: Connection, proto: string) {.async: (raises: [CancelledError]).} =
+        try:
+          await conn.writeLp(@[3.byte])
+        except LPStreamError:
+          check false
+      ,
+      replies,
+    )
+    defer:
+      await exit.stop()
+      await dest.stop()
+
+    await layer.onMessage(SurbHoldCodec, @[1.byte], destHop, @[SURB(key: @[2.byte])])
+    check replies[] == 1
+
+  asyncTest "an exit drops SURBs whose hold time ends before the destination responds":
+    let replies = new int
+    let respond = newAsyncEvent()
+    let (exit, dest, layer, destHop) = await setupExit(
+      proc(conn: Connection, proto: string) {.async: (raises: [CancelledError]).} =
+        await respond.wait()
+      ,
+      replies,
+    )
+    defer:
+      await exit.stop()
+      await dest.stop()
+
+    let start = Moment.now()
+    await layer
+      .onMessage(SurbHoldCodec, @[1.byte], destHop, @[SURB(key: @[2.byte])])
+      .wait(2.seconds)
+    check:
+      replies[] == 0
+      Moment.now() - start >= 100.milliseconds
 
 when defined(libp2p_mix_experimental_exit_is_dest):
   suite "Exit SURB ownership":

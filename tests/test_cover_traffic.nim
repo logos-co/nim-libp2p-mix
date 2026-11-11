@@ -44,6 +44,10 @@ proc mockSendCoverPacket(sentPackets: ref seq[seq[byte]]): SendCoverPacketProc =
     sentPackets[].add(packet)
     return ok()
 
+proc mockReclaimProofToken(reclaimed: ref seq[seq[byte]]): ReclaimProofTokenProc =
+  return proc(token: seq[byte]) {.gcsafe, raises: [].} =
+    reclaimed[].add(token)
+
 proc mockSendCoverPacketFailing(): SendCoverPacketProc =
   return proc(
       peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], epoch: uint64
@@ -530,6 +534,44 @@ suite "CoverTraffic Pre-computation":
     waitFor ct.emitCoverPacket()
     check ct.slotPool.coverClaimed == 2
     check sentPackets[].len == 2
+
+  test "a pre-built packet is rebuilt only once its records are too old":
+    let sentPackets = new seq[seq[byte]]
+    sentPackets[] = @[]
+    let reclaimed = new seq[seq[byte]]
+    reclaimed[] = @[]
+
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 2, epochDuration = 1.seconds, enablePrecomputation = true
+    )
+    ct.setCoverPacketBuilder(mockBuildCoverPacket())
+    ct.setCoverPacketSender(mockSendCoverPacket(sentPackets))
+    ct.setProofTokenReclaimer(mockReclaimProofToken(reclaimed))
+    ct.onEpochChange(1)
+
+    let (pid, ma) = makePeerInfo()
+    let now = Moment.now()
+    for (staleAt, packet) in [
+      (now - 1.seconds, 0xAA.byte), (now + chronos.hours(1), 0xBB.byte)
+    ]:
+      ct.slotPool.addPacket(
+        CoverPacket(
+          packet: @[packet],
+          firstHopPeerId: pid,
+          firstHopAddr: ma,
+          proofToken: @[packet],
+          recordsStaleAt: Opt.some(staleAt),
+        )
+      )
+
+    waitFor ct.emitCoverPacket()
+    waitFor ct.emitCoverPacket()
+    check:
+      sentPackets[].len == 2
+      sentPackets[][0].len == PacketSize # rebuilt on demand
+      sentPackets[][1] == @[0xBB.byte]
+      reclaimed[] == @[@[0xAA.byte]]
+      ct.slotPool.coverClaimed == 2
 
 suite "CoverTraffic DoS Protection Independence":
   test "SpamProtection epoch change propagates to cover traffic":

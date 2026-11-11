@@ -8,7 +8,7 @@
 ## providing a clean interface for the mix protocol to interact with mix node data.
 
 import std/[sequtils, tables]
-import results
+import chronos, results
 import libp2p/peerstore
 import libp2p/peerid
 import libp2p/multiaddress
@@ -48,10 +48,45 @@ type MixNodePool* = ref object
   ## - Peer scoring: Track node reliability, latency, and performance metrics
   ## - Pool maintenance: Automatic pruning of stale/unresponsive nodes
   peerStore: PeerStore
+  maxRecordAge: Opt[Duration]
+  obtainedAt: Table[PeerId, Moment] ## When each MixPubKeyBook entry was last set
 
-proc new*(T: typedesc[MixNodePool], peerStore: PeerStore): T =
+proc new*(
+    T: typedesc[MixNodePool],
+    peerStore: PeerStore,
+    maxRecordAge: Opt[Duration] = Opt.none(Duration),
+): T {.raises: [].} =
   ## Create a new MixNodePool instance backed by the given peerStore.
-  T(peerStore: peerStore)
+  ##
+  ## With maxRecordAge, a node is left out once its MixPubKeyBook entry was
+  ## last set longer ago, until it is set again (Mix Key Rotation spec §5).
+  ## Entries already in the book count as never set.
+  let pool = T(peerStore: peerStore, maxRecordAge: maxRecordAge)
+  if maxRecordAge.isSome:
+    peerStore[MixPubKeyBook].addHandler(
+      proc(peerId: PeerId) {.gcsafe, raises: [].} =
+        if peerId in pool.peerStore[MixPubKeyBook]:
+          pool.obtainedAt[peerId] = Moment.now()
+        else:
+          pool.obtainedAt.del(peerId)
+    )
+  pool
+
+proc staleAt*(pool: MixNodePool, peerId: PeerId): Opt[Moment] {.raises: [].} =
+  ## When the node's entry becomes too old, or none without maxRecordAge or an
+  ## entry set since the pool was created.
+  let maxAge = pool.maxRecordAge.valueOr:
+    return Opt.none(Moment)
+  pool.obtainedAt.withValue(peerId, obtainedAt):
+    return Opt.some(obtainedAt[] + maxAge)
+  Opt.none(Moment)
+
+proc isFresh(pool: MixNodePool, peerId: PeerId, now: Moment): bool {.raises: [].} =
+  let maxAge = pool.maxRecordAge.valueOr:
+    return true
+  pool.obtainedAt.withValue(peerId, obtainedAt):
+    return now - obtainedAt[] <= maxAge
+  false
 
 proc add*(pool: MixNodePool, info: MixPubInfo) =
   ## Add a mix node to the pool.
@@ -86,11 +121,13 @@ proc remove*(pool: MixNodePool, peerId: PeerId): bool =
   pool.peerStore[MixPubKeyBook].del(peerId)
   # Preserve AddressBook/KeyBook entries used by other protocols.
 
-proc get*(pool: MixNodePool, peerId: PeerId): Opt[MixPubInfo] =
-  ## Get MixPubInfo for a peer. Returns none if peer is not in the pool
-  ## or if required information (address, key) is missing.
+proc get*(
+    pool: MixNodePool, peerId: PeerId, now: Moment = Moment.now()
+): Opt[MixPubInfo] =
+  ## Get MixPubInfo for a peer. Returns none if peer is not in the pool, its
+  ## entry is too old, or required information (address, key) is missing.
   let mixPubKey = pool.peerStore[MixPubKeyBook][peerId]
-  if mixPubKey == default(Curve25519Key):
+  if mixPubKey == default(Curve25519Key) or not pool.isFresh(peerId, now):
     return Opt.none(MixPubInfo)
 
   # Get the address - prefer LastSeenOutboundBook, fall back to AddressBook
@@ -109,10 +146,23 @@ proc get*(pool: MixNodePool, peerId: PeerId): Opt[MixPubInfo] =
 
   Opt.some(MixPubInfo.init(peerId, supportedAddr, mixPubKey, pubKey.skkey))
 
-proc peerIds*(pool: MixNodePool): seq[PeerId] =
-  ## Get all peer IDs in the mix node pool.
-  pool.peerStore[MixPubKeyBook].book.keys.toSeq()
+proc peerIds*(pool: MixNodePool, now: Moment = Moment.now()): seq[PeerId] =
+  ## Get all peer IDs in the mix node pool, leaving out entries that are too old.
+  if pool.maxRecordAge.isNone:
+    return pool.peerStore[MixPubKeyBook].book.keys.toSeq()
+  var peerIds: seq[PeerId]
+  for peerId in pool.peerStore[MixPubKeyBook].book.keys:
+    if pool.isFresh(peerId, now):
+      peerIds.add(peerId)
+  peerIds
 
-proc len*(pool: MixNodePool): int =
-  ## Get the number of mix nodes in the pool.
-  pool.peerStore[MixPubKeyBook].len
+proc len*(pool: MixNodePool, now: Moment = Moment.now()): int =
+  ## Get the number of mix nodes in the pool, leaving out entries that are too
+  ## old.
+  if pool.maxRecordAge.isNone:
+    return pool.peerStore[MixPubKeyBook].len
+  var count = 0
+  for peerId in pool.peerStore[MixPubKeyBook].book.keys:
+    if pool.isFresh(peerId, now):
+      count += 1
+  count

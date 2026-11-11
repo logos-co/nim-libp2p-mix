@@ -24,6 +24,7 @@
 import std/[sets, tables]
 import chronicles, chronos, metrics
 import libp2p/utils/[heartbeat, opt]
+import nimcrypto/utils # burnMem
 import results
 import ./[mix_metrics, serialization]
 
@@ -68,6 +69,17 @@ type
     store: SurbStore
     igroup: SURBIdentifierGroup
 
+proc wipe*(creds: var ConnCreds) =
+  ## Make the reply keys unrecoverable (Mix Key Rotation spec §7).
+  for secret in creds.surbSecret.mitems:
+    burnMem(secret)
+  burnMem(creds.surbKey)
+
+proc wipeAndDel(s: SurbStore, id: SURBIdentifier) =
+  s.creds.withValue(id, c):
+    c[].wipe()
+  s.creds.del(id)
+
 func len*(s: SurbStore): int {.inline.} =
   ## Credentials currently stored, including any expired but not yet swept.
   s.creds.len
@@ -89,9 +101,10 @@ proc rebuildIfSparse(s: SurbStore) =
   if s.peakLen <= MinSweepThreshold or s.creds.len * 4 >= s.peakLen:
     return
 
+  # Moved, not copied, so that no unwiped copy of the keys is freed.
   var fresh = initTable[SURBIdentifier, ConnCreds](s.creds.len)
-  for id, c in s.creds:
-    fresh[id] = c
+  for id, c in s.creds.mpairs:
+    fresh[id] = move(c)
   s.creds = move(fresh)
   s.peakLen = s.creds.len
 
@@ -106,7 +119,7 @@ proc purgeExpired*(s: SurbStore, now: Moment = Moment.now()): int =
       expired.add(id)
 
   for id in expired:
-    s.creds.del(id)
+    s.wipeAndDel(id)
 
   s.sweeps += 1
   s.sweepThreshold = max(MinSweepThreshold, s.creds.len * 2)
@@ -120,8 +133,13 @@ proc purgeExpired*(s: SurbStore, now: Moment = Moment.now()): int =
 
   expired.len
 
-proc newGroup*(s: SurbStore, now: Moment = Moment.now()): SURBIdentifierGroup =
-  SURBIdentifierGroup(members: initHashSet[SURBIdentifier](), expiresAt: now + s.ttl)
+proc newGroup*(
+    s: SurbStore, now: Moment = Moment.now(), lifetime: Duration = s.ttl
+): SURBIdentifierGroup =
+  ## Expires after lifetime, or the store's TTL if that is shorter.
+  SURBIdentifierGroup(
+    members: initHashSet[SURBIdentifier](), expiresAt: now + min(lifetime, s.ttl)
+  )
 
 proc add*(
     s: SurbStore, id: SURBIdentifier, creds: ConnCreds, now: Moment = Moment.now()
@@ -167,7 +185,7 @@ proc release*(s: SurbStore, id: SURBIdentifier) =
   ## Consumes one reply block without invalidating other replies for the send.
   s.creds.withValue(id, c):
     c.igroup.members.excl(id)
-  s.creds.del(id)
+  s.wipeAndDel(id)
   mix_surb_creds_active.set(s.creds.len.int64)
 
 proc release*(s: SurbStore, igroup: SURBIdentifierGroup) =
@@ -175,15 +193,18 @@ proc release*(s: SurbStore, igroup: SURBIdentifierGroup) =
   if igroup.isNil:
     return
   for id in igroup.members:
-    s.creds.del(id)
+    s.wipeAndDel(id)
   igroup.members.clear()
   mix_surb_creds_active.set(s.creds.len.int64)
 
 func igroup*(s: SurbSession): SURBIdentifierGroup {.inline.} =
   s.igroup
 
-proc newSession*(s: SurbStore, now: Moment = Moment.now()): SurbSession =
-  SurbSession(store: s, igroup: s.newGroup(now))
+proc newSession*(
+    s: SurbStore, now: Moment = Moment.now(), lifetime: Duration = s.ttl
+): SurbSession =
+  ## The credentials expire as `newGroup` describes.
+  SurbSession(store: s, igroup: s.newGroup(now, lifetime))
 
 proc release*(s: SurbSession) =
   ## Idempotent, like the underlying store release.
@@ -191,6 +212,8 @@ proc release*(s: SurbSession) =
     s.store.release(s.igroup)
 
 proc clear*(s: SurbStore) =
+  for c in s.creds.mvalues:
+    c.wipe()
   s.creds.clear()
   s.peakLen = 0
   s.sweepThreshold = MinSweepThreshold

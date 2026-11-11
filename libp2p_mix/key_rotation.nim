@@ -34,12 +34,14 @@ type KeyRotationConfig* = object
   ## Key rotation timing, checked against the spec constraints by `init`.
   rotationInterval: Duration
   graceWindow: Duration
+  replacedRecordLifetime: Duration
+  maxTransit: Duration
 
 func validateKeyRotationConfig(
     rotationInterval, graceWindow, replacedRecordLifetime, maxTransit: Duration
 ): Result[void, string] =
   ## Reject timings under which an initiating node could still use a key the
-  ## node no longer accepts (Mix Key Rotation spec §5, §8).
+  ## node no longer accepts (Mix Key Rotation spec §7, §8).
   if rotationInterval <= ZeroDuration:
     return err("rotationInterval (" & $rotationInterval & ") must be > 0")
   if replacedRecordLifetime < ZeroDuration:
@@ -70,11 +72,18 @@ func init*(
     maxTransit: Duration = DefaultMaxTransit,
 ): Result[T, string] =
   ## replacedRecordLifetime and maxTransit are the deployment's bounds; they
-  ## constrain graceWindow and are not stored.
+  ## constrain graceWindow and set the SURB times.
   ?validateKeyRotationConfig(
     rotationInterval, graceWindow, replacedRecordLifetime, maxTransit
   )
-  ok(T(rotationInterval: rotationInterval, graceWindow: graceWindow))
+  ok(
+    T(
+      rotationInterval: rotationInterval,
+      graceWindow: graceWindow,
+      replacedRecordLifetime: replacedRecordLifetime,
+      maxTransit: maxTransit,
+    )
+  )
 
 func rotationInterval*(config: KeyRotationConfig): Duration =
   config.rotationInterval
@@ -86,6 +95,17 @@ func acceptanceWindow*(config: KeyRotationConfig): Duration =
   ## How long each key is accepted (Mix Key Rotation spec §3.4).
   config.rotationInterval + config.graceWindow
 
+func surbLifetime*(config: KeyRotationConfig): Duration =
+  ## How long a SURB's keys remain accepted after it is built, in the worst
+  ## case (Mix Key Rotation spec §7).
+  config.graceWindow - config.rotationInterval - config.replacedRecordLifetime
+
+func surbHoldTime*(config: KeyRotationConfig): Duration =
+  ## How long an exit may hold received SURBs before replying, so that the
+  ## reply reaches its return path while its keys are accepted (Mix Key
+  ## Rotation spec §7).
+  config.surbLifetime - 2 * config.maxTransit
+
 type MixKey* = ref object
   ## A mix key, and the replay table of the tags seen under it. Destroying it
   ## wipes both.
@@ -93,7 +113,7 @@ type MixKey* = ref object
   publicKey: FieldElement
   tags: HashSet[Tag]
   capacity: int
-  expiresAt: Opt[Moment] ## End of the grace window, once the key is replaced
+  expiresAt: Opt[Moment] ## End of the grace window, once the key is old
   destroyed: bool
 
 func publicKey*(key: MixKey): FieldElement =
@@ -150,9 +170,8 @@ type KeyHandler* = proc(publicKey: FieldElement) {.gcsafe, raises: [].}
   ## return without blocking.
 
 type MixKeyRing* = ref object
-  ## The mix keys a node holds: the current key, then the replaced keys from
-  ## the most recently replaced (Mix Key Rotation spec §3.1). Keys are held in
-  ## memory only.
+  ## The mix keys a node holds: the current key, then the old keys, newest
+  ## first (Mix Key Rotation spec §3.1). Keys are held in memory only.
   config: KeyRotationConfig
   rng: Rng
   replayTableCapacity: int
@@ -181,6 +200,9 @@ proc new*(
   ## replayTableCapacity is the number of tags each key's replay table holds;
   ## size it for the packets accepted over `config.acceptanceWindow`.
   initRing(config, rng, replayTableCapacity)
+
+func config*(ring: MixKeyRing): KeyRotationConfig =
+  ring.config
 
 proc setKeyHandler*(ring: MixKeyRing, handler: KeyHandler) =
   ## The handler receives the current key at once, if there is one, then each
@@ -233,8 +255,8 @@ proc update*(ring: MixKeyRing, now: Moment = Moment.now()) =
     ring.rotate(now)
 
 proc candidates*(ring: MixKeyRing, now: Moment = Moment.now()): seq[MixKey] =
-  ## Keys to try on a received packet: the current key, then the replaced keys
-  ## from the most recently replaced (Mix Key Rotation spec §6).
+  ## Keys to try on a received packet: the current key, then the old keys,
+  ## newest first (Mix Key Rotation spec §6).
   var keys: seq[MixKey]
   for key in ring.keys:
     if key.isAccepted(now):
@@ -242,7 +264,7 @@ proc candidates*(ring: MixKeyRing, now: Moment = Moment.now()): seq[MixKey] =
   keys
 
 func untilNextUpdate(ring: MixKeyRing, now: Moment): Duration =
-  ## Time until the current key is due to be replaced or, if sooner, a replaced
+  ## Time until the current key is due to be replaced or, if sooner, an old
   ## key's grace window ends.
   var next = ring.generatedAt + ring.config.rotationInterval
   for key in ring.keys:

@@ -454,9 +454,11 @@ method handleMixMessages*(
     trace "# Reply", id = processedSP.id
 
     # Expired credentials are invisible here even if no sweep has run yet.
-    let connCred = mixProto.surbStore.get(processedSP.id).valueOr:
+    var connCred = mixProto.surbStore.get(processedSP.id).valueOr:
       mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
       return
+    defer:
+      connCred.wipe()
 
     let reply = processReply(
       connCred.surbKey, connCred.surbSecret, processedSP.delta_prime
@@ -686,12 +688,15 @@ method buildSurb*(
     hops: seq[Hop] = @[]
     delays: seq[Delay] = @[]
 
-  if mixProto.nodePool.len < PathLength:
+  # One time for the whole path, so that the pool lists and returns the same
+  # nodes even when a record reaches its maximum age meanwhile.
+  let now = Moment.now()
+  let allPeerIds = mixProto.nodePool.peerIds(now)
+  if allPeerIds.len < PathLength:
     return err("No. of public mix nodes less than path length")
 
   # Remove exit and dest node from nodes to consider for surbs
-  var poolPeerIds =
-    mixProto.nodePool.peerIds().filterIt(it != exitPeerId and it != destPeerId)
+  var poolPeerIds = allPeerIds.filterIt(it != exitPeerId and it != destPeerId)
   var availableIndices = toSeq(0 ..< poolPeerIds.len)
 
   # Select L mix nodes at random
@@ -704,7 +709,7 @@ method buildSurb*(
         let randPeerId = poolPeerIds[selectedIndex]
         availableIndices.del(randomIndexPosition)
         debug "Selected mix node for surbs: ", indexInPath = i
-        let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
+        let mixPubInfo = mixProto.nodePool.get(randPeerId, now).valueOr:
           return err("could not get mix pub info for peer: " & $randPeerId)
         (
           mixPubInfo.peerId,
@@ -744,7 +749,14 @@ proc buildSurbs(
     return ok((@[], Opt.none(SurbSession)))
 
   var response: seq[SURB]
-  let session = mixProto.surbStore.newSession()
+  # No reply can arrive once the SURBs' keys expire (Mix Key Rotation spec §7).
+  let lifetime = mixProto.keyRing
+    .map(
+      proc(ring: MixKeyRing): Duration =
+        ring.config.surbLifetime
+    )
+    .get(mixProto.surbStore.ttl)
+  let session = mixProto.surbStore.newSession(lifetime = lifetime)
 
   for _ in 0.uint8 ..< numSurbs:
     # Uniqueness rests on 128 bits of CSPRNG output, per spec Section 8.7.2
@@ -753,21 +765,24 @@ proc buildSurbs(
     var id: SURBIdentifier
     mixProto.rng.generate(id)
 
-    let surb = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
+    var surb = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
       # Release whatever this group already registered; a partially built
       # group can never receive a usable reply.
       session.release()
       return err(error)
 
-    mixProto.surbStore.add(
-      id,
-      ConnCreds(
-        igroup: session.igroup,
-        incoming: incoming,
-        surbSecret: surb.secret.get(),
-        surbKey: surb.key,
-      ),
-    ).isOkOr:
+    # The per-hop secrets move out of the SURB, and the store keeps the only
+    # copy of the credentials, so none is left unwiped (Mix Key Rotation spec
+    # §7). The reply key stays in the SURB for the exit.
+    var creds = ConnCreds(
+      igroup: session.igroup,
+      incoming: incoming,
+      surbSecret: move(surb.secret.get()),
+      surbKey: surb.key,
+    )
+    let added = mixProto.surbStore.add(id, creds)
+    creds.wipe()
+    added.isOkOr:
       session.release()
       return err(error)
 
@@ -1000,10 +1015,14 @@ proc anonymizeLocalProtocolSend*(
     delays: seq[Delay] = @[]
     exitPeerId: PeerId
 
-  let numMixNodes = mixProto.nodePool.len
+  # One time for the whole path, so that a node whose record reaches its
+  # maximum age meanwhile is not taken for a broken entry and removed below.
+  let now = Moment.now()
+  var poolPeerIds = mixProto.nodePool.peerIds(now)
+  let numMixNodes = poolPeerIds.len
   var numAvailableNodes = numMixNodes
 
-  if mixProto.nodePool.get(destination.peerId).isSome:
+  if mixProto.nodePool.get(destination.peerId, now).isSome:
     numAvailableNodes = numMixNodes - 1
 
   if numAvailableNodes < PathLength:
@@ -1012,14 +1031,15 @@ proc anonymizeLocalProtocolSend*(
       fmt"No. of public mix nodes ({numAvailableNodes}) less than path length ({PathLength})."
     )
 
-  var poolPeerIds = mixProto.nodePool.peerIds()
   var availableIndices = toSeq(0 ..< poolPeerIds.len)
 
   let index = poolPeerIds.find(destination.peerId)
   if index != -1:
     availableIndices.del(index)
   elif destination.kind == MixNode:
-    return err("Destination does not support mix")
+    # A node whose record is too old is treated as offline (Mix Key Rotation
+    # spec §5).
+    return err("Destination has no usable mix record: not in the pool, or too old")
 
   var nextHopAddr: MultiAddress
   var nextHopPeerId: PeerId
@@ -1048,7 +1068,7 @@ proc anonymizeLocalProtocolSend*(
 
     debug "Selected mix node: ", indexInPath = hop.len
 
-    let mixPubInfo = mixProto.nodePool.get(randPeerId).valueOr:
+    let mixPubInfo = mixProto.nodePool.get(randPeerId, now).valueOr:
       mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
       trace "Failed to get mix pub info for peer, skipping and removing node from pool",
         peerId = randPeerId
@@ -1180,7 +1200,8 @@ type PathNode = object
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]
 ): Result[seq[PathNode], string] {.raises: [].} =
-  let available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
+  let now = Moment.now()
+  let available = mixProto.nodePool.peerIds(now).filterIt(it notin excludePeerIds)
   if available.len < count:
     return err(
       "Not enough mix nodes in pool (available=" & $available.len & ", needed=" & $count &
@@ -1192,7 +1213,7 @@ proc selectRandomNodes(
 
   var selected: seq[PathNode]
   for peerId in selectedPeerIds:
-    let mixPubInfo = mixProto.nodePool.get(peerId).valueOr:
+    let mixPubInfo = mixProto.nodePool.get(peerId, now).valueOr:
       return err("Could not get mix pub info for peer: " & $peerId)
     selected.add(
       PathNode(
@@ -1217,6 +1238,7 @@ proc buildCoverPacket*(
     publicKeys: seq[FieldElement] = @[]
     hops: seq[Hop] = @[]
     delays: seq[Delay] = @[]
+    recordsStaleAt = Opt.none(Moment)
 
   for node in nodes:
     let addrBytes = multiAddrToBytes(node.peerId, node.multiAddr).valueOr:
@@ -1224,6 +1246,11 @@ proc buildCoverPacket*(
     publicKeys.add(node.mixPubKey)
     hops.add(Hop.init(addrBytes))
     delays.add(mixProto.delayStrategy.generateForEntry())
+    let staleAt = mixProto.nodePool.staleAt(node.peerId)
+    if staleAt.isSome and (
+      recordsStaleAt.isNone or staleAt.get() < recordsStaleAt.get()
+    ):
+      recordsStaleAt = staleAt
 
   let selfAddrBytes = multiAddrToBytes(
     mixProto.mixNodeInfo.peerId, mixProto.mixNodeInfo.multiAddr
@@ -1261,6 +1288,7 @@ proc buildCoverPacket*(
       firstHopPeerId: firstNode.peerId,
       firstHopAddr: firstNode.multiAddr,
       proofToken: proofToken,
+      recordsStaleAt: recordsStaleAt,
     )
   )
 
@@ -1360,13 +1388,17 @@ proc init*(
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
   ##
-  ## A nil `surbStore` gets a default one. Defaulting to nil rather than
-  ## `SurbStore.new()` keeps the constructor out of the parameter list, so
-  ## callers do not need `surb_store`'s `new` in scope.
+  ## A nil `surbStore` gets a default one, which with a `keyRing` purges every
+  ## tenth of the SURB lifetime; a supplied store keeps its own purge interval.
+  ## Defaulting to nil rather than `SurbStore.new()` keeps the constructor out
+  ## of the parameter list, so callers do not need `surb_store`'s `new` in scope.
   ##
   ## With a `keyRing` the node rotates its mix key (Mix Key Rotation spec), and
   ## start and stop also start and stop the ring; stopping destroys its keys.
-  ## Without one it uses `mixNodeInfo.mixPrivKey` and `tagManager`.
+  ## Paths then use only nodes whose MixPubKeyBook entry was set within the
+  ## rotation interval, so mix keys must come from discovery, not from
+  ## configuration or the node's own storage. Without one it uses
+  ## `mixNodeInfo.mixPrivKey` and `tagManager`.
   ##
   ## Mix node public keys should be populated via the nodePool after
   ## initialization using `mixProto.nodePool.add(mixPubInfo)`.
@@ -1381,7 +1413,17 @@ proc init*(
 
   let store =
     if surbStore.isNil:
-      SurbStore.new()
+      # Expired credentials stay in memory until the next purge, so with a key
+      # ring they outlive their SURB lifetime by at most a tenth of it (Mix Key
+      # Rotation spec §7).
+      SurbStore.new(
+        purgeInterval = keyRing
+          .map(
+            proc(ring: MixKeyRing): Duration =
+              min(DefaultSurbCredsPurgeInterval, ring.config.surbLifetime div 10)
+          )
+          .get(DefaultSurbCredsPurgeInterval)
+      )
     else:
       surbStore
 
@@ -1394,7 +1436,13 @@ proc init*(
   mixProto.mixNodeInfo = mixNodeInfo
   mixProto.switch = switch
   mixProto.rng = switch.rng
-  mixProto.nodePool = MixNodePool.new(switch.peerStore)
+  mixProto.nodePool = MixNodePool.new(
+    switch.peerStore,
+    keyRing.map(
+      proc(ring: MixKeyRing): Duration =
+        ring.config.rotationInterval
+    ),
+  )
   mixProto.tagManager = tagManager
   mixProto.keyRing = keyRing
   mixProto.surbStore = store
@@ -1459,7 +1507,15 @@ proc init*(
     (await mixProto.sendSurbReply(surb, message)).isOkOr:
       error "could not send reply", err = error
 
-  mixProto.exitLayer = ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehaviors)
+  mixProto.exitLayer = ExitLayer.init(
+    switch,
+    onReplyDialer,
+    mixProto.destReadBehaviors,
+    keyRing.map(
+      proc(ring: MixKeyRing): Duration =
+        ring.config.surbHoldTime
+    ),
+  )
 
   mixProto.codecs = @[MixProtocolID]
   mixProto.handler = proc(
