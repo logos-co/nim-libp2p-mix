@@ -3,6 +3,7 @@
 
 import results
 import stew/ctops
+import nimcrypto/utils # burnMem
 import ./[crypto, curve25519, delay, lioness, serialization, tag_manager]
 import libp2p/crypto/crypto
 
@@ -40,11 +41,17 @@ proc computeAlpha(
     alpha: FieldElement
     secret: FieldElement
     blinders: seq[FieldElement] = @[]
+  # The blinders include the ephemeral scalar, so they are wiped too.
+  defer:
+    burnMem(secret)
+    for blinder in blinders.mitems:
+      burnMem(blinder)
 
-  let x = generateRandomFieldElement().valueOr:
+  var x = generateRandomFieldElement().valueOr:
     return err("Generate field element error: " & error)
 
   blinders.add(x)
+  burnMem(x)
 
   for i in 0 ..< publicKeys.len:
     if publicKeys[i].len != FieldElementSize:
@@ -61,20 +68,32 @@ proc computeAlpha(
 
     # TODO: Optimize point multiplication by multiplying scalars first
     secret = multiplyPointWithScalars(publicKeys[i], blinders)
+    var
+      secretBytes = fieldElementToBytes(secret)
+      blinderInput = fieldElementToBytes(alpha) & secretBytes
+    defer:
+      burnMem(secretBytes)
+      burnMem(blinderInput)
 
-    let blinder = bytesToFieldElement(
-      sha256_hash(fieldElementToBytes(alpha) & fieldElementToBytes(secret))
-    ).valueOr:
+    var blinder = bytesToFieldElement(sha256_hash(blinderInput)).valueOr:
       return err("Error in bytes to field element conversion: " & error)
 
     blinders.add(blinder)
+    burnMem(blinder)
 
-    s[i] = fieldElementToBytes(secret)
+    s[i] = secretBytes
 
   return ok((alpha_0, s))
 
 proc deriveKeyMaterial(keyName: string, s: seq[byte]): seq[byte] =
   @(keyName.toOpenArrayByte(0, keyName.high)) & s
+
+proc deriveKey(label: string, sBytes: seq[byte]): seq[byte] {.raises: [].} =
+  ## KDF over label and the shared secret, wiping the input that holds the secret.
+  var material = deriveKeyMaterial(label, sBytes)
+  defer:
+    burnMem(material)
+  material.kdf()
 
 proc isZeros(data: seq[byte], startIdx: int, endIdx: int): bool =
   doAssert 0 <= startIdx and endIdx < data.len and startIdx <= endIdx
@@ -88,9 +107,12 @@ proc computeFillerStrings(s: seq[seq[byte]]): Result[seq[byte], string] =
 
   for i in 1 ..< s.len:
     # Derive AES key and IV
-    let
-      aes_key = deriveKeyMaterial(AesKeyLabel, s[i - 1]).kdf()
-      iv = deriveKeyMaterial(IvLabel, s[i - 1]).kdf()
+    var
+      aes_key = deriveKey(AesKeyLabel, s[i - 1])
+      iv = deriveKey(IvLabel, s[i - 1])
+    defer:
+      burnMem(aes_key)
+      burnMem(iv)
 
     # Compute filler string
     let
@@ -124,10 +146,14 @@ proc computeBetaGamma(
 
   for i in countdown(sLen - 1, 0):
     # Derive AES key, MAC key, and IV
-    let
-      beta_aes_key = deriveKeyMaterial(AesKeyLabel, s[i]).kdf()
-      mac_key = deriveKeyMaterial(MacKeyLabel, s[i]).kdf()
-      beta_iv = deriveKeyMaterial(IvLabel, s[i]).kdf()
+    var
+      beta_aes_key = deriveKey(AesKeyLabel, s[i])
+      mac_key = deriveKey(MacKeyLabel, s[i])
+      beta_iv = deriveKey(IvLabel, s[i])
+    defer:
+      burnMem(beta_aes_key)
+      burnMem(mac_key)
+      burnMem(beta_iv)
 
     # Compute Beta and Gamma
     if i == sLen - 1:
@@ -157,11 +183,13 @@ proc computeDelta(s: seq[seq[byte]], msg: Message): Result[seq[byte], string] =
 
   for i in countdown(sLen - 1, 0):
     # delta_key = KDF("payload_enc_key", s_i) is the LIONESS seed for this layer.
-    let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+    var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
     var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
+      burnMem(delta_key)
       return err("LIONESS init error: " & $error)
     defer:
       lion.clear()
+      burnMem(delta_key)
 
     # The exit layer starts from the plaintext (which already carries the k
     # zero-byte integrity prefix from serialize); inner layers re-encrypt the
@@ -229,11 +257,13 @@ proc processReply*(
   # return-path secrets (i = L-1 downto 0), reversing each return hop's
   # decryption so that only the reply sender's initial encryption remains.
   for i in countdown(s.len - 1, 0):
-    let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+    var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
     var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
+      burnMem(delta_key)
       return err("LIONESS init error: " & $error)
     defer:
       lion.clear()
+      burnMem(delta_key)
     lion.encrypt(delta).isOkOr:
       return err("LIONESS encrypt error: " & $error)
 
@@ -265,8 +295,11 @@ proc wrapInSphinxPacket*(
     destHop: Hop,
 ): Result[SphinxPacket, string] =
   # Compute alpha and shared secrets
-  let (alpha_0, s) = computeAlpha(publicKeys).valueOr:
+  var (alpha_0, s) = computeAlpha(publicKeys).valueOr:
     return err("Error in alpha generation: " & error)
+  defer:
+    for secret in s.mitems:
+      burnMem(secret)
 
   # Compute beta and gamma
   let (beta_0, gamma_0) = computeBetaGamma(
