@@ -6,8 +6,16 @@ import stew/ctops
 import ./[crypto, curve25519, delay, lioness, serialization, tag_manager]
 import libp2p/crypto/crypto
 
-const PathLength* = 3 # Path length (L)
-const PaddingLength = (((t + 1) * (r - PathLength)) + 1) * k
+const PathLength* = DefaultPathLength # Compatibility alias for the default L
+
+proc validatePathInputs(
+    publicKeys: openArray[FieldElement], delay: openArray[Delay], hops: openArray[Hop]
+): Result[void, string] =
+  if publicKeys.len < MinPathLength or publicKeys.len > MaxPathLength:
+    return err("path length must be between " & $MinPathLength & " and " & $MaxPathLength)
+  if delay.len != publicKeys.len or hops.len != publicKeys.len:
+    return err("path keys, delays, and hops must have equal lengths")
+  ok()
 
 const
   # KDF domain-separation labels used in per-hop key derivation.
@@ -98,7 +106,8 @@ proc computeFillerStrings(s: seq[seq[byte]]): Result[seq[byte], string] =
       zeroPadding = newSeq[byte](fillerLength)
 
     filler = aes_ctr_start_index(
-      aes_key, iv, filler & zeroPadding, (((t + 1) * (r - i)) + t + 2) * k
+      aes_key, iv, filler & zeroPadding,
+      (((t + 1) * (MaxPathLength - i)) + t + 2) * k,
     )
 
   return ok(filler)
@@ -133,14 +142,16 @@ proc computeBetaGamma(
     if i == sLen - 1:
       let destBytes = destHop.serialize()
       let delayBytes = delay[i].toBytes()
-      let destPadding = destBytes & delayBytes & @id & newSeq[byte](PaddingLength)
+      let paddingLength = (((t + 1) * (MaxPathLength - sLen)) + 1) * k
+      let destPadding = destBytes & delayBytes & @id & newSeq[byte](paddingLength)
 
       let aes = aes_ctr(beta_aes_key, beta_iv, destPadding)
 
       beta = aes & filler
     else:
       let routingInfo = RoutingInfo.init(
-        hops[i + 1], delay[i], gamma, beta[0 .. (((r * (t + 1)) - t) * k) - 1]
+        hops[i + 1], delay[i], gamma,
+        beta[0 .. (((MaxPathLength * (t + 1)) - t) * k) - 1],
       )
 
       let serializedRoutingInfo = routingInfo.serialize()
@@ -198,6 +209,8 @@ proc createSURB*(
 
   if id == default(SURBIdentifier):
     return err("id should be initialized")
+
+  ?validatePathInputs(publicKeys, delay, hops)
 
   # Compute alpha and shared secrets
   let (alpha_0, s) = computeAlpha(publicKeys).valueOr:
@@ -279,6 +292,8 @@ proc wrapInSphinxPacket*(
     hop: openArray[Hop],
     destHop: Hop,
 ): Result[SphinxPacket, string] =
+  ?validatePathInputs(publicKeys, delay, hop)
+
   # Compute alpha and shared secrets
   let (alpha_0, s) = computeAlpha(publicKeys).valueOr:
     return err("Error in alpha generation: " & error)
@@ -426,8 +441,10 @@ proc processSphinxPacket*(
   let zeroPadding = newSeq[byte]((t + 1) * k)
   let B = aes_ctr(beta_aes_key, beta_iv, beta & zeroPadding)
 
-  # Check if B has the required prefix for the original message
-  if B.isZeros((t + 1) * k, ((t + 1) * k) + PaddingLength - 1):
+  # Every terminal header has at least k zero padding bytes, even at L = MaxPathLength.
+  # The receiver does not know L; checking the default three-hop padding would
+  # misclassify longer paths as intermediate packets.
+  if B.isZeros((t + 1) * k, ((t + 2) * k) - 1):
     let hop = Hop.deserialize(B[0 .. AddrSize - 1]).valueOr:
       return err(error)
 

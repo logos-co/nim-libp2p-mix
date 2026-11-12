@@ -18,28 +18,21 @@ proc addPadding(message: openArray[byte], size: int): seq[byte] =
     result.add(newSeq[byte](paddingLength)) # Pad with zeros
 
 # Helper function to create dummy data
-proc createDummyData(): (
+proc createDummyData(length: int = DefaultPathLength): (
   Message, seq[FieldElement], seq[FieldElement], seq[Delay], seq[Hop], Hop
 ) =
-  let (privateKey1, publicKey1) = generateKeyPair().expect("generate keypair error")
-  let (privateKey2, publicKey2) = generateKeyPair().expect("generate keypair error")
-  let (privateKey3, publicKey3) = generateKeyPair().expect("generate keypair error")
-
-  let
-    privateKeys = @[privateKey1, privateKey2, privateKey3]
-    publicKeys = @[publicKey1, publicKey2, publicKey3]
-
-    delay: seq[Delay] = @[NoDelay, NoDelay, NoDelay]
-
-    hops = @[
-      Hop.init(newSeq[byte](AddrSize)),
-      Hop.init(newSeq[byte](AddrSize)),
-      Hop.init(newSeq[byte](AddrSize)),
-    ]
-
-    message = newSeq[byte](MessageSize)
-    dest = Hop.init(newSeq[byte](AddrSize))
-  return (message, privateKeys, publicKeys, delay, hops, dest)
+  var
+    privateKeys, publicKeys: seq[FieldElement]
+    delays: seq[Delay]
+    hops: seq[Hop]
+  for _ in 0 ..< length:
+    let (privateKey, publicKey) = generateKeyPair().expect("generate keypair error")
+    privateKeys.add(privateKey)
+    publicKeys.add(publicKey)
+    delays.add(NoDelay)
+    hops.add(Hop.init(newSeq[byte](AddrSize)))
+  (newSeq[byte](MessageSize), privateKeys, publicKeys, delays, hops,
+   Hop.init(newSeq[byte](AddrSize)))
 
 template randomI(): SURBIdentifier =
   rng().generate(SURBIdentifier)
@@ -53,6 +46,56 @@ suite "Sphinx Tests":
 
   teardown:
     clearTags(tm)
+
+  test "all supported path lengths retain packet size and deliver forward payloads":
+    for length in MinPathLength .. MaxPathLength:
+      var (message, privateKeys, publicKeys, delays, hops, dest) = createDummyData(length)
+      for i in 0 ..< message.len:
+        message[i] = byte(i mod 251)
+      var packet = wrapInSphinxPacket(message, publicKeys, delays, hops, dest).get()
+      for position in 0 ..< length:
+        check packet.serialize().len == PacketSize
+        let processed = processSphinxPacket(packet, privateKeys[position], tm).get()
+        if position == length - 1:
+          check processed.status == Exit
+          check processed.messageChunk == message
+        else:
+          require processed.status == Intermediate
+          check processed.serializedSphinxPacket.len == PacketSize
+          packet = SphinxPacket.deserialize(processed.serializedSphinxPacket).get()
+
+  test "all supported SURB lengths retain size and recover replies":
+    for length in MinPathLength .. MaxPathLength:
+      var (message, privateKeys, publicKeys, delays, hops, _) = createDummyData(length)
+      for i in 0 ..< message.len:
+        message[i] = byte(i mod 251)
+      let created = createSURB(publicKeys, delays, hops, randomI(), rng()).get()
+      check created.surb.serializeSurb().len == SurbSize
+      let surb = deserializeSurb(created.surb.serializeSurb()).get()
+      var packet = useSURB(surb, message)
+      for position in 0 ..< length:
+        check packet.serialize().len == PacketSize
+        let processed = processSphinxPacket(packet, privateKeys[position], tm).get()
+        if position == length - 1:
+          require processed.status == Reply
+          let reply = RawSurbReply(
+            identifier: processed.id, encryptedPayload: processed.delta_prime
+          )
+          check recoverSphinxReply(created.credential, reply).get() == message
+        else:
+          require processed.status == Intermediate
+          packet = SphinxPacket.deserialize(processed.serializedSphinxPacket).get()
+
+  test "construction rejects unsupported lengths and mismatched arrays":
+    for length in [0, 1, 2, MaxPathLength + 1]:
+      let (message, _, keys, delays, hops, dest) = createDummyData(length)
+      check wrapInSphinxPacket(message, keys, delays, hops, dest).isErr
+      check createSURB(keys, delays, hops, randomI(), rng()).isErr
+    let (message, _, keys, delays, hops, dest) = createDummyData()
+    check wrapInSphinxPacket(message, keys, delays[0 .. 1], hops, dest).isErr
+    check wrapInSphinxPacket(message, keys, delays, hops[0 .. 1], dest).isErr
+    check createSURB(keys, delays[0 .. 1], hops, randomI(), rng()).isErr
+    check createSURB(keys, delays, hops[0 .. 1], randomI(), rng()).isErr
 
   test "sphinx wrap and process":
     let (message, privateKeys, publicKeys, delay, hops, dest) = createDummyData()

@@ -47,7 +47,7 @@ suite "serialization_tests":
       Hop.init(newSeq[byte](AddrSize)),
       NoDelay,
       newSeq[byte](GammaSize),
-      newSeq[byte](((r * (t + 1)) - t) * k),
+      newSeq[byte](((MaxPathLength * (t + 1)) - t) * k),
     )
     let serialized = routingInfo.serialize()
     let suffixLength = (t + 1) * k
@@ -63,7 +63,7 @@ suite "serialization_tests":
       hop.get() == dHop.get()
       delay == dDelay
       gamma == dGamma
-      beta == dBeta[0 .. (((r * (t + 1)) - t) * k) - 1]
+      beta == dBeta[0 .. (((MaxPathLength * (t + 1)) - t) * k) - 1]
 
   test "serialize_and_deserialize_sphinx_packet":
     let
