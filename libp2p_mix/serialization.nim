@@ -6,10 +6,12 @@ import ./delay
 
 const
   k* = 16 # Security parameter
-  r* = 5 # Maximum path length
+  MinPathLength* = 3
+  DefaultPathLength* = 3
+  MaxPathLength* = 6 # r in the Mix specification
   t* = 6 # t.k - combined length of next hop address and delay
   AlphaSize* = 32 # Group element
-  BetaSize* = ((r * (t + 1)) + 1) * k # bytes
+  BetaSize* = ((MaxPathLength * (t + 1)) + 1) * k # bytes
   GammaSize* = 16 # Output of HMAC-SHA-256, truncated to 16 bytes
   HeaderSize* = AlphaSize + BetaSize + GammaSize # Total header size
   AddrSize* = (t * k) - DelaySize # Address size
@@ -131,7 +133,7 @@ proc getRoutingInfo*(info: RoutingInfo): (Hop, Delay, seq[byte], seq[byte]) =
 proc serialize*(info: RoutingInfo): seq[byte] =
   doAssert info.Gamma.len() == GammaSize,
     "Gamma must be exactly " & $GammaSize & " bytes"
-  let expectedBetaLen = ((r * (t + 1)) - t) * k
+  let expectedBetaLen = ((MaxPathLength * (t + 1)) - t) * k
   doAssert info.Beta.len() == expectedBetaLen,
     "Beta must be exactly " & $expectedBetaLen & " bytes"
 
