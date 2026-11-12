@@ -8,6 +8,7 @@ import std/[sets, tables]
 import results
 import libp2p/[peerid, multiaddress]
 import libp2p/crypto/secp
+import libp2p/crypto/rng
 import ./[mix_node, multiaddr, serialization, curve25519, pool]
 
 type
@@ -36,6 +37,9 @@ type
     nodePool*: MixNodePool
       ## Shared pool reference, not a copy. Strategies read current node data
       ## without modifying the pool.
+
+  RandomPathSelector* = ref object of PathSelector
+    rng: Rng
 
 proc hasRoutingInfo(info: MixPubInfo): bool =
   info.mixPubKey != default(FieldElement) and
@@ -67,6 +71,48 @@ method samplePath*(
   ## - return an error if it is not possible to fulfil the request
   ## The request is not validated here.
   err("path selector is not implemented")
+
+proc new*(T: typedesc[RandomPathSelector], nodePool: MixNodePool, rng: Rng): T =
+  doAssert not rng.isNil, "path selection requires a CSPRNG"
+  T(nodePool: nodePool, rng: rng)
+
+method samplePath*(
+    selector: RandomPathSelector, request: PathRequest
+): Result[MixPath, string] {.gcsafe, raises: [].} =
+  if selector.rng.isNil:
+    return err("missing CSPRNG")
+
+  var
+    path = newSeq[MixPubInfo](request.pathLength)
+    fixedIds: HashSet[PeerId]
+  for position, info in request.constraints.fixedHops:
+    path[position] = info
+    fixedIds.incl(info.peerId)
+  let count = request.pathLength - fixedIds.len
+  if count == 0:
+    return ok(path)
+
+  var candidates: seq[MixPubInfo]
+  for peerId in selector.nodePool.peerIds():
+    if peerId in fixedIds or peerId in request.constraints.excludedNodeIds:
+      continue
+    let info = selector.nodePool.get(peerId).valueOr:
+      continue
+    if hasRoutingInfo(info):
+      candidates.add(info)
+  if candidates.len < count:
+    return err("not enough usable mix nodes")
+  if uint64(candidates.len) > uint64(high(uint32)):
+    return err("candidate pool too large")
+
+  let sampled = selector.rng.pick(candidates, count).valueOr:
+    return err("not enough usable mix nodes")
+  var next = 0
+  for position in 0 ..< path.len:
+    if not request.constraints.fixedHops.hasKey(position):
+      path[position] = sampled[next]
+      inc next
+  ok(path)
 
 proc selectPath*(
     selector: PathSelector, request: PathRequest
