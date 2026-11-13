@@ -114,30 +114,24 @@ let response = await conn.readLp(maxBytes)
 
 For a complete worked example, see [`examples/mix_ping.nim`](examples/mix_ping.nim).
 
-### Hop address classes
+### Hop address policy
 
 Each node on a mix path is dialed by the node before it, at the address that the sender wrote in the packet. For example, a node at home has the address `192.168.1.20`, and a sender on the internet puts that node on a path. The node before it dials `192.168.1.20` from another network, the dial fails, and the message is lost.
 
-`hopAddressClasses` tells Mix which classes of address it can write in a packet. Mix never puts a pool member (a mix node that this node can put on a path) on a path when that pool member has no address of an accepted class.
+`hopAddressPolicy` tells Mix which addresses it can put on a path. It is nim-libp2p's `PeerAddressPolicy`, a procedure that accepts or rejects one address. Mix never puts a pool member (a mix node that this node can put on a path) on a path if the policy rejects all of its addresses.
 
-| Class | Address |
-| --- | --- |
-| `Public` | An IP address that the public network routes |
-| `Relayed` | A circuit relay route through a relay with a public address |
-| `Private` | An IP address that the public network does not route, such as `192.168.1.20` |
-| `Loopback` | An address of the local host, such as `127.0.0.1` or the wildcard address `0.0.0.0` |
-
-The default accepts each class, so tests, a single host and a private network work with no setting. A node on the public network accepts only the first two classes:
+The default accepts any address, so tests, a single host and a private network work with no setting. A node on the public network uses `publicHopAddressPolicy`:
 
 ```nim
-let mix = MixProtocol.new(
-  mixNodeInfo,
-  switch,
-  hopAddressClasses = {MixAddressClass.Public, MixAddressClass.Relayed},
-)
+let mix =
+  MixProtocol.new(mixNodeInfo, switch, hopAddressPolicy = publicHopAddressPolicy)
 ```
 
-When a pool member has more than one accepted address, Mix uses the address whose class comes first in the table. `hopAddressClasses` does not check the address of this node. Give Mix an address that other nodes can dial, so that replies reach this node.
+`publicHopAddressPolicy` accepts an IPv4 address that the public network routes, and a circuit relay route through a relay with such an address. nim-libp2p's `publicRoutableAddressPolicy` also accepts a circuit relay route through a relay with a private address, which nodes on other networks cannot dial.
+
+Mix asks the policy only about an IPv4 address with a TCP or QUIC-v1 transport and a port other than 0, and never about a multicast or broadcast address.
+
+When the policy accepts more than one of a pool member's addresses, Mix prefers a direct address over a circuit relay route, because a relayed connection has a time limit and a data limit, and a write past the data limit silently loses the packet. Within each group, Mix first tries the address of its last outbound connection to that pool member, and then the AddressBook in order. `hopAddressPolicy` does not check this node's own address, so give Mix an address that other nodes can dial, or replies will not reach this node.
 
 ### Pluggable spam protection
 

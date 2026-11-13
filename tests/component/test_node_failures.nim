@@ -427,8 +427,8 @@ suite "Mix Protocol - Node Failures":
       let cover = await sender.buildCoverPacket()
       check cover.isOk
 
-  asyncTest "a node with public hop address classes has no usable peer on the local host":
-    let nodes = await setupMixNodes(5, hopAddressClasses = {MixAddressClass.Public})
+  asyncTest "a node with the public hop address policy has no usable peer on the local host":
+    let nodes = await setupMixNodes(5, hopAddressPolicy = publicHopAddressPolicy)
     let sender = nodes[0]
     let nrProto = NoReplyProtocol.new()
     nodes[1].switch.mount(nrProto)
@@ -481,8 +481,8 @@ suite "Mix Protocol - Node Failures":
       check "Destination is not a mix node with a usable address" in
         await exitSendFailure(nodes)
 
-    asyncTest "a send to an exit with no address of an accepted class fails at once":
-      let nodes = await setupMixNodes(5, hopAddressClasses = {MixAddressClass.Public})
+    asyncTest "a send to an exit with no address that the policy accepts fails at once":
+      let nodes = await setupMixNodes(5, hopAddressPolicy = publicHopAddressPolicy)
 
       check "Destination is not a mix node with a usable address" in
         await exitSendFailure(nodes)

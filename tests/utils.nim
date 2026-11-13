@@ -8,7 +8,7 @@ import chronos, metrics, results, strformat
 import
   libp2p/
     [protocols/ping, peerid, multiaddress, switch, builders, crypto/crypto, crypto/secp]
-import libp2p/[connmanager, muxers/muxer, stream/connection]
+import libp2p/[connmanager, muxers/muxer, peeraddrpolicy, stream/connection]
 import libp2p_mix
 import libp2p_mix/mix_protocol
 import libp2p_mix/curve25519
@@ -42,7 +42,7 @@ proc setupMixNode[T: MixProtocol](
     spamProtectionRateLimit: Opt[int],
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     hopBackoff: Duration = DefaultHopBackoff,
-    hopAddressClasses: set[MixAddressClass] = AllMixAddressClasses,
+    hopAddressPolicy: PeerAddressPolicy = defaultAddressPolicy,
 ): T =
   let spamProtection =
     if spamProtectionRateLimit.isSome():
@@ -63,7 +63,7 @@ proc setupMixNode[T: MixProtocol](
     spamProtection = spamProtection,
     delayStrategy = Opt.some(actualDelayStrategy),
     hopBackoff = hopBackoff,
-    hopAddressClasses = hopAddressClasses,
+    hopAddressPolicy = hopAddressPolicy,
   )
 
   if destReadBehavior.isSome():
@@ -79,7 +79,7 @@ proc setupMixNodes*(
     spamProtectionRateLimit = Opt.none(int),
     delayStrategy = Opt.none(DelayStrategy),
     hopBackoff: Duration = DefaultHopBackoff,
-    hopAddressClasses = AllMixAddressClasses,
+    hopAddressPolicy: PeerAddressPolicy = defaultAddressPolicy,
 ): Future[seq[MixProtocol]] {.async.} =
   var nodes: seq[MixProtocol] = @[]
   let nodeInfos = MixNodeInfo.generateRandomMany(numNodes, rng())
@@ -88,7 +88,7 @@ proc setupMixNodes*(
       createSwitch(mixNodeInfo.multiAddr, Opt.some(mixNodeInfo.libp2pPrivKey))
     let mixNode = setupMixNode[MixProtocol](
       mixNodeInfo, switch, destReadBehavior, spamProtectionRateLimit, delayStrategy,
-      hopBackoff, hopAddressClasses,
+      hopBackoff, hopAddressPolicy,
     )
     mixNode.nodePool.add(nodeInfos.includeAllExcept(mixNodeInfo))
     nodes.add(mixNode)
