@@ -12,31 +12,6 @@ import
 import ../tools/[lifecycle, unittest, crypto]
 import ../[utils, spam_protection_impl]
 
-type HoldingServer = ref object
-  ## A TCP server that accepts and never answers, so a dial to it stays in its
-  ## handshake.
-  server: StreamServer
-  connections: seq[StreamTransport]
-  acceptor: Future[void]
-
-proc new(T: typedesc[HoldingServer]): T =
-  let hold = T(server: createStreamServer(initTAddress("127.0.0.1:0")))
-  proc acceptLoop() {.async.} =
-    while true:
-      hold.connections.add(await hold.server.accept())
-
-  hold.acceptor = acceptLoop()
-  hold
-
-proc address(hold: HoldingServer): MultiAddress =
-  MultiAddress.init(hold.server.localAddress()).expect("address")
-
-proc close(hold: HoldingServer) {.async.} =
-  await hold.acceptor.cancelAndWait()
-  for connection in hold.connections:
-    await connection.closeWait()
-  await hold.server.closeWait()
-
 const ReplyParams = MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8))
 
 proc exchange(

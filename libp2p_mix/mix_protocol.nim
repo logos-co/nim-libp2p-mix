@@ -35,6 +35,14 @@ const CoverTrafficCodec* = "/mix/cover/1.0.0"
 const DefaultHopBackoff* = chronos.minutes(1)
   ## How long a first hop that failed a dial is not selected as the first hop.
 
+type
+  HopDial = Future[Connection].Raising([DialFailedError, CancelledError])
+    ## A dial of a hop, as `switch.dial` returns it.
+
+  OtherAddressDialError = object of DialFailedError
+    ## A caller of `getConn` waited for a dial of another address, and it failed.
+    ## It is no failure of the address of the caller.
+
 func isCoverTraffic*(msg: MixMessage): bool =
   ## Returns true if the message is a cover traffic packet.
   msg.codec == CoverTrafficCodec
@@ -56,9 +64,15 @@ type MixProtocol* = ref object of LPProtocol
     ## reply never arrives; see surb_store.nim.
   destReadBehaviors: TableRef[string, DestReadBehavior]
   connPool: Table[PeerId, Connection]
-  dialing: Table[PeerId, Future[Connection].Raising([DialFailedError, CancelledError])]
+  dialing: Table[PeerId, tuple[dial: HopDial, addrs: seq[MultiAddress]]]
     ## The dial in flight for each hop. Concurrent callers of getConn await
     ## the same dial and share its result.
+    ## `addrs` are the addresses that the dial uses.
+    ## The library dials through the switch of libp2p.
+    ## The switch has one dial lock and one set of connections for each peer.
+    ## So a second dial of the peer at other addresses waits for the first dial.
+    ## A forward and a reply dial the address that the sender of the packet gave.
+    ## So a caller can wait for a dial of an address that it did not select.
   backedOffUntil: Table[PeerId, Moment]
     ## The moment until which a first hop that failed a dial is not the first hop.
   hopBackoff: Duration
@@ -107,8 +121,11 @@ proc hopIsBackedOff(mixProto: MixProtocol, peerId: PeerId): bool =
   ## It is the one hop this node both selects and dials.
   Moment.now() < mixProto.backedOffUntil.getOrDefault(peerId)
 
-proc backOffHop(mixProto: MixProtocol, peerId: PeerId) =
+proc backOffHop(mixProto: MixProtocol, peerId: PeerId, failure: ref DialFailedError) =
   ## Record a failed dial of `peerId`, and delete the entries whose backoff ended.
+  ## An `OtherAddressDialError` records nothing.
+  if failure of OtherAddressDialError:
+    return
   let now = Moment.now()
   var expired: seq[PeerId]
   for backedOff, until in mixProto.backedOffUntil:
@@ -134,11 +151,11 @@ proc removeClosedConnections(
 
 proc startDial(
     mixProto: MixProtocol, pid: PeerId, addrs: seq[MultiAddress], codecs: seq[string]
-): Future[Connection].Raising([DialFailedError, CancelledError]) =
+): HopDial =
   ## Start the one dial of `pid` that concurrent callers of `getConn` share, and
   ## keep it in `dialing` until it finishes.
   let dial = mixProto.switch.dial(pid, addrs, codecs)
-  mixProto.dialing[pid] = dial
+  mixProto.dialing[pid] = (dial: dial, addrs: addrs)
   dial.addCallback(
     proc(_: pointer) {.gcsafe, raises: [].} =
       mixProto.dialing.del(pid)
@@ -164,9 +181,13 @@ proc getConn(
     return conn[]
   if not mixProto.started:
     raise newException(DialFailedError, "mix protocol is not running")
-  var dial = mixProto.dialing.getOrDefault(pid)
-  if dial.isNil:
-    dial = mixProto.startDial(pid, addrs, codecs)
+  let inFlight = mixProto.dialing.getOrDefault(pid)
+  let dialOfOtherAddrs = not inFlight.dial.isNil and inFlight.addrs != addrs
+  let dial =
+    if inFlight.dial.isNil:
+      mixProto.startDial(pid, addrs, codecs)
+    else:
+      inFlight.dial
   await dial.join()
   if dial.cancelled():
     # Only `stop` cancels a shared dial. A caller cancelled in `join` raises
@@ -176,6 +197,13 @@ proc getConn(
     # The dial completed after the stop began. The stop closes its stream, so
     # no caller writes to it.
     raise newException(DialFailedError, "mix protocol stopped during the dial")
+  if dial.failed() and dialOfOtherAddrs:
+    # A caller waits for one dial at most.
+    # So it does not dial its own addresses after this failure.
+    let failure = dial.error
+    raise newException(
+      OtherAddressDialError, "a dial of other addresses failed: " & failure.msg, failure
+    )
   try:
     return dial.read()
   except FuturePendingError:
@@ -821,7 +849,7 @@ proc sendPacket(
       if mixProto.started:
         mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
         if ownFirstHop:
-          mixProto.backOffHop(peerId)
+          mixProto.backOffHop(peerId, exc)
       if proofToken.len > 0:
         mixProto.spamProtection.withValue(sp):
           sp.reclaimProofToken(proofToken)
@@ -845,7 +873,7 @@ proc sendPacket(
     if mixProto.started:
       mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
       if ownFirstHop:
-        mixProto.backOffHop(peerId)
+        mixProto.backOffHop(peerId, exc)
     return err(
       SendPacketError(
         msg: fmt"Failed to redial next hop ({peerId}, {multiAddress}): {exc.msg}"
@@ -1262,7 +1290,7 @@ proc writeCoverPacket(
     # A dial that the stop ended is not a failure of the hop.
     if mixProto.started:
       mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
-      mixProto.backOffHop(peerId)
+      mixProto.backOffHop(peerId, exc)
     return err("Failed to dial for cover packet: " & exc.msg)
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
@@ -1291,7 +1319,9 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   mixProto.coverTraffic.withValue(ct):
     await ct.stop()
   mixProto.started = false
-  let dials = toSeq(mixProto.dialing.values)
+  # An entry of `dialing` is the future of a dial and the addresses of that dial.
+  # The mapIt takes the futures, and the stop cancels them below.
+  let dials = toSeq(mixProto.dialing.values).mapIt(it.dial)
 
   # Cancelling fires the completion callback, which deletes from this table.
   let pending = toSeq(mixProto.ongoingMixMessages.values)

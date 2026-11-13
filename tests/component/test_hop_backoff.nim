@@ -18,6 +18,7 @@ when defined(libp2p_mix_experimental_exit_is_dest):
     TestCodec = "/mix/test/hop-backoff/1.0.0"
     DialFailed = "Failed to dial to next hop"
     RedialFailed = "Failed to redial next hop"
+    OtherAddressDial = "a dial of other addresses failed"
 
   proc closedPortAddress(): MultiAddress =
     ## An address where nothing listens, so a dial to it fails at once.
@@ -276,4 +277,34 @@ when defined(libp2p_mix_experimental_exit_is_dest):
         redial.isErr
         RedialFailed in redial.error
       coverSelected = await nodes[0].coverSelects(hop.peerId, 100)
+      check coverSelected
+
+    asyncTest "a send that waited for a dial of another address does not back the hop off":
+      # A sender could give an address that never answers for a reachable peer.
+      # A send of this node that selects the peer waits for that dial.
+      # The failure of the dial is no failure of the address in the pool.
+      let nodes = await setupMixNodes(5)
+      await startNodes(nodes)
+      defer:
+        await stopNodes(nodes)
+      let hold = HoldingServer.new()
+      let hop = nodes[1].localMixPubInfo()
+      let path = @[hop, nodes[2].localMixPubInfo(), nodes[3].localMixPubInfo()]
+      # The reply dials the hop at the address of the server.
+      # The dial stays in its handshake.
+      let reply = nodes[0].sendSurbReply(makeSurb(path, hold.address()), @[1.byte])
+      checkUntilTimeout:
+        hold.connections.len == 1
+      let own = nodes[0].sendCoverPacket(hop.peerId, hop.multiAddr, @[1.byte])
+      # The server closes its connection, so the dial fails for both.
+      await hold.close()
+      let finished = await allFutures(reply, own).withTimeout(2.seconds)
+      check finished
+      let replied = reply.read()
+      let sent = own.read()
+      check:
+        replied.isErr
+        sent.isErr
+        OtherAddressDial in sent.error
+      let coverSelected = await nodes[0].coverSelects(hop.peerId, 100)
       check coverSelected

@@ -244,6 +244,31 @@ method generateForEntry*(self: FixedDelayStrategy): Delay =
 method generateForIntermediate*(self: FixedDelayStrategy, encodedDelay: Delay): Delay =
   self.delay
 
+type HoldingServer* = ref object
+  ## A TCP server that accepts and never answers, so a dial to it stays in its
+  ## handshake.
+  server: StreamServer
+  connections*: seq[StreamTransport]
+  acceptor: Future[void]
+
+proc new*(T: typedesc[HoldingServer]): T =
+  let hold = T(server: createStreamServer(initTAddress("127.0.0.1:0")))
+  proc acceptLoop() {.async.} =
+    while true:
+      hold.connections.add(await hold.server.accept())
+
+  hold.acceptor = acceptLoop()
+  hold
+
+proc address*(hold: HoldingServer): MultiAddress =
+  MultiAddress.init(hold.server.localAddress()).expect("address")
+
+proc close*(hold: HoldingServer) {.async.} =
+  await hold.acceptor.cancelAndWait()
+  for connection in hold.connections:
+    await connection.closeWait()
+  await hold.server.closeWait()
+
 proc errorCount*(role, reason: string): float64 =
   ## The count of `mix_messages_error` for `role` and `reason`. 0 before the
   ## label exists.
