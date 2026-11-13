@@ -35,6 +35,10 @@ const CoverTrafficCodec* = "/mix/cover/1.0.0"
 const DefaultHopBackoff* = chronos.minutes(1)
   ## How long a first hop that failed a dial is not selected as the first hop.
 
+const PoolSizeInterval = chronos.seconds(10)
+  ## A send or a cover packet build recounts the usable pool members at most this
+  ## often, which is shorter than the usual scrape interval of a metrics server.
+
 type
   HopDial = Future[Connection].Raising([DialFailedError, CancelledError])
     ## A dial of a hop, as `switch.dial` returns it.
@@ -76,6 +80,7 @@ type MixProtocol* = ref object of LPProtocol
   backedOffUntil: Table[PeerId, Moment]
     ## The moment until which a first hop that failed a dial is not the first hop.
   hopBackoff: Duration
+  poolSizeTime: Opt[Moment] ## When a path build last counted the usable pool members.
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
   coverTraffic*: Opt[CoverTraffic]
@@ -119,6 +124,16 @@ proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
     let value = rng.generate(uint64)
     if value >= threshold:
       return ok(int(value mod bound))
+
+proc refreshPoolSize(mixProto: MixProtocol) =
+  ## Sets `mix_pool_size` for a path build, but at most once per `PoolSizeInterval`,
+  ## since the count reads every pool member.
+  let now = Moment.now()
+  mixProto.poolSizeTime.withValue(lastTime):
+    if now - lastTime < PoolSizeInterval:
+      return
+  mixProto.poolSizeTime = Opt.some(now)
+  discard mixProto.nodePool.countUsable()
 
 proc hopIsBackedOff(mixProto: MixProtocol, peerId: PeerId): bool =
   ## True while `peerId` waits out a failed dial. Only the first hop is filtered.
@@ -995,6 +1010,8 @@ proc anonymizeLocalProtocolSend*(
     delays: seq[Delay] = @[]
     exitPeerId: PeerId
 
+  mixProto.refreshPoolSize()
+
   var poolPeerIds = mixProto.nodePool.peerIds()
   var availableIndices = toSeq(0 ..< poolPeerIds.len)
 
@@ -1165,6 +1182,8 @@ proc sendSurbReply*(
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]
 ): Result[seq[MixHop], string] {.raises: [].} =
+  mixProto.refreshPoolSize()
+
   var available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
   if available.len < count:
     mix_messages_error.inc(labelValues = ["Cover", "LOW_MIX_POOL"])
@@ -1294,6 +1313,7 @@ proc sendCoverPacket*(
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
+  discard mixProto.nodePool.countUsable()
   mixProto.coverTraffic.withValue(ct):
     await ct.start()
 
@@ -1372,6 +1392,11 @@ proc init*(
   ## delays and set the send time.
   ##
   ## A first hop that fails a dial is not the first hop for `hopBackoff`.
+  ##
+  ## `start` sets `mix_pool_size` to the number of pool members that a path can use,
+  ## and sends and cover packet builds refresh it at most once per `PoolSizeInterval`.
+  ## A node that does neither keeps the value from `start` until its host calls
+  ## `nodePool.countUsable()`.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 

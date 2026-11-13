@@ -8,7 +8,7 @@
 ## providing a clean interface for the mix protocol to interact with mix node data.
 
 import std/[sequtils, tables]
-import results
+import metrics, results
 import libp2p/peerstore
 import libp2p/peerid
 import libp2p/multiaddress
@@ -16,6 +16,7 @@ import libp2p/peeraddrpolicy
 import libp2p/wire
 import libp2p/crypto/crypto
 import libp2p/crypto/curve25519
+import ./mix_metrics
 import ./mix_node
 import ./multiaddr as mix_multiaddr
 
@@ -183,3 +184,15 @@ proc peerIds*(pool: MixNodePool): seq[PeerId] =
 proc len*(pool: MixNodePool): int =
   ## Get the number of mix nodes in the pool.
   pool.peerStore[MixPubKeyBook].len
+
+proc updatePoolSize(usable: int) =
+  ## The only code that sets `mix_pool_size`.
+  mix_pool_size.set(usable.int64)
+
+proc countUsable*(pool: MixNodePool): int {.raises: [].} =
+  ## Counts the pool members that a path can use, which means reading every member's
+  ## hop address, and sets `mix_pool_size` to the result.
+  ## The gauge is process-wide, so it shows the count of whichever pool counted last.
+  let usable = pool.peerIds().countIt(pool.getHop(it).isSome())
+  updatePoolSize(usable)
+  usable
