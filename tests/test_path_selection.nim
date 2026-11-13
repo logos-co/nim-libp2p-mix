@@ -198,11 +198,14 @@ suite "Path selector boundary":
     check resolving.selectPath(request).error == "stored candidate is unavailable"
     check resolving.peerIds == ids
 
+  test "base selector requires a concrete implementation":
+    expect AssertionDefect:
+      discard PathSelector(nodePool: pool).selectPath(request)
+
   test "missing selectors, missing pools and strategy errors are returned":
     let missing: PathSelector = nil
     check missing.selectPath(request).error == "missing selector or pool"
     check SuppliedPathSelector().selectPath(request).error == "missing selector or pool"
-    check PathSelector(nodePool: pool).selectPath(request).error == "path selector is not implemented"
     selector.failure = "candidate set exhausted"
     check selector.selectPath(request).error == selector.failure
 
