@@ -4,7 +4,7 @@
 import
   ./libp2p_mix/[
     mix_protocol, mix_node, entry_connection, exit_layer, spam_protection,
-    delay_strategy, pool,
+    delay_strategy, pool, path_selection,
   ]
 import libp2p/stream/connection
 import chronos
@@ -15,6 +15,7 @@ from ./libp2p_mix/sphinx import ReplyCredential, RawSurbReply, identifier
 export toConnection
 export MixProtocolID
 export MixProtocol
+export path_selection
 export MixDelivery
 export MixDeliveryHandler
 export RawSurbReplyDisposition
