@@ -46,8 +46,9 @@ method buildSurb*(
   doAssert candidates.len >= 2
   let peers = candidates[0 .. 1]
 
-  # Pool must have >= PathLength(3) nodes. We keep our 2 desired peers + the
-  # exit node. buildSurb's own filter removes the exit, leaving exactly our 2.
+  # buildSurb removes the exit and the destination, and it needs PathLength - 1
+  # other nodes. We keep our 2 desired peers + the exit node, so it draws
+  # exactly our 2.
   let keepInPool = (peers & exitPeerId).toHashSet()
 
   # `remove` deletes only the mix key, so the mix key is what comes back. A
