@@ -4,11 +4,12 @@
 {.used.}
 
 import chronos, metrics, results, stew/byteutils, sequtils, strutils, tables
+
+import chronos, results, stew/byteutils, sequtils
 import
   libp2p/[
     protocols/ping,
     peerid,
-    peerstore,
     multiaddress,
     switch,
     builders,
@@ -19,6 +20,7 @@ import libp2p_mix
 import libp2p_mix/mix_metrics
 import libp2p_mix/mix_protocol
 import libp2p_mix/serialization
+
 import libp2p_mix/delay_strategy
 
 import ../tools/[lifecycle, unittest, crypto]
@@ -693,3 +695,32 @@ suite "Mix Protocol - Node Failures":
 
     check "Destination is not a mix node with a usable address" in
       await exitSendFailure(nodes)
+
+  asyncTest "skip nodes with invalid multiaddresses without modifying the pool":
+    # A Mix-node destination needs two relays plus the fixed destination.
+    let nodes = await setupMixNodes(4)
+    let sender = nodes[0]
+    let invalidPeerId = PeerId.random(rng()).expect("could not generate peerId")
+    let validInfo = sender.nodePool.get(nodes[1].switch.peerInfo.peerId).get()
+    let invalidInfo = MixPubInfo.init(
+      invalidPeerId,
+      MultiAddress.init("/ip4/0.0.0.0").get(),
+      validInfo.mixPubKey,
+      validInfo.libp2pPubKey,
+    )
+    sender.nodePool.add(invalidInfo)
+
+    let nrProto = NoReplyProtocol.new()
+    nodes[1].switch.mount(nrProto)
+    startAndDeferStop(nodes)
+
+    let conn = sender.toConnection(
+      MixDestination.exitNode(nodes[1].switch.peerInfo.peerId), nrProto.codec
+    ).get()
+    let payload = "test message".toBytes()
+    await conn.writeLp(payload)
+    check (await nrProto.receivedMessages.get().wait(5.seconds)).data == payload
+    await conn.close()
+    check sender.nodePool.len == 4
+    check invalidPeerId in sender.nodePool.peerIds()
+    check sender.nodePool.get(invalidPeerId).isNone

@@ -4,10 +4,12 @@
 {.used.}
 
 import std/[sets, tables, sequtils]
-import results
+import chronos, results
 import libp2p/[multiaddress, peerstore, peerid]
 import libp2p/crypto/secp
-import libp2p_mix/[path_selection, mix_node, serialization, pool]
+import libp2p_mix
+import libp2p_mix/[serialization, tag_manager, surb_store, mix_protocol]
+import ./utils
 import ./tools/[unittest, crypto]
 
 suite "Path request validation":
@@ -203,3 +205,101 @@ suite "Path selector boundary":
     check PathSelector(nodePool: pool).selectPath(request).error == "path selector is not implemented"
     selector.failure = "candidate set exhausted"
     check selector.selectPath(request).error == selector.failure
+
+# Save the requests received from Mix so tests can inspect their constraints.
+# Return a deliberate error to stop execution before network transmission.
+type RecordingSelector = ref object of PathSelector
+  requests: seq[PathRequest]
+  forwardPath: MixPath
+
+method samplePath(
+    selector: RecordingSelector, request: PathRequest
+): Result[MixPath, string] {.gcsafe, raises: [].} =
+  selector.requests.add(request)
+  if request.purpose == PathPurpose.Forward and selector.forwardPath.len > 0:
+    return ok(selector.forwardPath)
+  err("test selector invoked")
+
+suite "Mix path selection integration":
+  var
+    mix: MixProtocol
+    nodes: seq[MixPubInfo]
+    shared, session: RecordingSelector
+
+  setup:
+    let infos = MixNodeInfo.generateRandomMany(5, rng())
+    nodes = infos.mapIt(it.toMixPubInfo())
+    mix = MixProtocol.new(
+      infos[0], createSwitch(infos[0].multiAddr, Opt.some(infos[0].libp2pPrivKey)),
+      tagManager = TagManager.new(autoStart = false),
+      surbStore = SurbStore.new(autoStart = false),
+    )
+    check mix.defaultPathSelector of RandomPathSelector
+    check mix.defaultPathSelector.nodePool == mix.nodePool
+    mix.nodePool.add(nodes[0 .. 3])
+    shared = RecordingSelector(nodePool: mix.nodePool)
+    session = RecordingSelector(nodePool: mix.nodePool)
+    mix.defaultPathSelector = shared
+
+  test "both send overloads pass session selectors and fix the destination last":
+    let pooled = waitFor mix.send(
+      MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte], session
+    )
+    let explicit = waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte], session)
+    check pooled.error == "test selector invoked"
+    check explicit.error == "test selector invoked"
+    require session.requests.len == 2
+    for i, destination in [nodes[3], nodes[4]]:
+      let request = session.requests[i]
+      check request.purpose == PathPurpose.Forward
+      check request.pathLength == DefaultPathLength
+      check request.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == destination
+      check request.constraints.excludedNodeIds == [nodes[0].peerId, destination.peerId].toHashSet
+    check shared.requests.len == 0
+    check mix.defaultPathSelector == shared
+    check mix.nodePool.get(nodes[4].peerId).isNone
+
+  test "createSurb passes the session selector and fixes the current local endpoint":
+    let newAddr = MultiAddress.init("/ip4/127.0.0.1/tcp/9999").get()
+    require mix.setLocalMultiAddr(newAddr).isOk
+    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId), session).error ==
+      "test selector invoked"
+    require session.requests.len == 1
+    let request = session.requests[0]
+    var local = nodes[0]
+    local.multiAddr = newAddr
+    check request.purpose == PathPurpose.Surb
+    check request.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == local
+    check request.constraints.excludedNodeIds == [local.peerId, nodes[4].peerId].toHashSet
+    check shared.requests.len == 0
+    check mix.defaultPathSelector == shared
+
+  test "send, createSurb and cover use the shared default when no selector is given":
+    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte])).isErr
+    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId)).isErr
+    check (waitFor mix.buildCoverPacket(0)).error == "test selector invoked"
+    check shared.requests.mapIt(it.purpose) ==
+      @[PathPurpose.Forward, PathPurpose.Surb, PathPurpose.Cover]
+    let cover = shared.requests[^1]
+    check cover.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == nodes[0]
+    check cover.constraints.excludedNodeIds == [nodes[0].peerId].toHashSet
+
+  test "legacy sends reuse the selector for SURBs and exclude the selected forward exit":
+    session.forwardPath = nodes[1 .. 3]
+    let sent = waitFor mix.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
+      MixDestination.forwardToAddr(nodes[4].peerId, nodes[4].multiAddr), 1, session,
+    )
+    check sent.error == "Could not prepend SURBs: test selector invoked"
+    require session.requests.len == 2
+    let forward = session.requests[0]
+    check forward.purpose == PathPurpose.Forward
+    check forward.constraints.fixedHops.len == 0
+    check forward.constraints.excludedNodeIds == [nodes[0].peerId, nodes[4].peerId].toHashSet
+    let surb = session.requests[1]
+    check surb.purpose == PathPurpose.Surb
+    check surb.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == nodes[0]
+    check surb.constraints.excludedNodeIds ==
+      [nodes[0].peerId, nodes[3].peerId, nodes[4].peerId].toHashSet
+    check shared.requests.len == 0
+    check mix.surbCredsLen == 0
