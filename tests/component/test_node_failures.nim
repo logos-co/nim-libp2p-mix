@@ -614,7 +614,7 @@ suite "Mix Protocol - Node Failures":
       await conn.writeLp("test message".toBytes())
     except LPStreamError as exc:
       failure = exc.msg
-    check "Ran out of available mix nodes" in failure
+    check "Ran out of usable mix nodes" in failure
 
   when defined(libp2p_mix_experimental_exit_is_dest):
     proc exitSendFailure(nodes: seq[MixProtocol]): Future[string] {.async.} =
@@ -643,9 +643,61 @@ suite "Mix Protocol - Node Failures":
       let nodes = await setupMixNodes(5)
       discard
         nodes[0].switch.peerStore[AddressBook].del(nodes[1].switch.peerInfo.peerId)
+      let invalidDestBefore = errorCount("Entry", "INVALID_DEST")
 
-      check "Destination is not a mix node with a usable address" in
-        await exitSendFailure(nodes)
+      let failure = await exitSendFailure(nodes)
+      check:
+        "Destination is not a mix node with a usable address" in failure
+        errorCount("Entry", "INVALID_DEST") == invalidDestBefore + 1
+
+    asyncTest "a send to an exit works with two usable pool members and one with no hop address":
+      ## The pool has the exit, two usable members and one with no hop address, so
+      ## the path must be the two usable members followed by the exit.
+      let nodes = await setupMixNodes(4)
+      let sender = nodes[0]
+      discard sender.addUnusableMember()
+      startAndDeferStop(nodes)
+
+      for _ in 0 ..< 20:
+        let sent = await sender.anonymizeLocalProtocolSend(
+          newAsyncQueue[seq[byte]](),
+          "test message".toBytes(),
+          "/test/1.0.0",
+          MixDestination.exitNode(nodes[1].switch.peerInfo.peerId),
+          0,
+        )
+        check sent.isOk
+
+    asyncTest "a send to an exit works with two other pool members":
+      ## The path is the two other members followed by the exit.
+      let nodes = await setupMixNodes(4)
+      startAndDeferStop(nodes)
+
+      let sent = await nodes[0].anonymizeLocalProtocolSend(
+        newAsyncQueue[seq[byte]](),
+        "test message".toBytes(),
+        "/test/1.0.0",
+        MixDestination.exitNode(nodes[1].switch.peerInfo.peerId),
+        0,
+      )
+      check sent.isOk
+
+    asyncTest "a send to an exit with one other pool member counts LOW_MIX_POOL":
+      let nodes = await setupMixNodes(3)
+      startAndDeferStop(nodes)
+      let lowPoolBefore = errorCount("Entry", "LOW_MIX_POOL")
+
+      let sent = await nodes[0].anonymizeLocalProtocolSend(
+        newAsyncQueue[seq[byte]](),
+        "test message".toBytes(),
+        "/test/1.0.0",
+        MixDestination.exitNode(nodes[1].switch.peerInfo.peerId),
+        0,
+      )
+      check:
+        sent.isErr
+        sent.error.startsWith("No. of public mix nodes (1)")
+        errorCount("Entry", "LOW_MIX_POOL") == lowPoolBefore + 1
 
     asyncTest "a send to an exit with no address that the policy accepts fails at once":
       let nodes = await setupMixNodes(5, hopAddressPolicy = publicHopAddressPolicy)

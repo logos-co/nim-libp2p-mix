@@ -686,6 +686,26 @@ proc drawUsable(
   mix_messages_error.inc(labelValues = [label, "LOW_MIX_POOL"])
   err("Ran out of usable mix nodes")
 
+proc drawHops(
+    mixProto: MixProtocol, peerIds: openArray[PeerId], count: int, label: string
+): Result[seq[MixHop], string] {.raises: [].} =
+  ## Draws `count` usable pool members from `peerIds`, skipping backed off peers for
+  ## the first hop only.
+  var candidates = @peerIds
+  # The backed off peers that the draw of the first hop skipped.
+  var skipped: seq[PeerId]
+  var hops: seq[MixHop]
+  while hops.len < count:
+    let mixHop = ?mixProto.drawUsable(candidates, label)
+    if hops.len == 0:
+      if mixProto.hopIsBackedOff(mixHop.info.peerId):
+        skipped.add(mixHop.info.peerId)
+        continue
+      # Peers skipped for the first hop are fine as later hops.
+      candidates.add(skipped)
+    hops.add(mixHop)
+  ok(hops)
+
 method buildSurb*(
     mixProto: MixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
 ): Result[SURB, string] {.base, gcsafe, raises: [].} =
@@ -1008,76 +1028,50 @@ proc anonymizeLocalProtocolSend*(
     publicKeys: seq[FieldElement] = @[]
     hop: seq[Hop] = @[]
     delays: seq[Delay] = @[]
-    exitPeerId: PeerId
 
   mixProto.refreshPoolSize()
 
-  var poolPeerIds = mixProto.nodePool.peerIds()
-  var availableIndices = toSeq(0 ..< poolPeerIds.len)
+  var candidates = mixProto.nodePool.peerIds()
 
   # The draw never picks the destination.
-  let index = poolPeerIds.find(destination.peerId)
+  let index = candidates.find(destination.peerId)
   if index != -1:
-    availableIndices.del(index)
+    candidates.del(index)
 
-  if availableIndices.len < PathLength:
+  # A destination that is a mix node is itself the last hop, so only the hops before
+  # it are drawn.
+  let lastHop =
+    if destination.kind == MixNode:
+      let mixHop = mixProto.nodePool.getHop(destination.peerId).valueOr:
+        mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
+        return err("Destination is not a mix node with a usable address")
+      Opt.some(mixHop)
+    else:
+      Opt.none(MixHop)
+  let drawCount =
+    if lastHop.isSome():
+      PathLength - 1
+    else:
+      PathLength
+
+  if candidates.len < drawCount:
     mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
     return err(
-      fmt"No. of public mix nodes ({availableIndices.len}) less than path length ({PathLength})."
+      fmt"No. of public mix nodes ({candidates.len}) less than the hops to draw ({drawCount})."
     )
 
-  # A destination that is a mix node is the last hop, so it needs a hop address.
-  if destination.kind == MixNode and mixProto.nodePool.get(destination.peerId).isNone():
-    return err("Destination is not a mix node with a usable address")
+  var pathHops = ?mixProto.drawHops(candidates, drawCount, "Entry")
+  lastHop.withValue(mixHop):
+    pathHops.add(mixHop)
 
-  var nextHopAddr: MultiAddress
-  var nextHopPeerId: PeerId
-  # The backed off peers that the draw of the first hop skipped.
-  var skipped: seq[int]
-  while hop.len < PathLength:
-    if availableIndices.len == 0:
-      mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
-      return err("Ran out of available mix nodes while constructing path")
-
-    let randomIndexPosition = cryptoRandomInt(mixProto.rng, availableIndices.len).valueOr:
-      mix_messages_error.inc(labelValues = ["Entry", "NON_RECOVERABLE"])
-      return err(fmt"Failed to generate random number: {error}")
-    let selectedIndex = availableIndices[randomIndexPosition]
-    var randPeerId = poolPeerIds[selectedIndex]
-    availableIndices.del(randomIndexPosition)
-
-    if hop.len == 0 and mixProto.hopIsBackedOff(randPeerId):
-      skipped.add(selectedIndex)
-      continue
-
-    if hop.len == PathLength - 1:
-      case destination.kind
-      of ForwardAddr:
-        exitPeerId = randPeerId
-      of MixNode:
-        exitPeerId = destination.peerId
-        randPeerId = destination.peerId
-
-    debug "Selected mix node: ", indexInPath = hop.len
-
-    let mixHop = mixProto.nodePool.getHop(randPeerId).valueOr:
-      # This is not an error. The peer has no address that a path can use now,
-      # and a later record can give it one. So it stays in the pool, and the
-      # draw continues with no error count.
-      trace "Skipping a pool member with no usable address", peerId = randPeerId
-      continue
-    let (peerId, multiAddr, mixPubKey, _) = mixHop.info.get()
-
-    publicKeys.add(mixPubKey)
-
-    if hop.len == 0:
-      nextHopAddr = multiAddr
-      nextHopPeerId = peerId
-      # The later hops draw from the whole pool.
-      availableIndices.add(skipped)
-
+  let nextHopPeerId = pathHops[0].info.peerId
+  let nextHopAddr = pathHops[0].info.multiAddr
+  let exitPeerId = pathHops[^1].info.peerId
+  for i, mixHop in pathHops:
+    debug "Selected mix node: ", indexInPath = i
+    publicKeys.add(mixHop.info.mixPubKey)
     delays.add(
-      if hop.len != PathLength - 1:
+      if i != PathLength - 1:
         mixProto.delayStrategy.generateForEntry()
       else:
         NoDelay
@@ -1184,7 +1178,7 @@ proc selectRandomNodes(
 ): Result[seq[MixHop], string] {.raises: [].} =
   mixProto.refreshPoolSize()
 
-  var available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
+  let available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
   if available.len < count:
     mix_messages_error.inc(labelValues = ["Cover", "LOW_MIX_POOL"])
     return err(
@@ -1192,17 +1186,7 @@ proc selectRandomNodes(
         ")"
     )
 
-  var firstCandidates = available.filterIt(not mixProto.hopIsBackedOff(it))
-  if firstCandidates.len == 0:
-    return err("Every first hop candidate is backed off")
-  let first = ?mixProto.drawUsable(firstCandidates, "Cover")
-  available.keepItIf(it != first.info.peerId)
-
-  # Only the first hop skips a backed off peer.
-  var selected = @[first]
-  while selected.len < count:
-    selected.add(?mixProto.drawUsable(available, "Cover"))
-  ok(selected)
+  mixProto.drawHops(available, count, "Cover")
 
 proc buildCoverPacket*(
     mixProto: MixProtocol, epoch: uint64

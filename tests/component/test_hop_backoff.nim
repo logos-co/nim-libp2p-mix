@@ -105,19 +105,21 @@ when defined(libp2p_mix_experimental_exit_is_dest):
       check not coverSelected
 
     asyncTest "a send succeeds when its later hops need a backed off hop":
-      # Five nodes leave three candidates, nodes[1 .. 3], and a path draws all
-      # three. So the backed off nodes[3] must be a later hop.
+      # Five nodes leave three candidates, nodes[1 .. 3], and a path draws two.
+      # nodes[2] and nodes[3] are backed off, so one of them must be a later hop.
       let nodes = await setupMixNodes(5)
       await startNodes(nodes)
       defer:
         await stopNodes(nodes)
-      await nodes[3].switch.stop()
-      let first = await nodes[0].sendUntilFirstHopFails(nodes[4], 40)
-      check first
+      for i in 2 .. 3:
+        await nodes[i].switch.stop()
+      for _ in 2 .. 3:
+        let failed = await nodes[0].sendUntilFirstHopFails(nodes[4], 40)
+        check failed
       let later = await nodes[0].firstHopFailures(nodes[4], 30)
       check later == 0
 
-    asyncTest "a send fails when each first hop candidate is backed off":
+    asyncTest "a path build fails when each first hop candidate is backed off":
       let nodes = await setupMixNodes(5)
       await startNodes(nodes)
       defer:
@@ -137,7 +139,17 @@ when defined(libp2p_mix_experimental_exit_is_dest):
       )
       check:
         sent.isErr
-        "Ran out of available mix nodes" in sent.error
+        "Ran out of usable mix nodes" in sent.error
+
+      # The cover path picks its first node with the same filter, and once the exit
+      # is out of the pool all of its candidates are backed off.
+      discard nodes[0].nodePool.remove(nodes[4].switch.peerInfo.peerId)
+      let lowPoolBefore = errorCount("Cover", "LOW_MIX_POOL")
+      let cover = await nodes[0].buildCoverPacket(0)
+      check:
+        cover.isErr
+        "Ran out of usable mix nodes" in cover.error
+        errorCount("Cover", "LOW_MIX_POOL") == lowPoolBefore + 1
 
     asyncTest "a hop whose backoff ended is selected again":
       # A zero backoff ends at once, so the next send can select the hop again.
