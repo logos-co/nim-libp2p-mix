@@ -1,0 +1,101 @@
+name: ci / nix refresh
+
+# `nimble.lock` is a build artefact (#13) and `libp2p_mix.nimble` uses
+# version ranges, so upstream releases move what `make refresh-deps`
+# resolves and the committed `nix/deps.nix` drifts. Instead of failing
+# `ci / nix` on master, this workflow regenerates the snapshot weekly,
+# checks that it builds, and opens or updates a PR with the result.
+#
+# Token: a PR opened with the default GITHUB_TOKEN does not trigger other
+# workflows, so `ci / nix` would not run on it. Set the DEPS_REFRESH_TOKEN
+# secret (fine-grained PAT or GitHub App token with contents and
+# pull-requests write) to get CI on the PR. Without the secret the job
+# falls back to GITHUB_TOKEN, which needs "Allow GitHub Actions to create
+# and approve pull requests" enabled in the repository settings.
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Monday 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Queue rather than cancel: a cancelled run could stop mid-push.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  NIMBLE_FLAGS: "-y"
+
+jobs:
+  # Runs upstream nimble code while resolving deps, so it gets no secrets
+  # and a read-only token. Only nix/deps.nix leaves this job.
+  regenerate:
+    # A run from another branch would build one tree and publish another.
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      # Same pins as ci-nix.yml; bump both together.
+      - name: Install Nix
+        uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Use Magic Nix Cache
+        uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - name: Regenerate nix/deps.nix
+        run: |
+          nix develop --command make refresh-deps NIMBLE_FLAGS="$NIMBLE_FLAGS"
+          git diff --stat nix/deps.nix
+
+      # Runs every week, as the old ci / nix cron did, so master's snapshot
+      # is still built when nothing changed. A snapshot that fails to build
+      # fails the workflow and opens no PR.
+      - name: nix build
+        run: nix build -L
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: deps-nix
+          path: nix/deps.nix
+          retention-days: 1
+
+  # Fresh runner: the PR token never shares a machine with dependency code.
+  open-pr:
+    needs: regenerate
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: deps-nix
+          path: nix
+
+      # bot/refresh-deps-nix belongs to this workflow: each run resets it,
+      # so push fixes to another branch. No diff closes an open refresh PR
+      # and deletes the branch (delete-branch).
+      - name: Open or update the refresh PR
+        uses: peter-evans/create-pull-request@v8
+        with:
+          token: ${{ secrets.DEPS_REFRESH_TOKEN || secrets.GITHUB_TOKEN }}
+          add-paths: nix/deps.nix
+          base: master
+          branch: bot/refresh-deps-nix
+          delete-branch: true
+          commit-message: "chore(nix): refresh deps.nix snapshot"
+          title: "chore(nix): refresh deps.nix snapshot"
+          body: |
+            Weekly `nix/deps.nix` refresh from the `ci / nix refresh` workflow.
+            Upstream releases moved what `make refresh-deps` resolves. The new snapshot passed `nix build` before this PR was opened.
