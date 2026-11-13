@@ -35,6 +35,8 @@ proc aes_ctr_start_index*(key, iv, data: openArray[byte], startIndex: int): seq[
   doAssert startIndex mod 16 == 0, "Start index must be a multiple of 16"
 
   var advIV = @iv
+  defer:
+    burnMem(advIV)
 
   # Advance the counter to the start index
   let blocksToAdvance = startIndex div 16
@@ -48,7 +50,9 @@ proc sha256_hash*(data: openArray[byte]): array[32, byte] =
 
 proc kdf*(key: openArray[byte]): seq[byte] =
   ## Returns the hash of 'key' truncated to 16 bytes.
-  let hash = sha256_hash(key)
+  var hash = sha256_hash(key)
+  defer:
+    burnMem(hash)
   return hash[0 .. 15]
 
 proc hmac*(key, data: openArray[byte]): seq[byte] =
