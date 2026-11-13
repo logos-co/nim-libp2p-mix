@@ -76,37 +76,61 @@ proc new*(T: typedesc[RandomPathSelector], nodePool: MixNodePool, rng: Rng): T =
   doAssert not rng.isNil, "path selection requires a CSPRNG"
   T(nodePool: nodePool, rng: rng)
 
+proc prepareFixedHops(
+    request: PathRequest
+): tuple[path: MixPath, excludedIds: HashSet[PeerId]] =
+  ## The request has already been validated by selectPath.
+  ## Reserve every fixed identity before sampling any unfilled position.
+  result.path = newSeq[MixPubInfo](request.pathLength)
+  result.excludedIds = request.constraints.excludedNodeIds
+  for position, info in request.constraints.fixedHops:
+    result.path[position] = info
+    result.excludedIds.incl(info.peerId)
+
+proc resolveCandidates(
+    pool: MixNodePool, candidateIds: openArray[PeerId], excludedIds: HashSet[PeerId]
+): seq[MixPubInfo] =
+  ## The strategy supplies distinct identities: the whole pool for random
+  ## selection, or a stored candidate set for a future session strategy.
+  ## Resolve current routing information without changing pool membership.
+  for peerId in candidateIds:
+    if peerId in excludedIds:
+      continue
+    let info = pool.get(peerId).valueOr:
+      continue
+    if hasRoutingInfo(info):
+      result.add(info)
+
+proc pickRandomNodes(
+    rng: Rng, candidates: openArray[MixPubInfo], count: int
+): Result[MixPath, string] =
+  ## Pick exactly count nodes without replacement from filtered, distinct candidates.
+  ## The caller supplies a non-nil RNG and a non-negative count.
+  if count == 0:
+    return ok(newSeq[MixPubInfo]())
+  if candidates.len < count:
+    return err("not enough usable mix nodes")
+  if uint64(candidates.len) > uint64(high(uint32)):
+    return err("candidate pool too large")
+  let sampled = rng.pick(candidates, count).valueOr:
+    return err("not enough usable mix nodes")
+  ok(sampled)
+
 method samplePath*(
     selector: RandomPathSelector, request: PathRequest
 ): Result[MixPath, string] {.gcsafe, raises: [].} =
   if selector.rng.isNil:
     return err("missing CSPRNG")
 
-  var
-    path = newSeq[MixPubInfo](request.pathLength)
-    fixedIds: HashSet[PeerId]
-  for position, info in request.constraints.fixedHops:
-    path[position] = info
-    fixedIds.incl(info.peerId)
-  let count = request.pathLength - fixedIds.len
+  var (path, excludedIds) = prepareFixedHops(request)
+  let count = request.pathLength - request.constraints.fixedHops.len
   if count == 0:
     return ok(path)
 
-  var candidates: seq[MixPubInfo]
-  for peerId in selector.nodePool.peerIds():
-    if peerId in fixedIds or peerId in request.constraints.excludedNodeIds:
-      continue
-    let info = selector.nodePool.get(peerId).valueOr:
-      continue
-    if hasRoutingInfo(info):
-      candidates.add(info)
-  if candidates.len < count:
-    return err("not enough usable mix nodes")
-  if uint64(candidates.len) > uint64(high(uint32)):
-    return err("candidate pool too large")
-
-  let sampled = selector.rng.pick(candidates, count).valueOr:
-    return err("not enough usable mix nodes")
+  let candidates = resolveCandidates(
+    selector.nodePool, selector.nodePool.peerIds(), excludedIds
+  )
+  let sampled = ?pickRandomNodes(selector.rng, candidates, count)
   var next = 0
   for position in 0 ..< path.len:
     if not request.constraints.fixedHops.hasKey(position):

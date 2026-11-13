@@ -206,6 +206,49 @@ suite "Path selector boundary":
     selector.failure = "candidate set exhausted"
     check selector.selectPath(request).error == selector.failure
 
+suite "Random selector constraint handling":
+  test "fixed identities and exclusions are reserved before sampling":
+    let pool = MixNodePool.new(PeerStore.new())
+    let nodes = MixNodeInfo.generateRandomMany(6, rng()).mapIt(it.toMixPubInfo())
+    pool.add(nodes[0 .. 3])
+    var invalid = nodes[5]
+    invalid.mixPubKey = default(typeof(invalid.mixPubKey))
+    pool.add(invalid)
+    var request = PathRequest(purpose: PathPurpose.Forward, pathLength: 4)
+    request.constraints.fixedHops[1] = nodes[3]
+    request.constraints.fixedHops[3] = nodes[4] # Explicit endpoint outside the pool.
+    request.constraints.excludedNodeIds.incl(nodes[2].peerId)
+
+    let path = RandomPathSelector.new(pool, rng()).selectPath(request).get()
+    check path[1] == nodes[3]
+    check path[3] == nodes[4]
+    check [path[0].peerId, path[2].peerId].toHashSet ==
+      [nodes[0].peerId, nodes[1].peerId].toHashSet
+    check request.constraints.excludedNodeIds == [nodes[2].peerId].toHashSet
+    check pool.peerIds().toHashSet ==
+      [nodes[0].peerId, nodes[1].peerId, nodes[2].peerId,
+       nodes[3].peerId, nodes[5].peerId].toHashSet
+
+  test "candidate resolution observes pool changes and fails without enough usable nodes":
+    let pool = MixNodePool.new(PeerStore.new())
+    let nodes = MixNodeInfo.generateRandomMany(3, rng()).mapIt(it.toMixPubInfo())
+    pool.add(nodes[0 .. 1])
+    let selector = RandomPathSelector.new(pool, rng())
+    var request = PathRequest(purpose: PathPurpose.Surb, pathLength: DefaultPathLength)
+    request.constraints.fixedHops[2] = nodes[2]
+    check selector.selectPath(request).isOk
+
+    require pool.remove(nodes[0].peerId)
+    check selector.selectPath(request).error == "not enough usable mix nodes"
+    check pool.len == 1
+    var updated = nodes[0]
+    updated.mixPubKey = nodes[2].mixPubKey
+    pool.add(updated)
+    check updated in selector.selectPath(request).get()
+    # With two fixed hops, sampling fills just one remaining position.
+    request.constraints.fixedHops[0] = updated
+    check selector.selectPath(request).get() == @[updated, nodes[1], nodes[2]]
+
 # Save the requests received from Mix so tests can inspect their constraints.
 # Return a deliberate error to stop execution before network transmission.
 type RecordingSelector = ref object of PathSelector
