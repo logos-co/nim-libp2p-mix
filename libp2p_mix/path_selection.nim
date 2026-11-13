@@ -70,7 +70,7 @@ method samplePath*(
   ## - Fill-in the rest of the mix nodes in the path based on the strategy and the current pool state
   ## - return an error if it is not possible to fulfil the request
   ## The request is not validated here.
-  err("path selector is not implemented")
+  raiseAssert "samplePath must be implemented by concrete path selector types"
 
 proc new*(T: typedesc[RandomPathSelector], nodePool: MixNodePool, rng: Rng): T =
   doAssert not rng.isNil, "path selection requires a CSPRNG"
