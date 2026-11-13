@@ -41,11 +41,14 @@ proc computeAlpha(
     alpha: FieldElement
     secret: FieldElement
     blinders: seq[FieldElement] = @[]
-  # The blinders include the ephemeral scalar, so they are wiped too.
+  # The blinders include the ephemeral scalar, so they are wiped too. The
+  # secrets in s are moved out on success and wiped on every early return.
   defer:
     burnMem(secret)
     for blinder in blinders.mitems:
       burnMem(blinder)
+    for hopSecret in s.mitems:
+      burnMem(hopSecret)
 
   var x = generateRandomFieldElement().valueOr:
     return err("Generate field element error: " & error)
@@ -58,24 +61,29 @@ proc computeAlpha(
       return err("Invalid public key size: " & $i)
 
     # Compute alpha, shared secret, and blinder
+    var scalars = [blinders[i]]
+    defer:
+      burnMem(scalars)
     if i == 0:
-      alpha = multiplyBasePointWithScalars([blinders[i]]).valueOr:
+      alpha = multiplyBasePointWithScalars(scalars).valueOr:
         return err("Multiply base point with scalars error: " & error)
 
       alpha_0 = fieldElementToBytes(alpha)
     else:
-      alpha = multiplyPointWithScalars(alpha, [blinders[i]])
+      alpha = multiplyPointWithScalars(alpha, scalars)
 
     # TODO: Optimize point multiplication by multiplying scalars first
     secret = multiplyPointWithScalars(publicKeys[i], blinders)
     var
       secretBytes = fieldElementToBytes(secret)
       blinderInput = fieldElementToBytes(alpha) & secretBytes
+      blinderHash = sha256_hash(blinderInput)
     defer:
       burnMem(secretBytes)
       burnMem(blinderInput)
+      burnMem(blinderHash)
 
-    var blinder = bytesToFieldElement(sha256_hash(blinderInput)).valueOr:
+    var blinder = bytesToFieldElement(blinderHash).valueOr:
       return err("Error in bytes to field element conversion: " & error)
 
     blinders.add(blinder)
@@ -83,7 +91,7 @@ proc computeAlpha(
 
     s[i] = secretBytes
 
-  return ok((alpha_0, s))
+  return ok((alpha_0, move(s)))
 
 proc deriveKeyMaterial(keyName: string, s: seq[byte]): seq[byte] =
   @(keyName.toOpenArrayByte(0, keyName.high)) & s
@@ -215,8 +223,12 @@ proc createSURB*(
     return err("id should be initialized")
 
   # Compute alpha and shared secrets
-  let (alpha_0, s) = computeAlpha(publicKeys).valueOr:
+  var (alpha_0, s) = computeAlpha(publicKeys).valueOr:
     return err("Error in alpha generation: " & error)
+  # The secrets move into the SURB, or are wiped if it cannot be built.
+  defer:
+    for hopSecret in s.mitems:
+      burnMem(hopSecret)
 
   # Compute beta and gamma
   let (beta_0, gamma_0) = computeBetaGamma(s, hops, delay, Hop(), id).valueOr:
@@ -230,7 +242,7 @@ proc createSURB*(
     SURB(
       hop: hops[0],
       header: Header.init(alpha_0, beta_0, gamma_0),
-      secret: Opt.some(s),
+      secret: Opt.some(move(s)),
       key: key,
     )
   )
