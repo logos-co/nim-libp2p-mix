@@ -656,17 +656,19 @@ proc getMaxMessageSizeForCodec*(
   return ok(DataSize - totalLen)
 
 proc drawUsable(
-    mixProto: MixProtocol, peerIds: var seq[PeerId]
+    mixProto: MixProtocol, peerIds: var seq[PeerId], label: string
 ): Result[MixHop, string] {.gcsafe, raises: [].} =
   ## Draws peers from `peerIds` until the pool has a hop address for one, and
   ## removes each peer that it draws. So each peer that a path can use has the
   ## same chance, and a peer with no hop address keeps its mix key.
+  ## If it runs out of peers, it counts a `LOW_MIX_POOL` error under `label`.
   while peerIds.len > 0:
     let index = ?cryptoRandomInt(mixProto.rng, peerIds.len)
     let peerId = peerIds[index]
     peerIds.del(index)
     mixProto.nodePool.getHop(peerId).withValue(mixHop):
       return ok(mixHop)
+  mix_messages_error.inc(labelValues = [label, "LOW_MIX_POOL"])
   err("Ran out of usable mix nodes")
 
 method buildSurb*(
@@ -677,18 +679,23 @@ method buildSurb*(
     hops: seq[Hop] = @[]
     delays: seq[Delay] = @[]
 
-  if mixProto.nodePool.len < PathLength:
-    return err("No. of public mix nodes less than path length")
-
   # Remove exit and dest node from nodes to consider for surbs
   var poolPeerIds =
     mixProto.nodePool.peerIds().filterIt(it != exitPeerId and it != destPeerId)
 
-  # Select L mix nodes at random
+  # The last hop of a reply path is this node, so the pool supplies only the others.
+  if poolPeerIds.len < PathLength - 1:
+    mix_messages_error.inc(labelValues = ["Entry/SURB", "LOW_MIX_POOL"])
+    return err(
+      "Not enough mix nodes for a reply path (available=" & $poolPeerIds.len &
+        ", needed=" & $(PathLength - 1) & ")"
+    )
+
+  # Draw the hops at random, and then add this node as the last hop.
   for i in 0 ..< PathLength:
     let (mixPubKey, multiAddrBytes, hopDelay) =
       if i < PathLength - 1:
-        let mixHop = mixProto.drawUsable(poolPeerIds).valueOr:
+        let mixHop = mixProto.drawUsable(poolPeerIds, "Entry/SURB").valueOr:
           return err(error)
         debug "Selected mix node for surbs: ", indexInPath = i
         (
@@ -988,28 +995,22 @@ proc anonymizeLocalProtocolSend*(
     delays: seq[Delay] = @[]
     exitPeerId: PeerId
 
-  let numMixNodes = mixProto.nodePool.len
-  var numAvailableNodes = numMixNodes
-
-  # The destination is usable when the pool has a hop address for it. A usable
-  # destination is not a hop on the way to itself, so one node less is available.
-  let destinationUsable = mixProto.nodePool.get(destination.peerId).isSome()
-  if destinationUsable:
-    numAvailableNodes = numMixNodes - 1
-
-  if numAvailableNodes < PathLength:
-    mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
-    return err(
-      fmt"No. of public mix nodes ({numAvailableNodes}) less than path length ({PathLength})."
-    )
-
   var poolPeerIds = mixProto.nodePool.peerIds()
   var availableIndices = toSeq(0 ..< poolPeerIds.len)
 
+  # The draw never picks the destination.
   let index = poolPeerIds.find(destination.peerId)
   if index != -1:
     availableIndices.del(index)
-  if destination.kind == MixNode and not destinationUsable:
+
+  if availableIndices.len < PathLength:
+    mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
+    return err(
+      fmt"No. of public mix nodes ({availableIndices.len}) less than path length ({PathLength})."
+    )
+
+  # A destination that is a mix node is the last hop, so it needs a hop address.
+  if destination.kind == MixNode and mixProto.nodePool.get(destination.peerId).isNone():
     return err("Destination is not a mix node with a usable address")
 
   var nextHopAddr: MultiAddress
@@ -1030,9 +1031,6 @@ proc anonymizeLocalProtocolSend*(
 
     if hop.len == 0 and mixProto.hopIsBackedOff(randPeerId):
       skipped.add(selectedIndex)
-      continue
-
-    if destination.kind == ForwardAddr and randPeerId == destination.peerId:
       continue
 
     if hop.len == PathLength - 1:
@@ -1169,6 +1167,7 @@ proc selectRandomNodes(
 ): Result[seq[MixHop], string] {.raises: [].} =
   var available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
   if available.len < count:
+    mix_messages_error.inc(labelValues = ["Cover", "LOW_MIX_POOL"])
     return err(
       "Not enough mix nodes in pool (available=" & $available.len & ", needed=" & $count &
         ")"
@@ -1177,13 +1176,13 @@ proc selectRandomNodes(
   var firstCandidates = available.filterIt(not mixProto.hopIsBackedOff(it))
   if firstCandidates.len == 0:
     return err("Every first hop candidate is backed off")
-  let first = ?mixProto.drawUsable(firstCandidates)
+  let first = ?mixProto.drawUsable(firstCandidates, "Cover")
   available.keepItIf(it != first.info.peerId)
 
   # Only the first hop skips a backed off peer.
   var selected = @[first]
   while selected.len < count:
-    selected.add(?mixProto.drawUsable(available))
+    selected.add(?mixProto.drawUsable(available, "Cover"))
   ok(selected)
 
 proc buildCoverPacket*(

@@ -17,6 +17,7 @@ import
   ]
 import libp2p_mix
 import libp2p_mix/mix_protocol
+import libp2p_mix/serialization
 import libp2p_mix/delay_strategy
 
 import ../tools/[lifecycle, unittest, crypto]
@@ -426,6 +427,113 @@ suite "Mix Protocol - Node Failures":
 
       let cover = await sender.buildCoverPacket()
       check cover.isOk
+
+  asyncTest "the pool size check does not count a destination with no hop address":
+    ## The sender's pool holds two usable members plus the destination, which has no
+    ## hop address, but a path needs three nodes other than the destination.
+    let nodes = await setupMixNodes(3)
+    let sender = nodes[0]
+    let destination = sender.addUnusableMember()
+    startAndDeferStop(nodes)
+
+    let sent = await sender.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      "test message".toBytes(),
+      "/test/1.0.0",
+      MixDestination.init(
+        destination,
+        MultiAddress.init("/ip4/127.0.0.1/tcp/4242").expect(
+          "could not create multiaddr"
+        ),
+      ),
+      0,
+    )
+    check:
+      sent.isErr
+      sent.error.startsWith("No. of public mix nodes (2)")
+
+  asyncTest "a send that runs out of usable members counts LOW_MIX_POOL":
+    ## The sender's pool holds two usable members and one with no hop address, but a
+    ## path needs three nodes.
+    let nodes = await setupMixNodes(3)
+    let sender = nodes[0]
+    discard sender.addUnusableMember()
+    startAndDeferStop(nodes)
+    let lowPoolBefore = errorCount("Entry", "LOW_MIX_POOL")
+
+    let sent = await sender.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      "test message".toBytes(),
+      "/test/1.0.0",
+      MixDestination.init(
+        PeerId.random(rng()).expect("could not generate peerId"),
+        MultiAddress.init("/ip4/127.0.0.1/tcp/4242").expect(
+          "could not create multiaddr"
+        ),
+      ),
+      0,
+    )
+    check:
+      sent.isErr
+      errorCount("Entry", "LOW_MIX_POOL") == lowPoolBefore + 1
+
+  asyncTest "a reply path that runs out of usable members counts LOW_MIX_POOL":
+    ## The reply path needs two nodes other than the exit, but apart from the exit
+    ## the pool has only one usable member and one with no hop address.
+    let nodes = await setupMixNodes(3)
+    let sender = nodes[0]
+    discard sender.addUnusableMember()
+    let lowPoolBefore = errorCount("Entry/SURB", "LOW_MIX_POOL")
+
+    let surb = sender.buildSurb(
+      rng().generate(SURBIdentifier),
+      PeerId.random(rng()).expect("could not generate peerId"),
+      nodes[1].switch.peerInfo.peerId,
+    )
+    check:
+      surb.isErr
+      errorCount("Entry/SURB", "LOW_MIX_POOL") == lowPoolBefore + 1
+
+  asyncTest "a reply path with too few members counts LOW_MIX_POOL":
+    ## The pool has three members, but two of them are the exit and the destination,
+    ## and the reply path needs two nodes that are neither.
+    let nodes = await setupMixNodes(4)
+    let sender = nodes[0]
+    let lowPoolBefore = errorCount("Entry/SURB", "LOW_MIX_POOL")
+
+    let surb = sender.buildSurb(
+      rng().generate(SURBIdentifier),
+      nodes[2].switch.peerInfo.peerId,
+      nodes[1].switch.peerInfo.peerId,
+    )
+    check:
+      surb.isErr
+      surb.error.startsWith("Not enough mix nodes for a reply path")
+      errorCount("Entry/SURB", "LOW_MIX_POOL") == lowPoolBefore + 1
+
+  asyncTest "a cover path that runs out of usable members counts LOW_MIX_POOL":
+    ## The cover path needs two nodes, but the pool has only one usable member and
+    ## one with no hop address.
+    let nodes = await setupMixNodes(2)
+    let sender = nodes[0]
+    discard sender.addUnusableMember()
+    let lowPoolBefore = errorCount("Cover", "LOW_MIX_POOL")
+
+    let cover = await sender.buildCoverPacket()
+    check:
+      cover.isErr
+      errorCount("Cover", "LOW_MIX_POOL") == lowPoolBefore + 1
+
+  asyncTest "a cover path with too few members counts LOW_MIX_POOL":
+    ## The pool has one member, but the cover path needs two.
+    let nodes = await setupMixNodes(2)
+    let sender = nodes[0]
+    let lowPoolBefore = errorCount("Cover", "LOW_MIX_POOL")
+
+    let cover = await sender.buildCoverPacket()
+    check:
+      cover.isErr
+      errorCount("Cover", "LOW_MIX_POOL") == lowPoolBefore + 1
 
   asyncTest "a node with the public hop address policy has no usable peer on the local host":
     let nodes = await setupMixNodes(5, hopAddressPolicy = publicHopAddressPolicy)
