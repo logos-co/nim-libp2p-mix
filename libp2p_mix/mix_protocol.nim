@@ -113,8 +113,12 @@ proc surbCredsLen*(mixProto: MixProtocol): int =
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
     return err("Max cannot be zero.")
-  let res = rng.generate(uint64) mod uint64(max)
-  ok(res.int)
+  let bound = uint64(max)
+  let threshold = (0'u64 - bound) mod bound
+  while true:
+    let value = rng.generate(uint64)
+    if value >= threshold:
+      return ok(int(value mod bound))
 
 proc hopIsBackedOff(mixProto: MixProtocol, peerId: PeerId): bool =
   ## True while `peerId` waits out a failed dial. Only the first hop is filtered.
@@ -657,12 +661,13 @@ proc drawUsable(
   ## Draws peers from `peerIds` until the pool has a hop address for one, and
   ## removes each peer that it draws. So each peer that a path can use has the
   ## same chance, and a peer with no hop address keeps its mix key.
-  while true:
-    let drawn = mixProto.rng.pick(peerIds, 1).valueOr:
-      return err("Ran out of usable mix nodes")
-    peerIds.del(peerIds.find(drawn[0]))
-    mixProto.nodePool.getHop(drawn[0]).withValue(mixHop):
+  while peerIds.len > 0:
+    let index = ?cryptoRandomInt(mixProto.rng, peerIds.len)
+    let peerId = peerIds[index]
+    peerIds.del(index)
+    mixProto.nodePool.getHop(peerId).withValue(mixHop):
       return ok(mixHop)
+  err("Ran out of usable mix nodes")
 
 method buildSurb*(
     mixProto: MixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
