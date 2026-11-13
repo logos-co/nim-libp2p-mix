@@ -4,7 +4,7 @@
 {.used.}
 
 import std/tables
-import chronos, results, strformat
+import chronos, metrics, results, strformat
 import
   libp2p/
     [protocols/ping, peerid, multiaddress, switch, builders, crypto/crypto, crypto/secp]
@@ -13,6 +13,7 @@ import libp2p_mix
 import libp2p_mix/mix_protocol
 import libp2p_mix/curve25519
 import libp2p_mix/delay_strategy
+import libp2p_mix/mix_metrics
 
 import ./tools/crypto
 import ./[mock_mix, spam_protection_impl]
@@ -242,6 +243,14 @@ method generateForEntry*(self: FixedDelayStrategy): Delay =
 
 method generateForIntermediate*(self: FixedDelayStrategy, encodedDelay: Delay): Delay =
   self.delay
+
+proc errorCount*(role, reason: string): float64 =
+  ## The count of `mix_messages_error` for `role` and `reason`. 0 before the
+  ## label exists.
+  try:
+    mix_messages_error.value([role, reason])
+  except KeyError:
+    0.0
 
 proc outgoingMixStreams*(switch: Switch): seq[Connection] =
   ## List the open outgoing mix streams of a switch.

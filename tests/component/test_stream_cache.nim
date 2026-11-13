@@ -4,13 +4,11 @@
 {.used.}
 
 import std/sequtils
-import chronos, metrics, results
+import chronos, results
 import libp2p/[switch, peerid, multiaddress]
 import libp2p_mix
 import
-  libp2p_mix/[
-    mix_protocol, mix_node, mix_metrics, cover_traffic, delay_strategy, spam_protection
-  ]
+  libp2p_mix/[mix_protocol, mix_node, cover_traffic, delay_strategy, spam_protection]
 import ../tools/[lifecycle, unittest, crypto]
 import ../[utils, spam_protection_impl]
 
@@ -38,14 +36,6 @@ proc close(hold: HoldingServer) {.async.} =
   for connection in hold.connections:
     await connection.closeWait()
   await hold.server.closeWait()
-
-proc errorCount(role, reason: string): float64 =
-  ## The count of `mix_messages_error` for `role` and `reason`. 0 before the
-  ## label exists.
-  try:
-    mix_messages_error.value([role, reason])
-  except KeyError:
-    0.0
 
 const ReplyParams = MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8))
 

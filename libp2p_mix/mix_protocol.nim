@@ -33,7 +33,7 @@ const CoverTrafficCodec* = "/mix/cover/1.0.0"
   ## so the exit node can identify and silently discard returning cover traffic.
 
 const DefaultHopBackoff* = chronos.minutes(1)
-  ## How long a peer that failed a dial is not selected as the first hop.
+  ## How long a first hop that failed a dial is not selected as the first hop.
 
 func isCoverTraffic*(msg: MixMessage): bool =
   ## Returns true if the message is a cover traffic packet.
@@ -60,7 +60,7 @@ type MixProtocol* = ref object of LPProtocol
     ## The dial in flight for each hop. Concurrent callers of getConn await
     ## the same dial and share its result.
   backedOffUntil: Table[PeerId, Moment]
-    ## The moment until which a peer that failed a dial is not the first hop.
+    ## The moment until which a first hop that failed a dial is not the first hop.
   hopBackoff: Duration
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
@@ -146,10 +146,6 @@ proc startDial(
         mixProto.backedOffUntil.del(pid)
         if mixProto.started:
           mixProto.connPool[pid] = dial.value
-      elif dial.failed() and not mixProto.switch.isConnected(pid):
-        # A dial that fails while a connection to the peer exists hit a local
-        # limit. The peer is reachable.
-        mixProto.backOffHop(pid)
   )
   dial
 
@@ -809,6 +805,10 @@ proc sendPacket(
         Opt.none(PeerId),
         Opt.some(peerId)
 
+  # The SURB gives the first hop of a reply.
+  # This node did not select it.
+  let ownFirstHop = logConfig.logType == Entry
+
   # Only a failed first dial proves the packet never left this node, so its
   # messageId can be reused. After any write attempt the next hop may hold the
   # proof: reissuing the messageId in this epoch would be an RLN double-signal,
@@ -820,6 +820,8 @@ proc sendPacket(
       # A dial that the stop ended is not a failure of the hop.
       if mixProto.started:
         mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
+        if ownFirstHop:
+          mixProto.backOffHop(peerId)
       if proofToken.len > 0:
         mixProto.spamProtection.withValue(sp):
           sp.reclaimProofToken(proofToken)
@@ -842,6 +844,8 @@ proc sendPacket(
     # A dial that the stop ended is not a failure of the hop.
     if mixProto.started:
       mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
+      if ownFirstHop:
+        mixProto.backOffHop(peerId)
     return err(
       SendPacketError(
         msg: fmt"Failed to redial next hop ({peerId}, {multiAddress}): {exc.msg}"
@@ -1258,6 +1262,7 @@ proc writeCoverPacket(
     # A dial that the stop ended is not a failure of the hop.
     if mixProto.started:
       mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
+      mixProto.backOffHop(peerId)
     return err("Failed to dial for cover packet: " & exc.msg)
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
@@ -1331,7 +1336,7 @@ proc init*(
   ## 100 ms delay floor) so proof generation time cannot dominate short sampled
   ## delays and set the send time.
   ##
-  ## A peer that fails a dial is not selected as the first hop for `hopBackoff`.
+  ## A first hop that fails a dial is not the first hop for `hopBackoff`.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
