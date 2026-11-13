@@ -367,7 +367,7 @@ proc isMacValid(beta, gamma, sBytes: seq[byte]): bool {.raises: [].} =
 proc peelLayer(
     alpha, beta, payload: seq[byte], alphaFE: FieldElement, sBytes: seq[byte]
 ): Result[ProcessedSphinxPacket, string] {.raises: [].} =
-  ## Remove one layer of an authenticated packet, wiping the keys derived from
+  ## Remove one layer of an authenticated packet, wiping everything derived from
   ## the shared secret (Mix Key Rotation spec §3.3).
   # Derive AES key and IV for the header (beta)
   var
@@ -375,12 +375,12 @@ proc peelLayer(
     beta_iv = deriveKey(IvLabel, sBytes)
 
   # Decrypt one LIONESS layer of the payload. delta_key = KDF("payload_enc_key", s).
-  # `var` forces a real mutable copy, so the shared input payload is not mutated.
   var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, sBytes)
   defer:
     burnMem(beta_aes_key)
     burnMem(beta_iv)
     burnMem(delta_key)
+  # `var` forces a real mutable copy, so the shared input payload is not mutated.
   var delta_prime = payload
   var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
     return err("LIONESS init error: " & $error)

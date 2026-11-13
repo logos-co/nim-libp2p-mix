@@ -160,6 +160,9 @@ proc addTag*(key: MixKey, tag: Tag): TagInsertStatus =
 
 proc destroy(key: MixKey) =
   burnMem(key.privateKey)
+  # `clear` zeroes the stored tags in place before their storage is released.
+  # Storage the set released earlier, when it grew, is not zeroed.
+  key.tags.clear()
   key.tags = initHashSet[Tag]()
   key.destroyed = true
 
@@ -183,7 +186,8 @@ type MixKeyRing* = ref object
 proc initRing(
     config: KeyRotationConfig, rng: Rng, replayTableCapacity: int
 ): MixKeyRing =
-  # Not generic, so its checks bind here rather than at each caller of `new`.
+  # Not generic, so its checks compile without chronos imported where `new` is
+  # called.
   doAssert config.rotationInterval > ZeroDuration,
     "config must come from KeyRotationConfig.init"
   doAssert not rng.isNil, "rng must not be nil"
