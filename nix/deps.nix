@@ -5,15 +5,15 @@
 {
   bearssl = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-bearssl";
-    rev = "2aee5932fa1138969056b5bf6fad2f34941f249e";
-    sha256 = "0x0n9bz24vym5j30z6gyi9n3rvv441kb2iqb5x3bvkkdalfr11k5";
+    rev = "38a5622be728fb083f6fe55c124502995b2f4e3d";
+    sha256 = "1adk164l8xk3mdxcqfic9man7bmbl90bsvgkpfdyhif0v2ffy1lw";
     fetchSubmodules = true;
   };
 
   boringssl = pkgs.fetchgit {
     url = "https://github.com/vacp2p/nim-boringssl";
-    rev = "fbf9c2762241be3f004d45b9a32b7bfd6ea136a8";
-    sha256 = "10lkp39rz21lawb5r93d6w679gdyfgfp7lkcxyg7lm1i2kyp11kl";
+    rev = "a57b97f5ba45353a1a38c81b4f5e6f537469a63e";
+    sha256 = "0xn06vk54z123fp7k6d7h97nnxz43ldswyakqg110riiwmqr4fhi";
     fetchSubmodules = true;
   };
 
@@ -54,8 +54,8 @@
 
   libp2p = pkgs.fetchgit {
     url = "https://github.com/vacp2p/nim-libp2p";
-    rev = "8768d4dadcd55de1c23a0056a9b3facdd55c9bbb";
-    sha256 = "1ymmsr5w5l1dp6h4s87ff8jlbir44a4d69if2z7ijg8k73h7x3m1";
+    rev = "5295293b0643f2d24e41fe57c18b5ffa4fe7ca13";
+    sha256 = "1s8icyz7zfd9pz9fkf1hq2v52kabhd8g26ldalqkywywrm0a8ipf";
     fetchSubmodules = true;
   };
 
@@ -68,8 +68,8 @@
 
   lsquic = pkgs.fetchgit {
     url = "https://github.com/vacp2p/nim-lsquic";
-    rev = "f156ed72554d16e925ed654833e7f37e8c8e7f8f";
-    sha256 = "0x5laxi1sd5z3ribzp6s8kip1hbr5c0jb2lj8vg3qgk0kjr9g7da";
+    rev = "f09db7565f79327c76faff547b1a33bfaf68d047";
+    sha256 = "1kn468r17szslqbv31s46pyxa0hjcgdckd3ksv4vm2zhk700lxs7";
     fetchSubmodules = true;
   };
 
@@ -117,15 +117,15 @@
 
   serialization = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-serialization";
-    rev = "b5473564e80a4908cf6c5a038e4c4a6ca7de2223";
-    sha256 = "09abpya7mvcaymxf0n2sc122rq4jkwg9kpis8xyc4z3fx3x3znxk";
+    rev = "937a65c19fc49a5f79e2ecd89094d367b6ca0e1b";
+    sha256 = "0ysisxria3pn6j6b3imha41h4x5m1hw719q92ypm6ldb7aybgk8y";
     fetchSubmodules = true;
   };
 
   stew = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-stew";
-    rev = "0e601977e5ac8766dbf39fa53b94f908b9cb4753";
-    sha256 = "0acix676zivbmn1gzif4mr4gzgipyq7qx1ndq9a4a7l1vvvk9m19";
+    rev = "29c11c7264289cc4c423f0e0662effbc5fdc6f61";
+    sha256 = "022y9dww3a7a7sq0frwhc7jlfz26yn72dch6x9012pgsmrnlxgcd";
     fetchSubmodules = true;
   };
 
