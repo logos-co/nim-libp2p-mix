@@ -3,7 +3,7 @@
 
 {.used.}
 
-import chronos, results, stew/byteutils, sequtils, strutils, tables
+import chronos, metrics, results, stew/byteutils, sequtils, strutils, tables
 import
   libp2p/[
     protocols/ping,
@@ -16,6 +16,7 @@ import
     crypto/secp,
   ]
 import libp2p_mix
+import libp2p_mix/mix_metrics
 import libp2p_mix/mix_protocol
 import libp2p_mix/serialization
 import libp2p_mix/delay_strategy
@@ -534,6 +535,63 @@ suite "Mix Protocol - Node Failures":
     check:
       cover.isErr
       errorCount("Cover", "LOW_MIX_POOL") == lowPoolBefore + 1
+
+  asyncTest "start sets mix_pool_size to the pool members that a path can use":
+    ## Every node has two usable pool members and one with no hop address.
+    ## The gauge is process-wide, so the test gives every node the same pool count.
+    let nodes = await setupMixNodes(3)
+    for node in nodes:
+      discard node.addUnusableMember()
+    startAndDeferStop(nodes)
+
+    check:
+      nodes[0].nodePool.len == 3
+      mix_pool_size.value == 2
+
+  asyncTest "a send and a cover packet set mix_pool_size":
+    ## A node's first path build after `start` always counts the pool, so one node
+    ## sends and another builds a cover packet.
+    let nodes = await setupMixNodes(3)
+    let sender = nodes[0]
+    let coverNode = nodes[1]
+    startAndDeferStop(nodes)
+    check mix_pool_size.value == 2
+
+    discard sender.nodePool.remove(nodes[1].switch.peerInfo.peerId)
+    discard await sender.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      "test message".toBytes(),
+      "/test/1.0.0",
+      MixDestination.init(
+        PeerId.random(rng()).expect("could not generate peerId"),
+        MultiAddress.init("/ip4/127.0.0.1/tcp/4242").expect(
+          "could not create multiaddr"
+        ),
+      ),
+      0,
+    )
+    check mix_pool_size.value == 1
+
+    discard coverNode.nodePool.remove(nodes[0].switch.peerInfo.peerId)
+    discard coverNode.nodePool.remove(nodes[2].switch.peerInfo.peerId)
+    discard await coverNode.buildCoverPacket()
+    check mix_pool_size.value == 0
+
+  asyncTest "a second path build does not count the pool again at once":
+    ## The two path builds are much less than `PoolSizeInterval` apart, so only the
+    ## first one counts the pool.
+    let nodes = await setupMixNodes(3)
+    let sender = nodes[0]
+    startAndDeferStop(nodes)
+    check mix_pool_size.value == 2
+
+    discard sender.nodePool.remove(nodes[1].switch.peerInfo.peerId)
+    discard await sender.buildCoverPacket()
+    check mix_pool_size.value == 1
+
+    discard sender.nodePool.remove(nodes[2].switch.peerInfo.peerId)
+    discard await sender.buildCoverPacket()
+    check mix_pool_size.value == 1
 
   asyncTest "a node with the public hop address policy has no usable peer on the local host":
     let nodes = await setupMixNodes(5, hopAddressPolicy = publicHopAddressPolicy)
