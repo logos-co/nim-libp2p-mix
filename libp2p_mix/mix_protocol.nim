@@ -88,6 +88,9 @@ type MixProtocol* = ref object of LPProtocol
     ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
     ## removal on completion is O(1).
   nextMixMessageId: uint64
+  ongoingLocalSends: Table[uint64, FutureBase]
+    ## In-flight local sends, cancelled on stop.
+  nextLocalSendId: uint64
 
 proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
   return mixProto.destReadBehaviors.hasKey(codec)
@@ -987,7 +990,7 @@ proc forwardToAddr*(T: typedesc[MixDestination], p: PeerId, address: MultiAddres
 proc init*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
   MixDestination.forwardToAddr(p, address)
 
-proc anonymizeLocalProtocolSend*(
+proc sendLocal(
     mixProto: MixProtocol,
     incoming: AsyncQueue[seq[byte]],
     msg: sink seq[byte],
@@ -1095,21 +1098,22 @@ proc anonymizeLocalProtocolSend*(
 
   let session = prepared.session
 
-  # Past this point the reply credentials are registered, so every failure
-  # must release them: the packet never left this process, so no reply can
-  # ever arrive to clean them up.
-  template releaseAndFail(msg: string): auto =
-    session.get(nil).release()
-    return err(msg)
+  # Past this point the reply credentials are registered. The caller gets the
+  # handle to them only when the send completes, so every other exit, a
+  # failure or a cancellation, releases them here.
+  var sent = false
+  defer:
+    if not sent:
+      session.get(nil).release()
 
   let message = buildMessage(move(prepared.msg), codec).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", error[1]])
-    releaseAndFail(fmt"Error building message: {error[0]}")
+    return err(fmt"Error building message: {error[0]}")
 
   # Wrap in Sphinx packet
   let sphinxPacket = wrapInSphinxPacket(message, publicKeys, delays, hop, destHop).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", "NON_RECOVERABLE"])
-    releaseAndFail(fmt"Failed to wrap in sphinx packet: {error}")
+    return err(fmt"Failed to wrap in sphinx packet: {error}")
 
   # Claim a slot for local origination (Mix Cover Traffic spec §6.3).
   # Claimed here rather than on entry so that validation failures above never
@@ -1119,7 +1123,7 @@ proc anonymizeLocalProtocolSend*(
     let claim = ct.slotPool.claimSlot()
     if not claim.success:
       mix_slot_claim_rejected.inc(labelValues = ["send"])
-      releaseAndFail("No slots available in current epoch")
+      return err("No slots available in current epoch")
     claimEpoch = ct.slotPool.epoch
     # Reclaim proof token from discarded cover packet for messageId reuse
     if claim.reclaimedToken.len > 0:
@@ -1133,13 +1137,46 @@ proc anonymizeLocalProtocolSend*(
     if error.neverWritten:
       mixProto.coverTraffic.withValue(ct):
         ct.slotPool.unclaimSlot(claimEpoch)
-    releaseAndFail(error.msg)
+    return err(error.msg)
 
+  sent = true
   return ok(session)
+
+proc anonymizeLocalProtocolSend*(
+    mixProto: MixProtocol,
+    incoming: AsyncQueue[seq[byte]],
+    msg: sink seq[byte],
+    codec: string,
+    destination: MixDestination,
+    numSurbs: uint8,
+): Future[Result[Opt[SurbSession], string]] {.
+    async: (raises: [CancelledError, LPStreamError])
+.} =
+  ## On success returns a handle to the reply credentials registered for this
+  ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
+  ## promptly when its connection closes. A send that a protocol stop cancels
+  ## returns an error.
+  if not mixProto.started:
+    return err("anonymizeLocalProtocolSend: mix protocol is not running")
+  let pending = mixProto.sendLocal(incoming, move(msg), codec, destination, numSurbs)
+  let id = mixProto.nextLocalSendId
+  mixProto.nextLocalSendId.inc()
+  mixProto.ongoingLocalSends[id] = FutureBase(pending)
+  try:
+    return await pending
+  except CancelledError as exc:
+    # `stop` cancels each pending send. The caller did not, so it gets an error.
+    if not mixProto.started:
+      return err("anonymizeLocalProtocolSend: mix protocol has stopped")
+    raise exc
+  finally:
+    mixProto.ongoingLocalSends.del(id)
 
 proc sendSurbReply*(
     mixProto: MixProtocol, surb: SURB, msg: sink seq[byte]
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  if not mixProto.started:
+    return err("sendSurbReply: mix protocol is not running")
   let (peerId, multiAddr) = surb.hop.get().bytesToMultiAddr().valueOr:
       return err("could not obtain multiaddress from hop: " & error)
 
@@ -1291,43 +1328,57 @@ proc sendCoverPacket*(
     packet: seq[byte],
     epoch: Opt[uint64] = Opt.none(uint64),
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  if not mixProto.started:
+    return err("sendCoverPacket: mix protocol is not running")
   let proved = (await mixProto.generateAndAppendCoverProof(packet, epoch)).valueOr:
     return err(error)
   return await mixProto.writeCoverPacket(peerId, multiAddr, proved)
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
+  mixProto.tagManager.start()
+  mixProto.surbStore.start()
   discard mixProto.nodePool.countUsable()
   mixProto.coverTraffic.withValue(ct):
     await ct.start()
 
 method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
-  ## Stop the MixProtocol background tasks, cancel the in-flight
-  ## handleMixMessages futures and the hop dials, and close a stream whose dial
-  ## completes after the stop began.
+  ## Stop the cover traffic, cancel the hop dials, the pending sends and the
+  ## in-flight handleMixMessages futures, close the hop streams, then stop the
+  ## stores.
   mixProto.coverTraffic.withValue(ct):
     await ct.stop()
   mixProto.started = false
+
+  # The dials go first. A send that waits on its first dial then ends on its
+  # dial failure path, which refunds its slot and its proof.
   # An entry of `dialing` is the future of a dial and the addresses of that dial.
   # The mapIt takes the futures, and the stop cancels them below.
   let dials = toSeq(mixProto.dialing.values).mapIt(it.dial)
-
-  # Cancelling fires the completion callback, which deletes from this table.
-  let pending = toSeq(mixProto.ongoingMixMessages.values)
-  mixProto.ongoingMixMessages.clear()
-  if pending.len > 0:
-    await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
-
-  await mixProto.tagManager.stop()
-
-  await mixProto.surbStore.stop()
-  mixProto.surbStore.clear()
-
   if dials.len > 0:
     await noCancel allFutures(dials.mapIt(it.cancelAndWait()))
   for dial in dials:
     if dial.completed():
       await dial.value.close()
+
+  # Cancelling makes each send and each handler delete its own entry.
+  let pending =
+    toSeq(mixProto.ongoingLocalSends.values) &
+    toSeq(mixProto.ongoingMixMessages.values).mapIt(FutureBase(it))
+  mixProto.ongoingLocalSends.clear()
+  mixProto.ongoingMixMessages.clear()
+  if pending.len > 0:
+    await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
+
+  let streams = toSeq(mixProto.connPool.values)
+  mixProto.connPool.clear()
+  if streams.len > 0:
+    await noCancel allFutures(streams.mapIt(it.close()))
+
+  await mixProto.tagManager.stop()
+
+  await mixProto.surbStore.stop()
+  mixProto.surbStore.clear()
 
 proc init*(
     mixProto: MixProtocol,
