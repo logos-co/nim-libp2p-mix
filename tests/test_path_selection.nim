@@ -9,6 +9,7 @@ import libp2p/[multiaddress, peerstore, peerid]
 import libp2p/crypto/secp
 import libp2p_mix
 import libp2p_mix/[serialization, tag_manager, surb_store, mix_protocol]
+import libp2p_mix/session_path_selection
 import ./utils
 import ./tools/[unittest, crypto]
 
@@ -251,6 +252,86 @@ suite "Random selector constraint handling":
     # With two fixed hops, sampling fills just one remaining position.
     request.constraints.fixedHops[0] = updated
     check selector.selectPath(request).get() == @[updated, nodes[1], nodes[2]]
+
+suite "Session candidate-set initialization":
+  var
+    pool: MixNodePool
+    nodes: seq[MixPubInfo]
+
+  setup:
+    pool = MixNodePool.new(PeerStore.new())
+    nodes = MixNodeInfo.generateRandomMany(8, rng()).mapIt(it.toMixPubInfo())
+    pool.add(nodes)
+
+  test "explicit state preserves sets independently of caller edits and pool changes":
+    var supplied = @[@[nodes[3].peerId], nodes[0 .. 2].mapIt(it.peerId)]
+    let originalText = $supplied
+    # Construction requires identities only, even when a node is unavailable.
+    require pool.remove(nodes[3].peerId)
+    let state = SessionPathState.init(supplied).get()
+    check $state.candidateSets() == originalText
+    supplied[0][0] = nodes[7].peerId
+    supplied[1][0].data[0] = supplied[1][0].data[0] xor 1.byte
+    var inspected = state.candidateSets()
+    inspected[0][0] = PeerId()
+    inspected[1][0].data[0] = inspected[1][0].data[0] xor 1.byte
+    inspected[1].setLen(0)
+    var updated = nodes[3]
+    updated.mixPubKey[0] = updated.mixPubKey[0] xor 1.byte
+    pool.add(updated)
+    check $state.candidateSets() == originalText
+
+  test "state rejects empty sets, too many positions and repeated identities":
+    let a = nodes[0].peerId
+    for sets in [newSeq[seq[PeerId]](), @[newSeq[PeerId]()],
+                 @[@[a, a]], @[@[a], @[a]]]:
+      check SessionPathState.init(sets).isErr
+    let tooMany = nodes[0 .. MaxPathLength].mapIt(@[it.peerId])
+    check SessionPathState.init(tooMany).error == "unsupported session hop count"
+
+  test "sampling resolved pool candidates creates disjoint sets without pool mutation":
+    let excluded = [nodes[0].peerId].toHashSet
+    var invalid = nodes[1]
+    invalid.mixPubKey = default(typeof(invalid.mixPubKey))
+    pool.add(invalid)
+    let candidates = resolveCandidates(pool, pool.peerIds(), excluded)
+    let state = sampleSessionState(candidates, rng(), 2, 3).get()
+    let sets = state.candidateSets()
+    require sets.len == 2
+    var selected: HashSet[PeerId]
+    for ids in sets:
+      check ids.len == 3
+      for peerId in ids:
+        check peerId notin selected
+        selected.incl(peerId)
+    check selected == nodes[2 .. nodes.high].mapIt(it.peerId).toHashSet
+    check pool.peerIds().toHashSet == nodes.mapIt(it.peerId).toHashSet
+
+  test "sampling trusted candidates cannot expand beyond the supplied input":
+    let trusted = nodes[0 .. 5].mapIt(it.peerId)
+    let candidates = resolveCandidates(pool, trusted, default(HashSet[PeerId]))
+    let state = sampleSessionState(candidates, rng(), 2, 3).get()
+    check state.candidateSets().concat().toHashSet == trusted.toHashSet
+    let restricted = resolveCandidates(pool, trusted, [trusted[0]].toHashSet)
+    check sampleSessionState(restricted, rng(), 2, 3).error ==
+      "not enough usable mix nodes for session candidate sets"
+    # Duplicate input must not bias sampling, even if enough unique nodes exist.
+    check sampleSessionState(candidates & @[candidates[0]], rng(), 2, 3).error ==
+      "duplicate session candidate identity"
+    check pool.len == nodes.len
+
+  test "sampling rejects invalid counts, absent randomness and candidate shortage":
+    for count in [0, -1, MaxPathLength + 1]:
+      check sampleSessionState(nodes, rng(), count, 3).error ==
+        "unsupported session hop count"
+    for count in [0, -1]:
+      check sampleSessionState(nodes, rng(), 2, count).error ==
+        "session candidate count must be positive"
+    for count in [5, high(int)]:
+      check sampleSessionState(nodes, rng(), 2, count).error ==
+        "not enough usable mix nodes for session candidate sets"
+    check sampleSessionState(nodes, nil, 2, 3).error == "missing CSPRNG"
+    check sampleSessionState([], rng(), 2, 3).isErr
 
 # Save the requests received from Mix so tests can inspect their constraints.
 # Return a deliberate error to stop execution before network transmission.
