@@ -8,12 +8,15 @@
 ## providing a clean interface for the mix protocol to interact with mix node data.
 
 import std/[sequtils, tables]
-import results
+import metrics, results
 import libp2p/peerstore
 import libp2p/peerid
 import libp2p/multiaddress
+import libp2p/peeraddrpolicy
+import libp2p/wire
 import libp2p/crypto/crypto
 import libp2p/crypto/curve25519
+import ./mix_metrics
 import ./mix_node
 import ./multiaddr as mix_multiaddr
 
@@ -24,20 +27,34 @@ type MixPubKeyBook* = ref object of PeerBook[Curve25519Key]
   ## package owns its peer-store extension and libp2p core stays free of
   ## mix-specific types.
 
-func isSupportedMultiaddr(maddr: MultiAddress): bool =
-  ## Returns true if the multiaddress is supported by the mix protocol.
+func hopHost(maddr: MultiAddress): Opt[TransportAddress] =
+  ## Returns the IP address and the port that a node dials to reach the hop
+  ## address `maddr`, which for a circuit relay route is the relay's address.
+  ## The result is none when the mix protocol does not support `maddr`.
   ## Mix protocol supports IPv4 addresses with TCP or QUIC-v1 transports,
   ## including circuit-relay addresses that use these transports.
-  let baseAddr = mix_multiaddr.getBaseTransport(maddr).valueOr:
-    return false
-  TCP_IP4.match(baseAddr) or QUIC_V1_IP4.match(baseAddr)
+  ## It is also none for port 0 and for a multicast or broadcast address, since
+  ## no node can dial these.
+  ## The wildcard address `0.0.0.0` is left to the policy, because local test nodes
+  ## announce it and `publicHopAddressPolicy` refuses it.
+  let transport = mix_multiaddr.getBaseTransport(maddr).valueOr:
+    return Opt.none(TransportAddress)
+  if not (TCP_IP4.match(transport) or QUIC_V1_IP4.match(transport)):
+    return Opt.none(TransportAddress)
+  let host = initTAddress(transport).valueOr:
+    return Opt.none(TransportAddress)
+  if host.port == Port(0) or host.isMulticast() or host.isBroadcast():
+    return Opt.none(TransportAddress)
+  Opt.some(host)
 
-func findSupportedMultiaddr(maddrs: seq[MultiAddress]): Opt[MultiAddress] =
-  ## Returns the first multiaddress that is supported by the mix protocol.
-  for maddr in maddrs:
-    if isSupportedMultiaddr(maddr):
-      return Opt.some(maddr)
-  Opt.none(MultiAddress)
+const publicHopAddressPolicy* = proc(maddr: MultiAddress): bool {.gcsafe, raises: [].} =
+  ## Accepts a hop address that any node on the public network can dial, that is,
+  ## an IPv4 address that the public network routes.
+  ## A circuit relay route must go through a relay with such an address, while
+  ## libp2p's `publicRoutableAddressPolicy` accepts a route through any relay.
+  let host = hopHost(maddr).valueOr:
+    return false
+  host.isGlobal()
 
 type MixNodePool* = ref object
   ## Manages mix node public information through the peerStore.
@@ -48,10 +65,20 @@ type MixNodePool* = ref object
   ## - Peer scoring: Track node reliability, latency, and performance metrics
   ## - Pool maintenance: Automatic pruning of stale/unresponsive nodes
   peerStore: PeerStore
+  hopAddressPolicy: PeerAddressPolicy
+    ## Decides which addresses of a pool member can be its hop address, that is, the
+    ## address that the previous node on a path dials.
 
-proc new*(T: typedesc[MixNodePool], peerStore: PeerStore): T =
+proc new*(
+    T: typedesc[MixNodePool],
+    peerStore: PeerStore,
+    hopAddressPolicy: PeerAddressPolicy = defaultAddressPolicy,
+): T {.raises: [].} =
   ## Create a new MixNodePool instance backed by the given peerStore.
-  T(peerStore: peerStore)
+  ## A nil `hopAddressPolicy` is replaced by the default policy, which accepts any
+  ## address, so the pool can call the policy without a nil check.
+  let policy = if hopAddressPolicy.isNil(): defaultAddressPolicy else: hopAddressPolicy
+  T(peerStore: peerStore, hopAddressPolicy: policy)
 
 proc add*(pool: MixNodePool, info: MixPubInfo) =
   ## Add a mix node to the pool.
@@ -86,28 +113,69 @@ proc remove*(pool: MixNodePool, peerId: PeerId): bool =
   pool.peerStore[MixPubKeyBook].del(peerId)
   # Preserve AddressBook/KeyBook entries used by other protocols.
 
-proc get*(pool: MixNodePool, peerId: PeerId): Opt[MixPubInfo] =
-  ## Get MixPubInfo for a peer. Returns none if peer is not in the pool
-  ## or if required information (address, key) is missing.
+type MixHop* = object ## A pool member that a path can use.
+  info*: MixPubInfo
+  addrBytes*: seq[byte] ## Its hop address, encoded for the Sphinx header.
+
+proc hopAddressBytes(
+    pool: MixNodePool, peerId: PeerId, maddr: MultiAddress
+): Opt[seq[byte]] =
+  ## Returns `maddr` encoded for the Sphinx header, or none if a path cannot use it
+  ## as the hop address of `peerId`.
+  if hopHost(maddr).isNone() or not pool.hopAddressPolicy(maddr):
+    return Opt.none(seq[byte])
+  mix_multiaddr.multiAddrToBytes(peerId, maddr).optValue()
+
+type HopAddress = tuple[multiAddr: MultiAddress, addrBytes: seq[byte]]
+  ## A hop address together with its encoding for the Sphinx header.
+
+proc selectHopAddress(pool: MixNodePool, peerId: PeerId): Opt[HopAddress] =
+  ## Returns the first address of `peerId` that a path can use as its hop address.
+  ## Direct addresses are tried before circuit relay routes, because a relayed
+  ## connection has a time limit and a data limit, and a write past the data limit
+  ## silently loses the packet.
+  ## Within each group, the last dialed address is tried before the AddressBook.
+  let lastDialedAddr = pool.peerStore[LastSeenOutboundBook][peerId]
+  let storedAddrs = pool.peerStore[AddressBook][peerId]
+  for relayed in [false, true]:
+    lastDialedAddr.withValue(lastDialed):
+      if isCircuitRelayMA(lastDialed) == relayed:
+        pool.hopAddressBytes(peerId, lastDialed).withValue(addrBytes):
+          return Opt.some((lastDialed, addrBytes))
+    for maddr in storedAddrs:
+      if isCircuitRelayMA(maddr) == relayed:
+        pool.hopAddressBytes(peerId, maddr).withValue(addrBytes):
+          return Opt.some((maddr, addrBytes))
+  Opt.none(HopAddress)
+
+proc getHop*(pool: MixNodePool, peerId: PeerId): Opt[MixHop] {.raises: [].} =
+  ## Get MixPubInfo for a peer together with its hop address already encoded for the
+  ## Sphinx header, so that a path builder does not have to encode it again.
+  ## Returns none if the peer is not in the pool, or has no key or no hop address.
   let mixPubKey = pool.peerStore[MixPubKeyBook][peerId]
   if mixPubKey == default(Curve25519Key):
-    return Opt.none(MixPubInfo)
-
-  # Get the address - prefer LastSeenOutboundBook, fall back to AddressBook
-  # Mix protocol only supports IPv4 addresses with TCP or QUIC-v1 transports
-  var supportedAddr: MultiAddress
-  let lastSeenAddr = pool.peerStore[LastSeenOutboundBook][peerId]
-  if lastSeenAddr.isSome and isSupportedMultiaddr(lastSeenAddr.get):
-    supportedAddr = lastSeenAddr.get
-  else:
-    supportedAddr = findSupportedMultiaddr(pool.peerStore[AddressBook][peerId]).valueOr:
-      return Opt.none(MixPubInfo)
+    return Opt.none(MixHop)
 
   let pubKey = pool.peerStore[KeyBook][peerId]
   if pubKey.scheme != Secp256k1:
-    return Opt.none(MixPubInfo)
+    return Opt.none(MixHop)
 
-  Opt.some(MixPubInfo.init(peerId, supportedAddr, mixPubKey, pubKey.skkey))
+  let hopAddr = pool.selectHopAddress(peerId).valueOr:
+    return Opt.none(MixHop)
+
+  Opt.some(
+    MixHop(
+      info: MixPubInfo.init(peerId, hopAddr.multiAddr, mixPubKey, pubKey.skkey),
+      addrBytes: hopAddr.addrBytes,
+    )
+  )
+
+proc get*(pool: MixNodePool, peerId: PeerId): Opt[MixPubInfo] {.raises: [].} =
+  ## Get MixPubInfo for a peer.
+  ## Returns none if the peer is not in the pool, or has no key or no hop address.
+  let hop = pool.getHop(peerId).valueOr:
+    return Opt.none(MixPubInfo)
+  Opt.some(hop.info)
 
 proc peerIds*(pool: MixNodePool): seq[PeerId] =
   ## Get all peer IDs in the mix node pool.
@@ -116,3 +184,15 @@ proc peerIds*(pool: MixNodePool): seq[PeerId] =
 proc len*(pool: MixNodePool): int =
   ## Get the number of mix nodes in the pool.
   pool.peerStore[MixPubKeyBook].len
+
+proc updatePoolSize(usable: int) =
+  ## The only code that sets `mix_pool_size`.
+  mix_pool_size.set(usable.int64)
+
+proc countUsable*(pool: MixNodePool): int {.raises: [].} =
+  ## Counts the pool members that a path can use, which means reading every member's
+  ## hop address, and sets `mix_pool_size` to the result.
+  ## The gauge is process-wide, so it shows the count of whichever pool counted last.
+  let usable = pool.peerIds().countIt(pool.getHop(it).isSome())
+  updatePoolSize(usable)
+  usable
