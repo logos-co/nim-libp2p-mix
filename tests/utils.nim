@@ -280,6 +280,13 @@ proc errorCount*(role, reason: string): float64 =
   except KeyError:
     0.0
 
+proc forwardedCount*(role: string): float64 =
+  ## The count of `mix_messages_forwarded` for `role`. 0 before the label exists.
+  try:
+    mix_messages_forwarded.value([role])
+  except KeyError:
+    0.0
+
 proc outgoingMixStreams*(switch: Switch): seq[Connection] =
   ## List the open outgoing mix streams of a switch.
   var streams: seq[Connection]

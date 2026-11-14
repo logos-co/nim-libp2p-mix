@@ -264,7 +264,8 @@ proc generateAndAppendProof(
 .} =
   ## Generate spam protection proof and append it to the packet.
   ## Returns the packet with proof appended and an opaque proof token
-  ## for proof slot tracking.
+  ## for proof slot tracking. A proof that this procedure rejects is reclaimed
+  ## here, because it never leaves this node.
   let spamProtection = mixProto.spamProtection.valueOr:
     return ok((packet, newSeq[byte]()))
 
@@ -282,6 +283,8 @@ proc generateAndAppendProof(
     return err(error)
 
   if proofResult.proof.len != spamProtection.proofSize:
+    if proofResult.token.len > 0:
+      spamProtection.reclaimProofToken(proofResult.token)
     return err(
       "Spam protection provider returned proof size " & $proofResult.proof.len &
         ", expected " & $spamProtection.proofSize
@@ -293,6 +296,8 @@ proc generateAndAppendProof(
         mix_messages_error.inc(labelValues = [label, "SPAM_PROOF_EMBED_FAILED"])
         fmt"Failed to append spam protection proof: {e}"
     ).valueOr:
+      if proofResult.token.len > 0:
+        spamProtection.reclaimProofToken(proofResult.token)
       return err(error)
 
   return ok((packetWithProof, proofResult.token))
@@ -336,15 +341,11 @@ proc verifyProof(
   trace "Spam protection proof verified successfully"
   return ok()
 
-type ProofGenFuture =
-  Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]]
-
 proc refundUnwritten(
     mixProto: MixProtocol, claimEpoch: uint64, proofToken: seq[byte] = @[]
 ) =
-  ## Give back the slot and the proof of a packet that this node did not write.
-  ## The two go together, so the claimed slots stay in step with the message
-  ## IDs that the proofs use.
+  ## Refund the slot of a packet that this node did not write, and reclaim its
+  ## proof token if it has one. `unclaimSlot` requires the two together.
   if proofToken.len > 0:
     mixProto.spamProtection.withValue(sp):
       sp.reclaimProofToken(proofToken)
@@ -352,15 +353,21 @@ proc refundUnwritten(
     ct.slotPool.unclaimSlot(claimEpoch)
 
 proc refundCancelledHold(
-    mixProto: MixProtocol, claimEpoch: uint64, proofGen: ProofGenFuture
-) =
-  ## Refund a packet that a cancel ends in its hold, when its proof is ready.
-  ## A proof that is still in work keeps the slot, because its provider can
-  ## have used the message ID already.
+    mixProto: MixProtocol,
+    claimEpoch: uint64,
+    proofGen: Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]],
+) {.async: (raises: []).} =
+  ## Refund a packet that was cancelled in its hold, the wait before its first
+  ## dial. A proof can still finish after the cancel, so this procedure cancels
+  ## the proof generation and waits for it to end. If the cancel ended it, the
+  ## slot stays claimed, because the provider may have used the message ID.
+  await proofGen.cancelAndWait()
   if proofGen.completed():
-    mixProto.refundUnwritten(
-      claimEpoch, proofGen.value().valueOr((@[], @[])).proofToken
-    )
+    let proved = proofGen.value()
+    if proved.isOk:
+      mixProto.refundUnwritten(claimEpoch, proved.get().proofToken)
+    else:
+      mixProto.refundUnwritten(claimEpoch)
 
 method handleMixMessages*(
     mixProto: MixProtocol,
@@ -571,9 +578,9 @@ method handleMixMessages*(
       await cancelAndWait(proofGenFut, delayFut)
     try:
       await allFutures(proofGenFut, delayFut)
-    except CancelledError as exc:
-      mixProto.refundCancelledHold(claimEpoch, proofGenFut)
-      raise exc
+    except CancelledError as e:
+      await mixProto.refundCancelledHold(claimEpoch, proofGenFut)
+      raise e
 
     mixProto.spamProtection.withValue(sp):
       if proofGenTimeMs > actualDelay.int64:
@@ -587,8 +594,8 @@ method handleMixMessages*(
       mixProto.refundUnwritten(claimEpoch)
       return
 
-    # Only a failed first dial proves the packet never left this node, so its
-    # slot can be refunded and its messageId reused. After any write attempt the
+    # A packet whose first dial failed or was cancelled never left this node, so
+    # its slot can be refunded and its messageId reused. After any write attempt the
     # next hop may hold the proof, and reissuing the messageId in this epoch
     # would be an RLN double-signal.
     let conn =
@@ -601,6 +608,9 @@ method handleMixMessages*(
           mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
         mixProto.refundUnwritten(claimEpoch, proofToken)
         return
+      except CancelledError as e:
+        mixProto.refundUnwritten(claimEpoch, proofToken)
+        raise e
 
     try:
       when defined(enable_mix_benchmarks):
@@ -858,9 +868,10 @@ proc sendPacket(
   ## Applies the sender pre-send delay (mix.md §8.5.2 step 3.f) before the
   ## first-hop write to break burst timing correlation.
   ##
-  ## The caller claimed a slot in `claimEpoch`. An exit before the first write,
-  ## an error or a cancel, refunds that slot and reclaims the proof. Only this
-  ## procedure knows if a write started.
+  ## `claimEpoch` is the epoch of the slot that the caller claimed for this
+  ## packet, on a node with cover traffic. An error or a cancel before the first
+  ## write refunds that slot and reclaims the proof, except when the cancel ends
+  ## the proof generation, which keeps the slot.
 
   let label = $logConfig.logType
   let serialized = sphinxPacket.serialize()
@@ -888,9 +899,9 @@ proc sendPacket(
     await cancelAndWait(proofGenFut, delayFut)
   try:
     await allFutures(proofGenFut, delayFut)
-  except CancelledError as exc:
-    mixProto.refundCancelledHold(claimEpoch, proofGenFut)
-    raise exc
+  except CancelledError as e:
+    await mixProto.refundCancelledHold(claimEpoch, proofGenFut)
+    raise e
 
   mixProto.spamProtection.withValue(sp):
     if proofGenTimeMs > initialDelay.int64:
@@ -916,8 +927,8 @@ proc sendPacket(
   # This node did not select it.
   let ownFirstHop = logConfig.logType == Entry
 
-  # Only a failed first dial proves the packet never left this node, so its
-  # messageId can be reused. After any write attempt the next hop may hold the
+  # A packet whose first dial failed or was cancelled never left this node, so
+  # its messageId can be reused. After any write attempt the next hop may hold the
   # proof: reissuing the messageId in this epoch would be an RLN double-signal,
   # so the proof stays spent, including when a retry's redial fails.
   let conn =
@@ -931,9 +942,9 @@ proc sendPacket(
           mixProto.backOffHop(peerId, exc)
       mixProto.refundUnwritten(claimEpoch, proofToken)
       return err(fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}")
-    except CancelledError as exc:
+    except CancelledError as e:
       mixProto.refundUnwritten(claimEpoch, proofToken)
-      raise exc
+      raise e
 
   try:
     when defined(enable_mix_benchmarks):

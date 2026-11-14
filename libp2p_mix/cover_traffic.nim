@@ -308,11 +308,23 @@ proc new*(
   )
 
 proc unclaimCoverSlot(ct: ConstantRateCoverTraffic) =
-  ## Return a cover slot on build failure so it can be retried within the
-  ## same epoch. Send failures do NOT unclaim — the proof/messageId was
-  ## already consumed and cannot be reused.
+  ## Return a cover slot on build failure, or on a cancel before the send, so
+  ## it can be retried within the same epoch. Send failures do NOT unclaim —
+  ## the proof/messageId was already consumed and cannot be reused.
   if ct.slotPool.coverClaimed > 0:
     ct.slotPool.coverClaimed -= 1
+
+proc refundCancelledCover(
+    ct: ConstantRateCoverTraffic, claimEpoch: uint64, proofToken: seq[byte]
+) =
+  ## Reclaim the proof token and return the slot of a cover packet that was
+  ## cancelled before its send. A packet with a token got its proof in the
+  ## build. A packet with no token keeps its slot, because a proof generated at
+  ## transmission may have used a message ID.
+  if proofToken.len > 0 and ct.reclaimProofToken != nil:
+    ct.reclaimProofToken(proofToken)
+    if ct.slotPool.epoch == claimEpoch:
+      ct.unclaimCoverSlot()
 
 proc buildAndSendOnDemand(
     ct: ConstantRateCoverTraffic, claimEpoch: uint64
@@ -325,7 +337,12 @@ proc buildAndSendOnDemand(
       mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
       ct.unclaimCoverSlot()
     return
-  let provedRes = await ct.generateAndAppendCoverProof(built.packet, claimEpoch)
+  let provedRes =
+    try:
+      await ct.generateAndAppendCoverProof(built.packet, claimEpoch)
+    except CancelledError as e:
+      ct.refundCancelledCover(claimEpoch, built.proofToken)
+      raise e
   if ct.heldAcrossEpochBoundary(claimEpoch):
     if built.proofToken.len > 0 and ct.reclaimProofToken != nil:
       ct.reclaimProofToken(built.proofToken)
@@ -364,12 +381,14 @@ proc buildOnDemandOverlapped(
   let builtRes = await buildFut
 
   if builtRes.isErr:
-    await delayFut
-    # beginEpoch already reset coverClaimed when the epoch changed.
-    if not ct.heldAcrossEpochBoundary(claimEpoch):
-      trace "Failed to build cover packet", err = builtRes.error
-      mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
-      ct.unclaimCoverSlot()
+    try:
+      await delayFut
+    finally:
+      # beginEpoch already reset coverClaimed when the epoch changed.
+      if not ct.heldAcrossEpochBoundary(claimEpoch):
+        trace "Failed to build cover packet", err = builtRes.error
+        mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
+        ct.unclaimCoverSlot()
     return
 
   let built = builtRes.get()
@@ -382,7 +401,11 @@ proc buildOnDemandOverlapped(
   )()
   defer:
     await proofFut.cancelAndWait()
-  await allFutures(proofFut, delayFut)
+  try:
+    await allFutures(proofFut, delayFut)
+  except CancelledError as e:
+    ct.refundCancelledCover(claimEpoch, built.proofToken)
+    raise e
 
   if hold > ZeroDuration and preparationTimeMs > hold.milliseconds:
     warn "Cover packet preparation time exceeds sampled sender delay",
@@ -426,7 +449,11 @@ proc emitCoverPacket*(
       let proofFut = ct.generateAndAppendCoverProof(pkt.packet, claimEpoch)
       defer:
         await cancelAndWait(proofFut, delayFut)
-      await allFutures(proofFut, delayFut)
+      try:
+        await allFutures(proofFut, delayFut)
+      except CancelledError as e:
+        ct.refundCancelledCover(claimEpoch, pkt.proofToken)
+        raise e
 
       if ct.heldAcrossEpochBoundary(claimEpoch):
         if pkt.proofToken.len > 0 and ct.reclaimProofToken != nil:

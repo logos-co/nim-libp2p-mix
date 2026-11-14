@@ -611,3 +611,179 @@ suite "CoverTraffic DoS Protection Independence":
     check:
       ct.slotPool.epoch == 10
       ct.slotPool.availableSlots == 5
+
+type PendingCover = object
+  ## Cover traffic whose emission stays pending, before its send or in it, until
+  ## the test cancels it. `started` fires when the emission starts to wait.
+  ct: ConstantRateCoverTraffic
+  started: AsyncEvent
+  reclaimed: ref seq[seq[byte]]
+  sent: ref seq[seq[byte]]
+
+proc pendingBeforeSend(
+    precomputation = false, builder = mockBuildCoverPacket()
+): PendingCover =
+  ## The emission waits before its send.
+  let
+    started = newAsyncEvent()
+    reclaimed = new seq[seq[byte]]
+    sent = new seq[seq[byte]]
+    ct = ConstantRateCoverTraffic.new(
+      totalSlots = 10, epochDuration = 1.seconds, enablePrecomputation = precomputation
+    )
+  ct.setCoverPacketBuilder(builder)
+  ct.setCoverPacketSender(mockSendCoverPacket(sent))
+  ct.setSendDelaySampler(
+    proc(): Delay {.gcsafe, raises: [].} =
+      started.fire()
+      Delay(60_000)
+  )
+  ct.setProofTokenReclaimer(
+    proc(token: seq[byte]) {.gcsafe, raises: [].} =
+      reclaimed[].add(token)
+  )
+  ct.onEpochChange(1)
+  PendingCover(ct: ct, started: started, reclaimed: reclaimed, sent: sent)
+
+proc pendingInSend(precomputation = false, staleProof = false): PendingCover =
+  ## The emission goes to its send at once, and the send never finishes.
+  let
+    started = newAsyncEvent()
+    reclaimed = new seq[seq[byte]]
+    ct = ConstantRateCoverTraffic.new(
+      totalSlots = 10, epochDuration = 1.seconds, enablePrecomputation = precomputation
+    )
+  ct.setCoverPacketBuilder(mockBuildCoverPacket())
+  ct.setCoverPacketSender(
+    proc(
+        peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], epoch: uint64
+    ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+      started.fire()
+      await newAsyncEvent().wait()
+      return ok()
+  )
+  if staleProof:
+    ct.setProofTokenValidator(
+      proc(token: seq[byte]): bool {.gcsafe, raises: [].} =
+        false
+    )
+  ct.setProofTokenReclaimer(
+    proc(token: seq[byte]) {.gcsafe, raises: [].} =
+      reclaimed[].add(token)
+  )
+  ct.onEpochChange(1)
+  PendingCover(ct: ct, started: started, reclaimed: reclaimed, sent: new seq[seq[byte]])
+
+proc addPrebuilt(ct: ConstantRateCoverTraffic, proofToken: seq[byte]) =
+  let (pid, ma) = makePeerInfo()
+  doAssert ct.slotPool.addPacket(
+    CoverPacket(
+      packet: @[0xAA.byte],
+      firstHopPeerId: pid,
+      firstHopAddr: ma,
+      proofToken: proofToken,
+    )
+  )
+
+suite "ConstantRateCoverTraffic cancelled emission":
+  asyncTest "prebuilt packet cancelled before send returns slot and reclaims token":
+    let cover = pendingBeforeSend(precomputation = true)
+    cover.ct.addPrebuilt(@[0x7A.byte])
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+    check cover.ct.slotPool.coverClaimed == 1
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[] == @[@[0x7A.byte]]
+      cover.ct.slotPool.coverClaimed == 0
+      cover.sent[].len == 0
+
+  asyncTest "prebuilt packet without token cancelled before send keeps slot":
+    ## A cover proof that is generated at transmission gives no token, and it may
+    ## have used a message ID.
+    let cover = pendingBeforeSend(precomputation = true)
+    cover.ct.addPrebuilt(@[])
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[].len == 0
+      cover.ct.slotPool.coverClaimed == 1
+
+  asyncTest "on-demand packet cancelled before send returns slot and reclaims token":
+    let cover = pendingBeforeSend()
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+    check cover.ct.slotPool.coverClaimed == 1
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[] == @[@[0x42.byte]]
+      cover.ct.slotPool.coverClaimed == 0
+      cover.sent[].len == 0
+
+  asyncTest "packet cancelled after epoch change reclaims token, returns no slot":
+    let cover = pendingBeforeSend()
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+
+    cover.ct.onEpochChange(2)
+    check cover.ct.slotPool.claimSlotForCover()
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[] == @[@[0x42.byte]]
+      cover.ct.slotPool.coverClaimed == 1
+
+  asyncTest "cancel after build failure returns slot":
+    let cover = pendingBeforeSend(builder = mockBuildCoverPacketFailing())
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+    check cover.ct.slotPool.coverClaimed == 1
+
+    await emission.cancelAndWait()
+    check cover.ct.slotPool.coverClaimed == 0
+
+  asyncTest "on-demand packet cancelled in send keeps slot and token":
+    let cover = pendingInSend()
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[].len == 0
+      cover.ct.slotPool.coverClaimed == 1
+
+  asyncTest "prebuilt packet cancelled in send keeps slot and token":
+    let cover = pendingInSend(precomputation = true)
+    cover.ct.addPrebuilt(@[0x7A.byte])
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[].len == 0
+      cover.ct.slotPool.coverClaimed == 1
+
+  asyncTest "rebuilt packet cancelled in send keeps slot and token":
+    let cover = pendingInSend(precomputation = true, staleProof = true)
+    cover.ct.addPrebuilt(@[0x7A.byte])
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+    # The cover traffic reclaimed the stale token before the new build.
+    check cover.reclaimed[] == @[@[0x7A.byte]]
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[] == @[@[0x7A.byte]]
+      cover.ct.slotPool.coverClaimed == 1

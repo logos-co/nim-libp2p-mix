@@ -18,7 +18,7 @@ type
     token*: seq[byte]
       ## Opaque token for proof slot tracking.
       ## Only meaningful to the concrete implementation.
-      ## Used to reclaim proof slots when precomputed cover packets are discarded.
+      ## Mix can give it back with `reclaimProofToken`.
 
   SpamProtection* = ref object of RootObj
     ## Abstract interface that spam protection mechanisms must implement
@@ -52,6 +52,8 @@ method generateProofAsync*(
     self: SpamProtection, bindingData: seq[byte]
 ): Future[Result[ProofResult, string]] {.base, async: (raises: [CancelledError]).} =
   ## External proof providers may suspend without blocking the Mix event loop.
+  ## Mix can cancel this call. If the cancel ends the call, Mix has no token to
+  ## reclaim, so it keeps the slot of the packet.
   return self.generateProof(bindingData)
 
 method generateProofAsync*(
@@ -59,6 +61,7 @@ method generateProofAsync*(
 ): Future[Result[ProofResult, string]] {.base, async: (raises: [CancelledError]).} =
   ## Epoch-aware proof providers should override this method. The default keeps
   ## existing providers compatible when their proofs do not bind an epoch.
+  ## A cancel of this call has the same effect as a cancel of the overload above.
   return await self.generateProofAsync(bindingData)
 
 method precomputeCoverProofs*(self: SpamProtection): bool {.base, gcsafe, raises: [].} =
@@ -72,7 +75,14 @@ method reclaimProofToken*(
     self: SpamProtection, token: seq[byte]
 ) {.base, gcsafe, raises: [].} =
   ## Return an opaque proof token for potential reuse.
-  ## Called when a precomputed cover packet is discarded without being sent.
+  ## Called when the proof of the token never leaves this node, in these cases:
+  ## - a precomputed cover packet that is discarded,
+  ## - a send, a reply or a forward that fails or is cancelled before its first
+  ##   write,
+  ## - a cover packet that is cancelled before its send starts,
+  ## - a proof that Mix rejects.
+  ## Not called for a cover packet once its send starts, or for a cover proof
+  ## that is generated at transmission.
   ## The concrete implementation may reclaim internal resources (e.g., rate limit slots).
   ## Default: no-op.
   discard
