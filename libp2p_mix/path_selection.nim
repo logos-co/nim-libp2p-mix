@@ -87,7 +87,7 @@ proc prepareFixedHops(
     result.path[position] = info
     result.excludedIds.incl(info.peerId)
 
-proc resolveCandidates(
+proc resolveCandidates*(
     pool: MixNodePool, candidateIds: openArray[PeerId], excludedIds: HashSet[PeerId]
 ): seq[MixPubInfo] =
   ## The strategy supplies distinct identities: the whole pool for random
@@ -101,7 +101,7 @@ proc resolveCandidates(
     if hasRoutingInfo(info):
       result.add(info)
 
-proc pickRandomNodes(
+proc pickRandomNodes*(
     rng: Rng, candidates: openArray[MixPubInfo], count: int
 ): Result[MixPath, string] =
   ## Pick exactly count nodes without replacement from filtered, distinct candidates.
