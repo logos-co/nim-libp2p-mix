@@ -548,6 +548,18 @@ suite "Mix Protocol - Node Failures":
       nodes[0].nodePool.len == 3
       mix_pool_size.value == 2
 
+  asyncTest "start after stop sets mix_pool_size again":
+    let nodes = await setupMixNodes(3)
+    let node = nodes[0]
+    await node.start()
+    await node.stop()
+    discard node.nodePool.remove(nodes[1].switch.peerInfo.peerId)
+
+    await node.start()
+    defer:
+      await node.stop()
+    check mix_pool_size.value == 1
+
   asyncTest "a send and a cover packet set mix_pool_size":
     ## A node's first path build after `start` always counts the pool, so one node
     ## sends and another builds a cover packet.
@@ -578,8 +590,8 @@ suite "Mix Protocol - Node Failures":
     check mix_pool_size.value == 0
 
   asyncTest "a second path build does not count the pool again at once":
-    ## The two path builds are much less than `PoolSizeInterval` apart, so only the
-    ## first one counts the pool.
+    ## The two path builds are much less than `PoolSizeUpdateInterval` apart, so only
+    ## the first one counts the pool.
     let nodes = await setupMixNodes(3)
     let sender = nodes[0]
     startAndDeferStop(nodes)
