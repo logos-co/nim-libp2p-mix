@@ -127,7 +127,7 @@ let mix =
   MixProtocol.new(mixNodeInfo, switch, hopAddressPolicy = publicHopAddressPolicy)
 ```
 
-`publicHopAddressPolicy` accepts an IPv4 address that the public network routes, and a circuit relay route through a relay with such an address. nim-libp2p's `publicRoutableAddressPolicy` also accepts a circuit relay route through a relay with a private address, which nodes on other networks cannot dial.
+`publicHopAddressPolicy` accepts an IPv4 address that the public network routes, and a circuit relay route through a relay with such an address. nim-libp2p's `publicRoutableAddressPolicy` also accepts a circuit relay route through a relay with a private address. That route works only when the previous hop is already connected to the relay, and the sender cannot know whether it is.
 
 Mix asks the policy only about an IPv4 address with a TCP or QUIC-v1 transport and a port other than 0, and never about a multicast or broadcast address.
 
