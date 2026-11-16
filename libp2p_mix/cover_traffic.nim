@@ -415,12 +415,15 @@ proc buildOnDemandOverlapped(
   if builtRes.isErr:
     try:
       await delayFut
-    finally:
-      # beginEpoch already reset coverClaimed when the epoch changed.
-      if not ct.heldAcrossEpochBoundary(claimEpoch):
-        trace "Failed to build cover packet", err = builtRes.error
-        mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
+    except CancelledError as e:
+      if ct.slotPool.epoch == claimEpoch:
         ct.unclaimCoverSlot()
+      raise e
+    # beginEpoch already reset coverClaimed when the epoch changed.
+    if not ct.heldAcrossEpochBoundary(claimEpoch):
+      trace "Failed to build cover packet", err = builtRes.error
+      mix_cover_error.inc(labelValues = ["BUILD_FAILED"])
+      ct.unclaimCoverSlot()
     return
 
   let built = builtRes.get()

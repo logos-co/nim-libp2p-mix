@@ -4,8 +4,8 @@
 {.used.}
 
 import chronos
-import results
-import libp2p_mix/[cover_traffic, serialization, spam_protection]
+import metrics, results
+import libp2p_mix/[cover_traffic, mix_metrics, serialization, spam_protection]
 import libp2p/[multiaddress, peerid]
 import libp2p/crypto/[crypto, secp]
 import ./tools/[unittest, crypto]
@@ -726,6 +726,12 @@ proc pendingInSend(precomputation = false, staleProof = false): PendingCover =
   ct.onEpochChange(1)
   PendingCover(ct: ct, started: started, reclaimed: reclaimed, sent: new seq[seq[byte]])
 
+proc coverErrorCount(error: string): float64 =
+  try:
+    mix_cover_error.value([error])
+  except KeyError:
+    0.0
+
 proc addPrebuilt(ct: ConstantRateCoverTraffic, proofToken: seq[byte]) =
   let (pid, ma) = makePeerInfo()
   doAssert ct.slotPool.addPacket(
@@ -940,15 +946,35 @@ suite "ConstantRateCoverTraffic cancelled emission":
       cover.reclaimed[] == @[@[0x42.byte]]
       cover.ct.slotPool.coverClaimed == 1
 
-  asyncTest "cancel after build failure returns slot":
+  asyncTest "cancel after build failure returns slot and counts no error":
     let cover = pendingBeforeSend(builder = mockBuildCoverPacketFailing())
+    let buildFailed = coverErrorCount("BUILD_FAILED")
 
     let emission = cover.ct.emitCoverPacket()
     await cover.started.wait().wait(5.seconds)
     check cover.ct.slotPool.coverClaimed == 1
 
     await emission.cancelAndWait()
-    check cover.ct.slotPool.coverClaimed == 0
+    check:
+      cover.ct.slotPool.coverClaimed == 0
+      coverErrorCount("BUILD_FAILED") == buildFailed
+
+  asyncTest "cancel after build failure and epoch change counts no error":
+    let cover = pendingBeforeSend(builder = mockBuildCoverPacketFailing())
+    let buildFailed = coverErrorCount("BUILD_FAILED")
+    let epochCrossed = coverErrorCount("EPOCH_CROSSED")
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+
+    cover.ct.onEpochChange(2)
+    check cover.ct.slotPool.claimSlotForCover()
+
+    await emission.cancelAndWait()
+    check:
+      cover.ct.slotPool.coverClaimed == 1
+      coverErrorCount("BUILD_FAILED") == buildFailed
+      coverErrorCount("EPOCH_CROSSED") == epochCrossed
 
   asyncTest "on-demand packet cancelled in send keeps slot and token":
     let cover = pendingInSend()
