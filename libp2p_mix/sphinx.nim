@@ -192,12 +192,13 @@ proc computeDelta(s: seq[seq[byte]], msg: Message): Result[seq[byte], string] =
   for i in countdown(sLen - 1, 0):
     # delta_key = KDF("payload_enc_key", s_i) is the LIONESS seed for this layer.
     var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
-    var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
+    defer:
       burnMem(delta_key)
+
+    var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
       return err("LIONESS init error: " & $error)
     defer:
       lion.clear()
-      burnMem(delta_key)
 
     # The exit layer starts from the plaintext (which already carries the k
     # zero-byte integrity prefix from serialize); inner layers re-encrypt the
@@ -270,12 +271,13 @@ proc processReply*(
   # decryption so that only the reply sender's initial encryption remains.
   for i in countdown(s.len - 1, 0):
     var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
-    var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
+    defer:
       burnMem(delta_key)
+
+    var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
       return err("LIONESS init error: " & $error)
     defer:
       lion.clear()
-      burnMem(delta_key)
     lion.encrypt(delta).isOkOr:
       return err("LIONESS encrypt error: " & $error)
 
