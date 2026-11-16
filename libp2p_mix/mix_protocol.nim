@@ -37,9 +37,8 @@ const DefaultHopBackoff* = chronos.minutes(1)
   ## How long a first hop that failed a dial is not selected as the first hop.
 
 const PoolSizeUpdateInterval = chronos.seconds(10)
-  ## The timer of `mix_pool_size` counts the usable pool members this often, and a
-  ## send or a cover packet build at most this often. It is shorter than the usual
-  ## scrape interval of a metrics server.
+  ## The timer of `mix_pool_size` counts the usable pool members this often, which
+  ## is shorter than the usual scrape interval of a metrics server.
 
 type
   HopDial = Future[Connection].Raising([DialFailedError, CancelledError])
@@ -82,7 +81,6 @@ type MixProtocol* = ref object of LPProtocol
   backedOffUntil: Table[PeerId, Moment]
     ## The moment until which a first hop that failed a dial is not the first hop.
   hopBackoff: Duration
-  poolSizeTime: Opt[Moment] ## When a path build last counted the usable pool members.
   poolSizeLoop: Future[void] ## The timer that sets `mix_pool_size`.
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
@@ -128,27 +126,12 @@ proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
     if value >= threshold:
       return ok(int(value mod bound))
 
-proc updatePoolSize(mixProto: MixProtocol) =
+proc runPoolSizeLoop(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   ## Sets `mix_pool_size` to the number of pool members that a path can use.
   ## The gauge is process-wide, so it shows the count of whichever `MixProtocol`
   ## counted last.
-  mix_pool_size.set(mixProto.nodePool.countUsable().int64)
-
-proc refreshPoolSize(mixProto: MixProtocol) =
-  ## Sets `mix_pool_size` for a path build, but at most once per
-  ## `PoolSizeUpdateInterval`, since the count reads every pool member.
-  let now = Moment.now()
-  mixProto.poolSizeTime.withValue(lastTime):
-    if now - lastTime < PoolSizeUpdateInterval:
-      return
-  mixProto.poolSizeTime = Opt.some(now)
-  mixProto.updatePoolSize()
-
-proc runPoolSizeLoop(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
-  ## Keeps `mix_pool_size` current on a node that builds no path, and after an
-  ## address change of a pool member.
   heartbeat "Mix pool size", PoolSizeUpdateInterval:
-    mixProto.updatePoolSize()
+    mix_pool_size.set(mixProto.nodePool.countUsable().int64)
 
 proc hopIsBackedOff(mixProto: MixProtocol, peerId: PeerId): bool =
   ## True while `peerId` waits out a failed dial. Only the first hop is filtered.
@@ -1044,8 +1027,6 @@ proc anonymizeLocalProtocolSend*(
     hop: seq[Hop] = @[]
     delays: seq[Delay] = @[]
 
-  mixProto.refreshPoolSize()
-
   var candidates = mixProto.nodePool.peerIds()
 
   # The draw never picks the destination.
@@ -1191,8 +1172,6 @@ proc sendSurbReply*(
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]
 ): Result[seq[MixHop], string] {.raises: [].} =
-  mixProto.refreshPoolSize()
-
   let available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
   if available.len < count:
     mix_messages_error.inc(labelValues = ["Cover", "LOW_MIX_POOL"])
@@ -1397,8 +1376,7 @@ proc init*(
   ## A first hop that fails a dial is not the first hop for `hopBackoff`.
   ##
   ## From `start` to `stop`, a timer sets `mix_pool_size` to the number of pool
-  ## members that a path can use, once per `PoolSizeUpdateInterval`. Sends and cover
-  ## packet builds also refresh it, at most once per `PoolSizeUpdateInterval`.
+  ## members that a path can use, once per `PoolSizeUpdateInterval`.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 

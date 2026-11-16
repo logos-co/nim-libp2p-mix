@@ -560,17 +560,16 @@ suite "Mix Protocol - Node Failures":
       await node.stop()
     check mix_pool_size.value == 1
 
-  asyncTest "a send and a cover packet set mix_pool_size":
-    ## A node's first path build after `start` always counts the pool, so one node
-    ## sends and another builds a cover packet.
+  asyncTest "a send and a cover packet build do not set mix_pool_size":
     let nodes = await setupMixNodes(3)
-    let sender = nodes[0]
-    let coverNode = nodes[1]
-    startAndDeferStop(nodes)
+    let node = nodes[0]
+    await node.switch.start()
+    defer:
+      await node.switch.stop()
     check mix_pool_size.value == 2
 
-    discard sender.nodePool.remove(nodes[1].switch.peerInfo.peerId)
-    discard await sender.anonymizeLocalProtocolSend(
+    discard node.nodePool.remove(nodes[1].switch.peerInfo.peerId)
+    discard await node.anonymizeLocalProtocolSend(
       newAsyncQueue[seq[byte]](),
       "test message".toBytes(),
       "/test/1.0.0",
@@ -582,28 +581,8 @@ suite "Mix Protocol - Node Failures":
       ),
       0,
     )
-    check mix_pool_size.value == 1
-
-    discard coverNode.nodePool.remove(nodes[0].switch.peerInfo.peerId)
-    discard coverNode.nodePool.remove(nodes[2].switch.peerInfo.peerId)
-    discard await coverNode.buildCoverPacket()
-    check mix_pool_size.value == 0
-
-  asyncTest "a second path build does not count the pool again at once":
-    ## The two path builds are much less than `PoolSizeUpdateInterval` apart, so only
-    ## the first one counts the pool.
-    let nodes = await setupMixNodes(3)
-    let sender = nodes[0]
-    startAndDeferStop(nodes)
+    discard await node.buildCoverPacket()
     check mix_pool_size.value == 2
-
-    discard sender.nodePool.remove(nodes[1].switch.peerInfo.peerId)
-    discard await sender.buildCoverPacket()
-    check mix_pool_size.value == 1
-
-    discard sender.nodePool.remove(nodes[2].switch.peerInfo.peerId)
-    discard await sender.buildCoverPacket()
-    check mix_pool_size.value == 1
 
   asyncTest "a node with the public hop address policy has no usable peer on the local host":
     let nodes = await setupMixNodes(5, hopAddressPolicy = publicHopAddressPolicy)
