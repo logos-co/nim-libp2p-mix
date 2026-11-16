@@ -52,8 +52,7 @@ method generateProofAsync*(
     self: SpamProtection, bindingData: seq[byte]
 ): Future[Result[ProofResult, string]] {.base, async: (raises: [CancelledError]).} =
   ## External proof providers may suspend without blocking the Mix event loop.
-  ## Mix can cancel this call. If the cancel ends the call, Mix has no token to
-  ## reclaim, so it keeps the slot of the packet.
+  ## Mix can cancel this call. A cancelled call returns no token.
   return self.generateProof(bindingData)
 
 method generateProofAsync*(
