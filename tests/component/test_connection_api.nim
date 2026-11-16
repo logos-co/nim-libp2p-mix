@@ -97,6 +97,19 @@ suite "Mix Protocol - Connection API":
     expect LPStreamEOFError:
       discard await readFut.wait(1.seconds)
 
+  asyncTest "a write after a close fails":
+    const TestCodec = "/test/close"
+    let nodes = await setupMixNodes(2)
+    startAndDeferStop(nodes)
+
+    let conn = nodes[0].toConnection(nodes[1].toMixDestination(), TestCodec).expect(
+        "could not build connection"
+      )
+    await conn.close()
+
+    expect LPStreamClosedError:
+      await conn.writeLp(@[1.byte, 2, 3])
+
   asyncTest "write rejects oversized messages":
     let nodes = await setupMixNodes(10)
     startAndDeferStop(nodes)

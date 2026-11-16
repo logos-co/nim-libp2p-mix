@@ -11,9 +11,10 @@ import
   ]
 import libp2p/protocols/protocol
 import libp2p/stream/[connection, lpstream]
-import libp2p/[switch, multicodec, peerinfo, varint]
+import libp2p/[switch, multicodec, peeraddrpolicy, peerinfo, varint]
 import libp2p/crypto/crypto
 import nimcrypto/utils # burnMem
+import libp2p/utils/heartbeat
 
 export pool
 export SurbStore, SurbSession
@@ -35,6 +36,10 @@ const CoverTrafficCodec* = "/mix/cover/1.0.0"
 
 const DefaultHopBackoff* = chronos.minutes(1)
   ## How long a first hop that failed a dial is not selected as the first hop.
+
+const PoolSizeUpdateInterval = chronos.seconds(10)
+  ## The timer of `mix_pool_size` counts the usable pool members this often, which
+  ## is shorter than the usual scrape interval of a metrics server.
 
 type
   HopDial = Future[Connection].Raising([DialFailedError, CancelledError])
@@ -77,6 +82,7 @@ type MixProtocol* = ref object of LPProtocol
   backedOffUntil: Table[PeerId, Moment]
     ## The moment until which a first hop that failed a dial is not the first hop.
   hopBackoff: Duration
+  poolSizeLoop: Future[void] ## The timer that sets `mix_pool_size`.
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
   coverTraffic*: Opt[CoverTraffic]
@@ -85,6 +91,9 @@ type MixProtocol* = ref object of LPProtocol
     ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
     ## removal on completion is O(1).
   nextMixMessageId: uint64
+  ongoingLocalSends: Table[uint64, FutureBase]
+    ## In-flight local sends, cancelled on stop.
+  nextLocalSendId: uint64
 
 proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
   return mixProto.destReadBehaviors.hasKey(codec)
@@ -130,8 +139,19 @@ proc surbCredsLen*(mixProto: MixProtocol): int =
 proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   if max == 0:
     return err("Max cannot be zero.")
-  let res = rng.generate(uint64) mod uint64(max)
-  ok(res.int)
+  let bound = uint64(max)
+  let threshold = (0'u64 - bound) mod bound
+  while true:
+    let value = rng.generate(uint64)
+    if value >= threshold:
+      return ok(int(value mod bound))
+
+proc runPoolSizeLoop(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
+  ## Sets `mix_pool_size` to the number of pool members that a path can use.
+  ## The gauge is process-wide, so it shows the count of whichever `MixProtocol`
+  ## counted last.
+  heartbeat "Mix pool size", PoolSizeUpdateInterval:
+    mix_pool_size.set(mixProto.nodePool.countUsable().int64)
 
 proc hopIsBackedOff(mixProto: MixProtocol, peerId: PeerId): bool =
   ## True while `peerId` waits out a failed dial. Only the first hop is filtered.
@@ -261,7 +281,8 @@ proc generateAndAppendProof(
 .} =
   ## Generate spam protection proof and append it to the packet.
   ## Returns the packet with proof appended and an opaque proof token
-  ## for proof slot tracking.
+  ## for proof slot tracking. A proof that this procedure rejects is reclaimed
+  ## here, because it never leaves this node.
   let spamProtection = mixProto.spamProtection.valueOr:
     return ok((packet, newSeq[byte]()))
 
@@ -279,6 +300,8 @@ proc generateAndAppendProof(
     return err(error)
 
   if proofResult.proof.len != spamProtection.proofSize:
+    if proofResult.token.len > 0:
+      spamProtection.reclaimProofToken(proofResult.token)
     return err(
       "Spam protection provider returned proof size " & $proofResult.proof.len &
         ", expected " & $spamProtection.proofSize
@@ -290,6 +313,8 @@ proc generateAndAppendProof(
         mix_messages_error.inc(labelValues = [label, "SPAM_PROOF_EMBED_FAILED"])
         fmt"Failed to append spam protection proof: {e}"
     ).valueOr:
+      if proofResult.token.len > 0:
+        spamProtection.reclaimProofToken(proofResult.token)
       return err(error)
 
   return ok((packetWithProof, proofResult.token))
@@ -399,6 +424,34 @@ proc processWithKey(
       mixProto.tagManager,
       Opt.some(key.sharedSecret),
     )
+
+proc refundUnwritten(
+    mixProto: MixProtocol, claimEpoch: uint64, proofToken: seq[byte] = @[]
+) =
+  ## Refund the slot of a packet that this node did not write, and reclaim its
+  ## proof token if it has one. `unclaimSlot` requires the two together.
+  if proofToken.len > 0:
+    mixProto.spamProtection.withValue(sp):
+      sp.reclaimProofToken(proofToken)
+  mixProto.coverTraffic.withValue(ct):
+    ct.slotPool.unclaimSlot(claimEpoch)
+
+proc refundCancelledHold(
+    mixProto: MixProtocol,
+    claimEpoch: uint64,
+    proofGen: Future[Result[tuple[packet: seq[byte], proofToken: seq[byte]], string]],
+) {.async: (raises: []).} =
+  ## Refund a packet that was cancelled in its hold, the wait before its first
+  ## dial. A proof can still finish after the cancel, so this procedure cancels
+  ## the proof generation and waits for it to end. If the cancel ended it, the
+  ## slot stays claimed, because the provider may have used the message ID.
+  await proofGen.cancelAndWait()
+  if proofGen.completed():
+    let proved = proofGen.value()
+    if proved.isOk:
+      mixProto.refundUnwritten(claimEpoch, proved.get().proofToken)
+    else:
+      mixProto.refundUnwritten(claimEpoch)
 
 method handleMixMessages*(
     mixProto: MixProtocol,
@@ -561,10 +614,6 @@ method handleMixMessages*(
         mixProto.spamProtection.withValue(sp):
           sp.reclaimProofToken(claim.reclaimedToken)
 
-    template refundSlot(): untyped =
-      mixProto.coverTraffic.withValue(ct):
-        ct.slotPool.unclaimSlot(claimEpoch)
-
     let actualDelay = mixProto.delayStrategy.generateForIntermediate(processedSP.delay)
     trace "Computed delay", encodedDelay = processedSP.delay, actualDelay
 
@@ -574,7 +623,7 @@ method handleMixMessages*(
     let (nextPeerId, nextAddr) = bytesToMultiAddr(nextHopBytes).valueOr:
       trace "Failed to convert bytes to multiaddress", err = error
       mix_messages_error.inc(labelValues = ["Intermediate", "INVALID_DEST"])
-      refundSlot()
+      mixProto.refundUnwritten(claimEpoch)
       return
 
     when defined(enable_mix_benchmarks):
@@ -608,7 +657,11 @@ method handleMixMessages*(
 
     defer:
       await cancelAndWait(proofGenFut, delayFut)
-    await allFutures(proofGenFut, delayFut)
+    try:
+      await allFutures(proofGenFut, delayFut)
+    except CancelledError as e:
+      await mixProto.refundCancelledHold(claimEpoch, proofGenFut)
+      raise e
 
     mixProto.spamProtection.withValue(sp):
       if proofGenTimeMs > actualDelay.int64:
@@ -619,11 +672,11 @@ method handleMixMessages*(
 
     let (outgoingPacket, proofToken) = (await proofGenFut).valueOr:
       error "Failed to generate spam protection proof for next hop", err = error
-      refundSlot()
+      mixProto.refundUnwritten(claimEpoch)
       return
 
-    # Only a failed first dial proves the packet never left this node, so its
-    # slot can be refunded and its messageId reused. After any write attempt the
+    # A packet whose first dial failed or was cancelled never left this node, so
+    # its slot can be refunded and its messageId reused. After any write attempt the
     # next hop may hold the proof, and reissuing the messageId in this epoch
     # would be an RLN double-signal.
     let conn =
@@ -634,11 +687,11 @@ method handleMixMessages*(
         if mixProto.started:
           error "Failed to dial next hop: ", err = exc.msg
           mix_messages_error.inc(labelValues = ["Intermediate", "DIAL_FAILED"])
-        if proofToken.len > 0:
-          mixProto.spamProtection.withValue(sp):
-            sp.reclaimProofToken(proofToken)
-        refundSlot()
+        mixProto.refundUnwritten(claimEpoch, proofToken)
         return
+      except CancelledError as e:
+        mixProto.refundUnwritten(claimEpoch, proofToken)
+        raise e
 
     try:
       when defined(enable_mix_benchmarks):
@@ -732,6 +785,42 @@ proc getMaxMessageSizeForCodec*(
     return err("cannot encode messages for this codec")
   return ok(DataSize - totalLen)
 
+proc drawUsable(
+    mixProto: MixProtocol, peerIds: var seq[PeerId], label: string
+): Result[MixHop, string] {.gcsafe, raises: [].} =
+  ## Draws peers from `peerIds` until the pool has a hop address for one, and
+  ## removes each peer that it draws. So each peer that a path can use has the
+  ## same chance, and a peer with no hop address keeps its mix key.
+  ## If it runs out of peers, it counts a `LOW_MIX_POOL` error under `label`.
+  while peerIds.len > 0:
+    let index = ?cryptoRandomInt(mixProto.rng, peerIds.len)
+    let peerId = peerIds[index]
+    peerIds.del(index)
+    mixProto.nodePool.getHop(peerId).withValue(mixHop):
+      return ok(mixHop)
+  mix_messages_error.inc(labelValues = [label, "LOW_MIX_POOL"])
+  err("Ran out of usable mix nodes")
+
+proc drawHops(
+    mixProto: MixProtocol, peerIds: openArray[PeerId], count: int, label: string
+): Result[seq[MixHop], string] {.raises: [].} =
+  ## Draws `count` usable pool members from `peerIds`, skipping backed off peers for
+  ## the first hop only.
+  var candidates = @peerIds
+  # The backed off peers that the draw of the first hop skipped.
+  var skipped: seq[PeerId]
+  var hops: seq[MixHop]
+  while hops.len < count:
+    let mixHop = ?mixProto.drawUsable(candidates, label)
+    if hops.len == 0:
+      if mixProto.hopIsBackedOff(mixHop.info.peerId):
+        skipped.add(mixHop.info.peerId)
+        continue
+      # Peers skipped for the first hop are fine as later hops.
+      candidates.add(skipped)
+    hops.add(mixHop)
+  ok(hops)
+
 type SurbBuild* = object
   surb*: SURB
   credentialsExpireAt*: Opt[Moment]
@@ -748,49 +837,40 @@ method buildSurb*(
     delays: seq[Delay] = @[]
     pathPeerIds: seq[PeerId] = @[]
 
-  # One time for the whole path, so that the pool lists and returns the same
-  # nodes even when a record reaches its maximum age meanwhile.
-  let now = Moment.now()
-  let allPeerIds = mixProto.nodePool.peerIds(now)
-  if allPeerIds.len < PathLength:
-    return err("No. of public mix nodes less than path length")
-
   # Remove exit and dest node from nodes to consider for surbs
-  var poolPeerIds = allPeerIds.filterIt(it != exitPeerId and it != destPeerId)
-  var availableIndices = toSeq(0 ..< poolPeerIds.len)
+  var poolPeerIds =
+    mixProto.nodePool.peerIds().filterIt(it != exitPeerId and it != destPeerId)
 
-  # Select L mix nodes at random
+  # The last hop of a reply path is this node, so the pool supplies only the others.
+  if poolPeerIds.len < PathLength - 1:
+    mix_messages_error.inc(labelValues = ["Entry/SURB", "LOW_MIX_POOL"])
+    return err(
+      "Not enough mix nodes for a reply path (available=" & $poolPeerIds.len &
+        ", needed=" & $(PathLength - 1) & ")"
+    )
+
+  # Draw the hops at random, and then add this node as the last hop.
   for i in 0 ..< PathLength:
-    let (peerId, multiAddr, mixPubKey, hopDelay) =
+    let (mixPubKey, multiAddrBytes, hopDelay) =
       if i < PathLength - 1:
-        let randomIndexPosition = cryptoRandomInt(mixProto.rng, availableIndices.len).valueOr:
-          return err("failed to generate random num: " & error)
-        let selectedIndex = availableIndices[randomIndexPosition]
-        let randPeerId = poolPeerIds[selectedIndex]
-        availableIndices.del(randomIndexPosition)
+        let mixHop = mixProto.drawUsable(poolPeerIds, "Entry/SURB").valueOr:
+          return err(error)
         debug "Selected mix node for surbs: ", indexInPath = i
-        let mixPubInfo = mixProto.nodePool.get(randPeerId, now).valueOr:
-          return err("could not get mix pub info for peer: " & $randPeerId)
-        pathPeerIds.add(randPeerId)
+        pathPeerIds.add(mixHop.info.peerId)
         (
-          mixPubInfo.peerId,
-          mixPubInfo.multiAddr,
-          mixPubInfo.mixPubKey,
+          mixHop.info.mixPubKey,
+          mixHop.addrBytes,
           mixProto.delayStrategy.generateForEntry(),
         )
       else:
-        (
-          mixProto.mixNodeInfo.peerId,
-          mixProto.mixNodeInfo.multiAddr,
-          ?mixProto.ownMixPubKey(),
-          NoDelay,
-        ) # No delay for last hop
+        let selfAddrBytes = multiAddrToBytes(
+          mixProto.mixNodeInfo.peerId, mixProto.mixNodeInfo.multiAddr
+        ).valueOr:
+          mix_messages_error.inc(labelValues = ["Entry/SURB", "INVALID_MIX_INFO"])
+          return err("failed to convert multiaddress to bytes: " & error)
+        (?mixProto.ownMixPubKey(), selfAddrBytes, NoDelay) # No delay for last hop
 
     publicKeys.add(mixPubKey)
-
-    let multiAddrBytes = multiAddrToBytes(peerId, multiAddr).valueOr:
-      mix_messages_error.inc(labelValues = ["Entry/SURB", "INVALID_MIX_INFO"])
-      return err("failed to convert multiaddress to bytes: " & error)
 
     hops.add(Hop.init(multiAddrBytes))
 
@@ -886,22 +966,20 @@ type SendPacketLogConfig = object
     startTime: Time
     metadata: Metadata
 
-type SendPacketError = object
-  msg: string
-  neverWritten: bool
-    ## True only when no byte of the packet can have left this node, which is
-    ## the one case where its slot may be refunded and its proof reused.
-
 proc sendPacket(
     mixProto: MixProtocol,
     peerId: PeerId,
     multiAddress: MultiAddress,
     sphinxPacket: SphinxPacket,
     logConfig: SendPacketLogConfig,
-): Future[Result[void, SendPacketError]] {.async: (raises: [CancelledError]).} =
+    claimEpoch: uint64,
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   ## Send the wrapped message to the first mix node in the selected path.
   ## Applies the sender pre-send delay (mix.md §8.5.2 step 3.f) before the
   ## first-hop write to break burst timing correlation.
+  ##
+  ## `claimEpoch` is the epoch of the caller's slot claim. The slot is refunded
+  ## if nothing was written.
 
   let label = $logConfig.logType
   let serialized = sphinxPacket.serialize()
@@ -927,7 +1005,11 @@ proc sendPacket(
 
   defer:
     await cancelAndWait(proofGenFut, delayFut)
-  await allFutures(proofGenFut, delayFut)
+  try:
+    await allFutures(proofGenFut, delayFut)
+  except CancelledError as e:
+    await mixProto.refundCancelledHold(claimEpoch, proofGenFut)
+    raise e
 
   mixProto.spamProtection.withValue(sp):
     if proofGenTimeMs > initialDelay.int64:
@@ -937,7 +1019,8 @@ proc sendPacket(
         hint = "Increase the minimum delay floor or reduce proof generation time"
 
   let (packetToSend, proofToken) = (await proofGenFut).valueOr:
-    return err(SendPacketError(msg: error, neverWritten: true))
+    mixProto.refundUnwritten(claimEpoch)
+    return err(error)
 
   when defined(enable_mix_benchmarks):
     if logConfig.logType == Entry:
@@ -952,8 +1035,8 @@ proc sendPacket(
   # This node did not select it.
   let ownFirstHop = logConfig.logType == Entry
 
-  # Only a failed first dial proves the packet never left this node, so its
-  # messageId can be reused. After any write attempt the next hop may hold the
+  # A packet whose first dial failed or was cancelled never left this node, so
+  # its messageId can be reused. After any write attempt the next hop may hold the
   # proof: reissuing the messageId in this epoch would be an RLN double-signal,
   # so the proof stays spent, including when a retry's redial fails.
   let conn =
@@ -965,15 +1048,11 @@ proc sendPacket(
         mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
         if ownFirstHop:
           mixProto.backOffHop(peerId, exc)
-      if proofToken.len > 0:
-        mixProto.spamProtection.withValue(sp):
-          sp.reclaimProofToken(proofToken)
-      return err(
-        SendPacketError(
-          msg: fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}",
-          neverWritten: true,
-        )
-      )
+      mixProto.refundUnwritten(claimEpoch, proofToken)
+      return err(fmt"Failed to dial to next hop ({peerId}, {multiAddress}): {exc.msg}")
+    except CancelledError as e:
+      mixProto.refundUnwritten(claimEpoch, proofToken)
+      raise e
 
   try:
     when defined(enable_mix_benchmarks):
@@ -989,18 +1068,10 @@ proc sendPacket(
       mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
       if ownFirstHop:
         mixProto.backOffHop(peerId, exc)
-    return err(
-      SendPacketError(
-        msg: fmt"Failed to redial next hop ({peerId}, {multiAddress}): {exc.msg}"
-      )
-    )
+    return err(fmt"Failed to redial next hop ({peerId}, {multiAddress}): {exc.msg}")
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
-    return err(
-      SendPacketError(
-        msg: fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}"
-      )
-    )
+    return err(fmt"Failed to write to next hop ({peerId}, {multiAddress}): {exc.msg}")
   except CancelledError as exc:
     raise exc
 
@@ -1051,7 +1122,7 @@ proc forwardToAddr*(T: typedesc[MixDestination], p: PeerId, address: MultiAddres
 proc init*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
   MixDestination.forwardToAddr(p, address)
 
-proc anonymizeLocalProtocolSend*(
+proc sendLocal(
     mixProto: MixProtocol,
     incoming: AsyncQueue[seq[byte]],
     msg: sink seq[byte],
@@ -1092,97 +1163,54 @@ proc anonymizeLocalProtocolSend*(
     publicKeys: seq[FieldElement] = @[]
     hop: seq[Hop] = @[]
     delays: seq[Delay] = @[]
-    exitPeerId: PeerId
 
-  # One time for the whole path, so that a node whose record reaches its
-  # maximum age meanwhile is not taken for a broken entry and removed below.
-  let now = Moment.now()
-  var poolPeerIds = mixProto.nodePool.peerIds(now)
-  let numMixNodes = poolPeerIds.len
-  var numAvailableNodes = numMixNodes
+  var candidates = mixProto.nodePool.peerIds()
 
-  if mixProto.nodePool.get(destination.peerId, now).isSome:
-    numAvailableNodes = numMixNodes - 1
+  # The draw never picks the destination.
+  let index = candidates.find(destination.peerId)
+  if index != -1:
+    candidates.del(index)
 
-  if numAvailableNodes < PathLength:
+  # A destination that is a mix node is itself the last hop, so only the hops before
+  # it are drawn.
+  let lastHop =
+    if destination.kind == MixNode:
+      let mixHop = mixProto.nodePool.getHop(destination.peerId).valueOr:
+        mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
+        return err("Destination is not a mix node with a usable address")
+      Opt.some(mixHop)
+    else:
+      Opt.none(MixHop)
+  let drawCount =
+    if lastHop.isSome():
+      PathLength - 1
+    else:
+      PathLength
+
+  if candidates.len < drawCount:
     mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
     return err(
-      fmt"No. of public mix nodes ({numAvailableNodes}) less than path length ({PathLength})."
+      "Not enough mix nodes for a send (available=" & $candidates.len & ", needed=" &
+        $drawCount & ")"
     )
 
-  var availableIndices = toSeq(0 ..< poolPeerIds.len)
+  var pathHops = ?mixProto.drawHops(candidates, drawCount, "Entry")
+  lastHop.withValue(mixHop):
+    pathHops.add(mixHop)
 
-  let index = poolPeerIds.find(destination.peerId)
-  if index != -1:
-    availableIndices.del(index)
-  elif destination.kind == MixNode:
-    # A node whose record is too old is treated as offline (Mix Key Rotation
-    # spec §5).
-    return err("Destination has no usable mix record: not in the pool, or too old")
-
-  var nextHopAddr: MultiAddress
-  var nextHopPeerId: PeerId
-  # The backed off peers that the draw of the first hop skipped.
-  var skipped: seq[int]
-  while hop.len < PathLength:
-    if availableIndices.len == 0:
-      mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
-      return err("Ran out of available mix nodes while constructing path")
-
-    let randomIndexPosition = cryptoRandomInt(mixProto.rng, availableIndices.len).valueOr:
-      mix_messages_error.inc(labelValues = ["Entry", "NON_RECOVERABLE"])
-      return err(fmt"Failed to generate random number: {error}")
-    let selectedIndex = availableIndices[randomIndexPosition]
-    var randPeerId = poolPeerIds[selectedIndex]
-    availableIndices.del(randomIndexPosition)
-
-    if hop.len == 0 and mixProto.hopIsBackedOff(randPeerId):
-      skipped.add(selectedIndex)
-      continue
-
-    if destination.kind == ForwardAddr and randPeerId == destination.peerId:
-      continue
-
-    if hop.len == PathLength - 1:
-      case destination.kind
-      of ForwardAddr:
-        exitPeerId = randPeerId
-      of MixNode:
-        exitPeerId = destination.peerId
-        randPeerId = destination.peerId
-
-    debug "Selected mix node: ", indexInPath = hop.len
-
-    let mixPubInfo = mixProto.nodePool.get(randPeerId, now).valueOr:
-      mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
-      trace "Failed to get mix pub info for peer, skipping and removing node from pool",
-        peerId = randPeerId
-      discard mixProto.nodePool.remove(randPeerId)
-      continue
-    let (peerId, multiAddr, mixPubKey, _) = mixPubInfo.get()
-
-    let multiAddrBytes = multiAddrToBytes(peerId, multiAddr).valueOr:
-      mix_messages_error.inc(labelValues = ["Entry", "INVALID_MIX_INFO"])
-      trace "Failed to convert multiaddress to bytes, skipping and removing node from pool",
-        error = error, peerId = peerId, multiAddr = multiAddr
-      discard mixProto.nodePool.remove(randPeerId)
-      continue
-
-    publicKeys.add(mixPubKey)
-
-    if hop.len == 0:
-      nextHopAddr = multiAddr
-      nextHopPeerId = peerId
-      # The later hops draw from the whole pool.
-      availableIndices.add(skipped)
-
+  let nextHopPeerId = pathHops[0].info.peerId
+  let nextHopAddr = pathHops[0].info.multiAddr
+  let exitPeerId = pathHops[^1].info.peerId
+  for i, mixHop in pathHops:
+    debug "Selected mix node: ", indexInPath = i
+    publicKeys.add(mixHop.info.mixPubKey)
     delays.add(
-      if hop.len != PathLength - 1:
+      if i != PathLength - 1:
         mixProto.delayStrategy.generateForEntry()
       else:
         NoDelay
     )
-    hop.add(Hop.init(multiAddrBytes))
+    hop.add(Hop.init(mixHop.addrBytes))
 
   # Encode destination
   let destHop =
@@ -1201,21 +1229,22 @@ proc anonymizeLocalProtocolSend*(
 
   let session = prepared.session
 
-  # Past this point the reply credentials are registered, so every failure
-  # must release them: the packet never left this process, so no reply can
-  # ever arrive to clean them up.
-  template releaseAndFail(msg: string): auto =
-    session.get(nil).release()
-    return err(msg)
+  # Past this point the reply credentials are registered. The caller gets the
+  # handle to them only when the send completes, so every other exit, a
+  # failure or a cancellation, releases them here.
+  var sent = false
+  defer:
+    if not sent:
+      session.get(nil).release()
 
   let message = buildMessage(move(prepared.msg), codec).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", error[1]])
-    releaseAndFail(fmt"Error building message: {error[0]}")
+    return err(fmt"Error building message: {error[0]}")
 
   # Wrap in Sphinx packet
   let sphinxPacket = wrapInSphinxPacket(message, publicKeys, delays, hop, destHop).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", "NON_RECOVERABLE"])
-    releaseAndFail(fmt"Failed to wrap in sphinx packet: {error}")
+    return err(fmt"Failed to wrap in sphinx packet: {error}")
 
   # Claim a slot for local origination (Mix Cover Traffic spec §6.3).
   # Claimed here rather than on entry so that validation failures above never
@@ -1225,7 +1254,7 @@ proc anonymizeLocalProtocolSend*(
     let claim = ct.slotPool.claimSlot()
     if not claim.success:
       mix_slot_claim_rejected.inc(labelValues = ["send"])
-      releaseAndFail("No slots available in current epoch")
+      return err("No slots available in current epoch")
     claimEpoch = ct.slotPool.epoch
     # Reclaim proof token from discarded cover packet for messageId reuse
     if claim.reclaimedToken.len > 0:
@@ -1233,19 +1262,51 @@ proc anonymizeLocalProtocolSend*(
         sp.reclaimProofToken(claim.reclaimedToken)
 
   # Send the wrapped message to the first mix node in the selected path
-  (await mixProto.sendPacket(nextHopPeerId, nextHopAddr, sphinxPacket, logConfig)).isOkOr:
-    # A packet that may have reached the next hop keeps its slot, matching its
-    # proof, which sendPacket only reclaims when nothing was written.
-    if error.neverWritten:
-      mixProto.coverTraffic.withValue(ct):
-        ct.slotPool.unclaimSlot(claimEpoch)
-    releaseAndFail(error.msg)
+  (
+    await mixProto.sendPacket(
+      nextHopPeerId, nextHopAddr, sphinxPacket, logConfig, claimEpoch
+    )
+  ).isOkOr:
+    return err(error)
 
+  sent = true
   return ok(session)
+
+proc anonymizeLocalProtocolSend*(
+    mixProto: MixProtocol,
+    incoming: AsyncQueue[seq[byte]],
+    msg: sink seq[byte],
+    codec: string,
+    destination: MixDestination,
+    numSurbs: uint8,
+): Future[Result[Opt[SurbSession], string]] {.
+    async: (raises: [CancelledError, LPStreamError])
+.} =
+  ## On success returns a handle to the reply credentials registered for this
+  ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
+  ## promptly when its connection closes. A send that a protocol stop cancels
+  ## returns an error.
+  if not mixProto.started:
+    return err("anonymizeLocalProtocolSend: mix protocol is not running")
+  let pending = mixProto.sendLocal(incoming, move(msg), codec, destination, numSurbs)
+  let id = mixProto.nextLocalSendId
+  mixProto.nextLocalSendId.inc()
+  mixProto.ongoingLocalSends[id] = FutureBase(pending)
+  try:
+    return await pending
+  except CancelledError as exc:
+    # `stop` cancels each pending send. The caller did not, so it gets an error.
+    if not mixProto.started:
+      return err("anonymizeLocalProtocolSend: mix protocol has stopped")
+    raise exc
+  finally:
+    mixProto.ongoingLocalSends.del(id)
 
 proc sendSurbReply*(
     mixProto: MixProtocol, surb: SURB, msg: sink seq[byte]
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  if not mixProto.started:
+    return err("sendSurbReply: mix protocol is not running")
   let (peerId, multiAddr) = surb.hop.get().bytesToMultiAddr().valueOr:
       return err("could not obtain multiaddress from hop: " & error)
 
@@ -1268,56 +1329,24 @@ proc sendSurbReply*(
 
   (
     await mixProto.sendPacket(
-      peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply)
+      peerId, multiAddr, sphinxPacket, SendPacketLogConfig(logType: Reply), claimEpoch
     )
   ).isOkOr:
-    # A packet that may have reached the next hop keeps its slot, matching its
-    # proof, which sendPacket only reclaims when nothing was written.
-    if error.neverWritten:
-      mixProto.coverTraffic.withValue(ct):
-        ct.slotPool.unclaimSlot(claimEpoch)
-    return err("could not send reply: " & error.msg)
+    return err("could not send reply: " & error)
   return ok()
-
-type PathNode = object
-  peerId: PeerId
-  multiAddr: MultiAddress
-  mixPubKey: FieldElement
 
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]
-): Result[seq[PathNode], string] {.raises: [].} =
-  let now = Moment.now()
-  let available = mixProto.nodePool.peerIds(now).filterIt(it notin excludePeerIds)
+): Result[seq[MixHop], string] {.raises: [].} =
+  let available = mixProto.nodePool.peerIds().filterIt(it notin excludePeerIds)
   if available.len < count:
+    mix_messages_error.inc(labelValues = ["Cover", "LOW_MIX_POOL"])
     return err(
       "Not enough mix nodes in pool (available=" & $available.len & ", needed=" & $count &
         ")"
     )
 
-  let firstCandidates = available.filterIt(not mixProto.hopIsBackedOff(it))
-  if firstCandidates.len == 0:
-    return err("Every first hop candidate is backed off")
-  let first = mixProto.rng.pickOne(firstCandidates).valueOr:
-    return err("No mix nodes available in pool")
-  var selectedPeerIds = @[first]
-  if count > 1:
-    let rest = mixProto.rng.pick(available.filterIt(it != first), count - 1).valueOr:
-      return err("No mix nodes available in pool")
-    selectedPeerIds.add(rest)
-
-  var selected: seq[PathNode]
-  for peerId in selectedPeerIds:
-    let mixPubInfo = mixProto.nodePool.get(peerId, now).valueOr:
-      return err("Could not get mix pub info for peer: " & $peerId)
-    selected.add(
-      PathNode(
-        peerId: mixPubInfo.peerId,
-        multiAddr: mixPubInfo.multiAddr,
-        mixPubKey: mixPubInfo.mixPubKey,
-      )
-    )
-  ok(selected)
+  mixProto.drawHops(available, count, "Cover")
 
 proc buildCoverPacket*(
     mixProto: MixProtocol, epoch: uint64
@@ -1335,10 +1364,8 @@ proc buildCoverPacket*(
     delays: seq[Delay] = @[]
 
   for node in nodes:
-    let addrBytes = multiAddrToBytes(node.peerId, node.multiAddr).valueOr:
-      return err("Failed to convert multiaddress to bytes: " & error)
-    publicKeys.add(node.mixPubKey)
-    hops.add(Hop.init(addrBytes))
+    publicKeys.add(node.info.mixPubKey)
+    hops.add(Hop.init(node.addrBytes))
     delays.add(mixProto.delayStrategy.generateForEntry())
 
   let selfAddrBytes = multiAddrToBytes(
@@ -1374,10 +1401,10 @@ proc buildCoverPacket*(
   return ok(
     CoverPacketBuild(
       packet: packetToSend,
-      firstHopPeerId: firstNode.peerId,
-      firstHopAddr: firstNode.multiAddr,
+      firstHopPeerId: firstNode.info.peerId,
+      firstHopAddr: firstNode.info.multiAddr,
       proofToken: proofToken,
-      recordsStaleAt: mixProto.nodePool.staleAt(nodes.mapIt(it.peerId)),
+      recordsStaleAt: mixProto.nodePool.staleAt(nodes.mapIt(it.info.peerId)),
     )
   )
 
@@ -1391,15 +1418,15 @@ proc buildCoverPacket*(
 
 proc generateAndAppendCoverProof(
     mixProto: MixProtocol, packet: seq[byte], epoch: Opt[uint64]
-): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
   if mixProto.spamProtection.isSome() and
       not mixProto.spamProtection.get().precomputeCoverProofs():
     let proved = await mixProto.generateAndAppendProof(packet, "Cover", epoch)
     return proved.map(
-      proc(value: auto): seq[byte] =
-        value.packet
+      proc(value: auto): CoverProofResult =
+        CoverProofResult(packet: value.packet, proofToken: value.proofToken)
     )
-  return ok(packet)
+  return ok(CoverProofResult(packet: packet))
 
 proc writeCoverPacket(
     mixProto: MixProtocol, peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte]
@@ -1425,33 +1452,58 @@ proc sendCoverPacket*(
     packet: seq[byte],
     epoch: Opt[uint64] = Opt.none(uint64),
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  if not mixProto.started:
+    return err("sendCoverPacket: mix protocol is not running")
   let proved = (await mixProto.generateAndAppendCoverProof(packet, epoch)).valueOr:
     return err(error)
-  return await mixProto.writeCoverPacket(peerId, multiAddr, proved)
+  return await mixProto.writeCoverPacket(peerId, multiAddr, proved.packet)
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
   if mixProto.keyRing.isSome():
     mixProto.keyRing.get().start()
+  mixProto.tagManager.start()
+  mixProto.surbStore.start()
+  if mixProto.poolSizeLoop.isNil or mixProto.poolSizeLoop.finished:
+    mixProto.poolSizeLoop = mixProto.runPoolSizeLoop()
   mixProto.coverTraffic.withValue(ct):
     await ct.start()
 
 method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
-  ## Stop the MixProtocol background tasks, cancel the in-flight
-  ## handleMixMessages futures and the hop dials, and close a stream whose dial
-  ## completes after the stop began.
+  ## Stop the cover traffic, cancel the hop dials, the pending sends and the
+  ## in-flight handleMixMessages futures, close the hop streams, then stop the
+  ## `mix_pool_size` timer and the stores.
   mixProto.coverTraffic.withValue(ct):
     await ct.stop()
   mixProto.started = false
+
+  # The dials go first. A send that waits on its first dial then ends on its
+  # dial failure path, which refunds its slot and its proof.
   # An entry of `dialing` is the future of a dial and the addresses of that dial.
   # The mapIt takes the futures, and the stop cancels them below.
   let dials = toSeq(mixProto.dialing.values).mapIt(it.dial)
+  if dials.len > 0:
+    await noCancel allFutures(dials.mapIt(it.cancelAndWait()))
+  for dial in dials:
+    if dial.completed():
+      await dial.value.close()
 
-  # Cancelling fires the completion callback, which deletes from this table.
-  let pending = toSeq(mixProto.ongoingMixMessages.values)
+  # Cancelling makes each send and each handler delete its own entry.
+  let pending =
+    toSeq(mixProto.ongoingLocalSends.values) &
+    toSeq(mixProto.ongoingMixMessages.values).mapIt(FutureBase(it))
+  mixProto.ongoingLocalSends.clear()
   mixProto.ongoingMixMessages.clear()
   if pending.len > 0:
     await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
+
+  let streams = toSeq(mixProto.connPool.values)
+  mixProto.connPool.clear()
+  if streams.len > 0:
+    await noCancel allFutures(streams.mapIt(it.close()))
+
+  if not mixProto.poolSizeLoop.isNil:
+    await mixProto.poolSizeLoop.cancelAndWait()
 
   await mixProto.tagManager.stop()
 
@@ -1460,12 +1512,6 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
 
   await mixProto.surbStore.stop()
   mixProto.surbStore.clear()
-
-  if dials.len > 0:
-    await noCancel allFutures(dials.mapIt(it.cancelAndWait()))
-  for dial in dials:
-    if dial.completed():
-      await dial.value.close()
 
 proc init*(
     mixProto: MixProtocol,
@@ -1477,6 +1523,7 @@ proc init*(
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
     hopBackoff: Duration = DefaultHopBackoff,
+    hopAddressPolicy: PeerAddressPolicy = defaultAddressPolicy,
     keyRing: Opt[MixKeyRing] = Opt.none(MixKeyRing),
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
@@ -1496,6 +1543,25 @@ proc init*(
   ## Mix node public keys should be populated via the nodePool after
   ## initialization using `mixProto.nodePool.add(mixPubInfo)`.
   ##
+  ## `hopAddressPolicy` decides which of a pool member's addresses Mix can use as
+  ## its hop address. This node leaves a pool member off every path it builds
+  ## while the policy accepts none of its addresses. The default policy accepts
+  ## any address, and so does a nil policy.
+  ##
+  ## The policy does not apply to the address of this node or to a destination
+  ## address, because the library does not select these addresses. The host
+  ## gives the address of this node in `mixNodeInfo` or with
+  ## `setLocalMultiAddr`. The caller of a send gives the destination address.
+  ## In each case the library has one address and no other address to use in
+  ## its place. So the host makes sure that other nodes can dial the address
+  ## of this node. If they cannot, no reply and no cover packet comes back to
+  ## this node. A destination that is a mix node has no address from the
+  ## caller. It is a pool member, so the policy applies to it.
+  ##
+  ## The policy also does not apply to an address that this node reads from
+  ## the header of a packet that it forwards. The sender of that packet built
+  ## the path.
+  ##
   ## Default delay strategy is `ExponentialDelayStrategy` (mean 100 ms for both
   ## per-hop encoding and the sender pre-send hold). When `spamProtection` is
   ## enabled the default is `SpamProtectionDelayStrategy` instead (same means,
@@ -1503,6 +1569,9 @@ proc init*(
   ## delays and set the send time.
   ##
   ## A first hop that fails a dial is not the first hop for `hopBackoff`.
+  ##
+  ## From `start` to `stop`, a timer sets `mix_pool_size` to the number of pool
+  ## members that a path can use, once per `PoolSizeUpdateInterval`.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
@@ -1534,6 +1603,7 @@ proc init*(
   mixProto.rng = switch.rng
   mixProto.nodePool = MixNodePool.new(
     switch.peerStore,
+    hopAddressPolicy,
     keyRing.map(
       proc(ring: MixKeyRing): Duration =
         ring.config.rotationInterval
@@ -1562,7 +1632,7 @@ proc init*(
     ct.setCoverProofGenerator(
       proc(
           packet: seq[byte], epoch: uint64
-      ): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+      ): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
         return await mixProto.generateAndAppendCoverProof(packet, Opt.some(epoch))
     )
     ct.setCoverPacketSender(
@@ -1632,6 +1702,7 @@ proc new*(
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
     hopBackoff: Duration = DefaultHopBackoff,
+    hopAddressPolicy: PeerAddressPolicy = defaultAddressPolicy,
     keyRing: Opt[MixKeyRing] = Opt.none(MixKeyRing),
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
@@ -1645,6 +1716,6 @@ proc new*(
   let mixProto = new(T)
   mixProto.init(
     mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic,
-    surbStore, hopBackoff, keyRing,
+    surbStore, hopBackoff, hopAddressPolicy, keyRing,
   )
   mixProto
