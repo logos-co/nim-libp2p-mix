@@ -1,14 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 # Copyright (c) Status Research & Development GmbH
 
-## Session candidate identities, independent of their source and routing metadata.
-## Path sampling and forward/SURB position mapping will follow separately.
+## Session candidate identities and path selection relative to the initiator.
 
-import std/sets
+import std/[sets, tables, algorithm]
 import results
 import libp2p/peerid
 import libp2p/crypto/rng
-import ./[path_selection, mix_node, serialization]
+import ./[path_selection, mix_node, serialization, pool]
 
 type SessionPathState* = object
   ## Sets are ordered from the initiator outward and stay fixed for the session.
@@ -68,3 +67,60 @@ proc sampleSessionState*(
       ids.add(sampled[position * candidatesPerHop + offset].peerId)
     sets.add(ids)
   SessionPathState.init(sets)
+
+type SessionPathSelector* = ref object of PathSelector
+  state: SessionPathState
+  rng: Rng
+
+proc new*(
+    T: typedesc[SessionPathSelector], nodePool: MixNodePool, rng: Rng,
+    state: SessionPathState,
+): Result[T, string] =
+  ## One instance per logical session. Candidate sets cannot be replenished.
+  if nodePool.isNil:
+    return err("missing mix node pool")
+  if rng.isNil:
+    return err("missing CSPRNG")
+  if state.candidateSets.len == 0:
+    return err("empty session path state")
+  ok(T(nodePool: nodePool, rng: rng, state: state))
+
+method samplePath*(
+    selector: SessionPathSelector, request: PathRequest
+): Result[MixPath, string] {.gcsafe, raises: [].} =
+  ## selectPath validates the request and the completed path around this method.
+  if request.purpose == PathPurpose.Cover:
+    return err("session selector does not support cover paths")
+  if selector.rng.isNil:
+    return err("missing CSPRNG")
+  if selector.state.candidateSets.len == 0:
+    return err("empty session path state")
+
+  var (path, excludedIds) = prepareFixedHops(request)
+  var positions: seq[int]
+  for position in 0 ..< request.pathLength:
+    if not request.constraints.fixedHops.hasKey(position):
+      positions.add(position)
+  let sessionHops = selector.state.candidateSets.len
+  if positions.len < sessionHops:
+    return err("not enough unfilled positions for session candidate sets")
+  if request.purpose == PathPurpose.Surb:
+    positions.reverse()
+
+  for index, ids in selector.state.candidateSets:
+    let candidates = resolveCandidates(selector.nodePool, ids, excludedIds)
+    if candidates.len == 0:
+      return err("no usable candidates in session set for this request")
+    let node = (?pickRandomNodes(selector.rng, candidates, 1))[0]
+    path[positions[index]] = node
+    excludedIds.incl(node.peerId)
+
+  let randomHops = positions.len - sessionHops
+  if randomHops > 0:
+    let candidates = resolveCandidates(
+      selector.nodePool, selector.nodePool.peerIds(), excludedIds
+    )
+    let sampled = ?pickRandomNodes(selector.rng, candidates, randomHops)
+    for index, node in sampled:
+      path[positions[sessionHops + index]] = node
+  ok(path)

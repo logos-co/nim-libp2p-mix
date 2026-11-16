@@ -8,8 +8,7 @@ import chronos, results
 import libp2p/[multiaddress, peerstore, peerid]
 import libp2p/crypto/secp
 import libp2p_mix
-import libp2p_mix/[serialization, tag_manager, surb_store, mix_protocol]
-import libp2p_mix/session_path_selection
+import libp2p_mix/[serialization, tag_manager, surb_store, mix_protocol, multiaddr]
 import ./utils
 import ./tools/[unittest, crypto]
 
@@ -333,6 +332,99 @@ suite "Session candidate-set initialization":
     check sampleSessionState(nodes, nil, 2, 3).error == "missing CSPRNG"
     check sampleSessionState([], rng(), 2, 3).isErr
 
+suite "Session path selection":
+  var
+    pool: MixNodePool
+    nodes: seq[MixPubInfo]
+    state: SessionPathState
+    request: PathRequest
+
+  setup:
+    pool = MixNodePool.new(PeerStore.new())
+    nodes = MixNodeInfo.generateRandomMany(MaxPathLength + 3, rng()).mapIt(it.toMixPubInfo())
+    pool.add(nodes[0 ..< nodes.high])
+    state = SessionPathState.init(@[@[nodes[0].peerId], @[nodes[1].peerId]]).get()
+    request = PathRequest(purpose: PathPurpose.Forward, pathLength: DefaultPathLength)
+    request.constraints.fixedHops[2] = nodes[^1]
+
+  test "sets stay nearest the initiator in forward and SURB paths at supported lengths":
+    for count in 1 .. 2:
+      let sets = state.candidateSets()[0 ..< count]
+      let selector = SessionPathSelector.new(pool, rng(), SessionPathState.init(sets).get()).get()
+      for length in MinPathLength .. MaxPathLength:
+        request.pathLength = length
+        request.constraints.fixedHops.clear()
+        request.constraints.fixedHops[length - 1] = nodes[^1]
+        for purpose in [PathPurpose.Forward, PathPurpose.Surb]:
+          request.purpose = purpose
+          let path = selector.selectPath(request).get()
+          check path[^1] == nodes[^1]
+          for index in 0 ..< count:
+            let position = if purpose == PathPurpose.Forward: index else: length - 2 - index
+            check path[position] == nodes[index]
+
+  test "fixed hops and exclusions apply before choosing from session sets":
+    state = SessionPathState.init(@[
+      @[nodes[0].peerId, nodes[2].peerId], @[nodes[1].peerId, nodes[3].peerId]
+    ]).get()
+    let selector = SessionPathSelector.new(pool, rng(), state).get()
+    request.pathLength = 4
+    request.constraints.fixedHops.clear()
+    request.constraints.fixedHops[1] = nodes[0]
+    request.constraints.fixedHops[3] = nodes[^1]
+    request.constraints.excludedNodeIds = [nodes[0].peerId, nodes[1].peerId].toHashSet
+    check selector.selectPath(request).get() == @[nodes[2], nodes[0], nodes[3], nodes[^1]]
+    request.purpose = PathPurpose.Surb
+    check selector.selectPath(request).get() == @[nodes[3], nodes[0], nodes[2], nodes[^1]]
+
+  test "unavailable session candidates fail only the request and recover without replacing sets":
+    state = SessionPathState.init(@[
+      @[nodes[0].peerId, nodes[2].peerId], @[nodes[1].peerId]
+    ]).get()
+    let selector = SessionPathSelector.new(pool, rng(), state).get()
+    var invalid = nodes[0]
+    invalid.mixPubKey = default(typeof(invalid.mixPubKey))
+    pool.add(invalid)
+    var updated = nodes[2]
+    updated.mixPubKey[0] = updated.mixPubKey[0] xor 1.byte
+    pool.add(updated)
+    check selector.selectPath(request).get()[0] == updated
+    require pool.remove(nodes[2].peerId)
+    check selector.selectPath(request).error == "no usable candidates in session set for this request"
+    pool.add(updated)
+    check selector.selectPath(request).get() == @[updated, nodes[1], nodes[^1]]
+    check pool.len == nodes.len - 1
+    # Retry the same selector and candidate sets when request exclusions change.
+    request.constraints.excludedNodeIds = [nodes[0].peerId, nodes[2].peerId].toHashSet
+    check selector.selectPath(request).error == "no usable candidates in session set for this request"
+    request.constraints.excludedNodeIds.clear()
+    check selector.selectPath(request).get() == @[updated, nodes[1], nodes[^1]]
+
+  test "invalid setup and incompatible requests fail without ending a valid session":
+    check SessionPathSelector.new(nil, rng(), state).isErr
+    check SessionPathSelector.new(pool, nil, state).isErr
+    check SessionPathSelector.new(pool, rng(), SessionPathState()).isErr
+    let selector = SessionPathSelector.new(pool, rng(), state).get()
+    request.constraints.fixedHops[0] = nodes[3]
+    check selector.selectPath(request).error == "not enough unfilled positions for session candidate sets"
+    request.constraints.fixedHops.del(0)
+    request.purpose = PathPurpose.Cover
+    check selector.selectPath(request).error == "session selector does not support cover paths"
+    request.purpose = PathPurpose.Forward
+    check selector.selectPath(request).isOk
+
+  test "shortage for unrestricted random hops does not replace sets or end the session":
+    pool = MixNodePool.new(PeerStore.new())
+    pool.add(nodes[0 .. 1])
+    let selector = SessionPathSelector.new(pool, rng(), state).get()
+    request.pathLength = 4
+    request.constraints.fixedHops.clear()
+    request.constraints.fixedHops[3] = nodes[^1]
+    check selector.selectPath(request).error == "not enough usable mix nodes"
+    check pool.len == 2
+    pool.add(nodes[2])
+    check selector.selectPath(request).get() == @[nodes[0], nodes[1], nodes[2], nodes[^1]]
+
 # Save the requests received from Mix so tests can inspect their constraints.
 # Return a deliberate error to stop execution before network transmission.
 type RecordingSelector = ref object of PathSelector
@@ -410,6 +502,15 @@ suite "Mix path selection integration":
     let cover = shared.requests[^1]
     check cover.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == nodes[0]
     check cover.constraints.excludedNodeIds == [nodes[0].peerId].toHashSet
+
+  test "createSurb builds a reply block using a concrete session selector":
+    let state = SessionPathState.init(@[@[nodes[1].peerId], @[nodes[2].peerId]]).get()
+    let selector = SessionPathSelector.new(mix.nodePool, rng(), state).get()
+    let reply = mix.createSurb(MixDestination.exitNode(nodes[4].peerId), selector).get()
+    let firstHop = bytesToMultiAddr(reply.surb.hop.get()).get()
+    check firstHop[0] == nodes[2].peerId
+    check shared.requests.len == 0
+    check mix.defaultPathSelector == shared
 
   test "legacy sends reuse the selector for SURBs and exclude the selected forward exit":
     session.forwardPath = nodes[1 .. 3]

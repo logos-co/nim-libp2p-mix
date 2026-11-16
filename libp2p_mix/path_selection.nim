@@ -76,7 +76,7 @@ proc new*(T: typedesc[RandomPathSelector], nodePool: MixNodePool, rng: Rng): T =
   doAssert not rng.isNil, "path selection requires a CSPRNG"
   T(nodePool: nodePool, rng: rng)
 
-proc prepareFixedHops(
+proc prepareFixedHops*(
     request: PathRequest
 ): tuple[path: MixPath, excludedIds: HashSet[PeerId]] =
   ## The request has already been validated by selectPath.
@@ -91,7 +91,7 @@ proc resolveCandidates*(
     pool: MixNodePool, candidateIds: openArray[PeerId], excludedIds: HashSet[PeerId]
 ): seq[MixPubInfo] =
   ## The strategy supplies distinct identities: the whole pool for random
-  ## selection, or a stored candidate set for a future session strategy.
+  ## selection, or a stored candidate set for a session strategy.
   ## Resolve current routing information without changing pool membership.
   for peerId in candidateIds:
     if peerId in excludedIds:
