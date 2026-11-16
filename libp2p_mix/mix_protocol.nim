@@ -1175,9 +1175,13 @@ proc sendLocal(
   # it are drawn.
   let lastHop =
     if destination.kind == MixNode:
+      # A node whose record is too old is treated as offline (Mix Key Rotation
+      # spec §5).
       let mixHop = mixProto.nodePool.getHop(destination.peerId).valueOr:
         mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
-        return err("Destination is not a mix node with a usable address")
+        return err(
+          "Destination is not a mix node with a usable address and a current record"
+        )
       Opt.some(mixHop)
     else:
       Opt.none(MixHop)
