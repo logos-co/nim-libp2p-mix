@@ -1053,7 +1053,8 @@ proc anonymizeLocalProtocolSend*(
   if candidates.len < drawCount:
     mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
     return err(
-      fmt"No. of public mix nodes ({candidates.len}) less than the hops to draw ({drawCount})."
+      "Not enough mix nodes for a send (available=" & $candidates.len & ", needed=" &
+        $drawCount & ")"
     )
 
   var pathHops = ?mixProto.drawHops(candidates, drawCount, "Entry")

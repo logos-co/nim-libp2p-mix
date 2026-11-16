@@ -451,7 +451,7 @@ suite "Mix Protocol - Node Failures":
     )
     check:
       sent.isErr
-      sent.error.startsWith("No. of public mix nodes (2)")
+      sent.error.startsWith("Not enough mix nodes for a send (available=2,")
 
   asyncTest "a send that runs out of usable members counts LOW_MIX_POOL":
     ## The sender's pool holds two usable members and one with no hop address, but a
@@ -687,7 +687,7 @@ suite "Mix Protocol - Node Failures":
       )
       check:
         sent.isErr
-        sent.error.startsWith("No. of public mix nodes (1)")
+        sent.error.startsWith("Not enough mix nodes for a send (available=1,")
         errorCount("Entry", "LOW_MIX_POOL") == lowPoolBefore + 1
 
     asyncTest "a send to an exit with no address that the policy accepts fails at once":
