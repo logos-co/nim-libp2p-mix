@@ -868,10 +868,8 @@ proc sendPacket(
   ## Applies the sender pre-send delay (mix.md §8.5.2 step 3.f) before the
   ## first-hop write to break burst timing correlation.
   ##
-  ## `claimEpoch` is the epoch of the slot that the caller claimed for this
-  ## packet, on a node with cover traffic. An error or a cancel before the first
-  ## write refunds that slot and reclaims the proof, except when the cancel ends
-  ## the proof generation, which keeps the slot.
+  ## `claimEpoch` is the epoch of the caller's slot claim. The slot is refunded
+  ## if nothing was written.
 
   let label = $logConfig.logType
   let serialized = sphinxPacket.serialize()
