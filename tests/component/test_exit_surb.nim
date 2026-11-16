@@ -73,6 +73,7 @@ suite "Exit SURB hold time":
       replies,
     )
     defer:
+      respond.fire()
       await exit.stop()
       await dest.stop()
 
