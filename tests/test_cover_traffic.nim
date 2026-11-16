@@ -31,6 +31,45 @@ proc mockBuildCoverPacket(): BuildCoverPacketProc =
       )
     )
 
+proc mockBuildCoverPacketNoToken(): BuildCoverPacketProc =
+  ## A build with no proof, as for a provider that proves cover at transmission.
+  let (pid, ma) = makePeerInfo()
+  return proc(
+      epoch: uint64
+  ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+    return ok(
+      CoverPacketBuild(
+        packet: newSeq[byte](PacketSize), firstHopPeerId: pid, firstHopAddr: ma
+      )
+    )
+
+proc mockProofAtSend(proved: AsyncEvent): GenerateAndAppendCoverProofProc =
+  ## Proves at transmission with the token 0x55, and fires `proved`.
+  return proc(
+      packet: seq[byte], epoch: uint64
+  ): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
+    proved.fire()
+    return ok(CoverProofResult(packet: packet, proofToken: @[0x55.byte]))
+
+proc mockPendingProofAtSend(started: AsyncEvent): GenerateAndAppendCoverProofProc =
+  ## Starts a proof at transmission that never finishes, and fires `started`.
+  return proc(
+      packet: seq[byte], epoch: uint64
+  ): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
+    started.fire()
+    await newAsyncEvent().wait()
+    return ok(CoverProofResult(packet: packet, proofToken: @[0x55.byte]))
+
+proc mockGatedProofAtSend(started, gate: AsyncEvent): GenerateAndAppendCoverProofProc =
+  ## Starts a proof at transmission, fires `started`, and finishes with the token
+  ## 0x66 when `gate` fires.
+  return proc(
+      packet: seq[byte], epoch: uint64
+  ): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
+    started.fire()
+    await gate.wait()
+    return ok(CoverProofResult(packet: packet, proofToken: @[0x66.byte]))
+
 proc mockBuildCoverPacketFailing(): BuildCoverPacketProc =
   return proc(
       epoch: uint64
@@ -621,7 +660,11 @@ type PendingCover = object
   sent: ref seq[seq[byte]]
 
 proc pendingBeforeSend(
-    precomputation = false, builder = mockBuildCoverPacket()
+    precomputation = false,
+    builder = mockBuildCoverPacket(),
+    generator: GenerateAndAppendCoverProofProc = nil,
+    hold = Delay(60_000),
+    staleProof = false,
 ): PendingCover =
   ## The emission waits before its send.
   let
@@ -632,11 +675,18 @@ proc pendingBeforeSend(
       totalSlots = 10, epochDuration = 1.seconds, enablePrecomputation = precomputation
     )
   ct.setCoverPacketBuilder(builder)
+  if not generator.isNil:
+    ct.setCoverProofGenerator(generator)
+  if staleProof:
+    ct.setProofTokenValidator(
+      proc(token: seq[byte]): bool {.gcsafe, raises: [].} =
+        false
+    )
   ct.setCoverPacketSender(mockSendCoverPacket(sent))
   ct.setSendDelaySampler(
     proc(): Delay {.gcsafe, raises: [].} =
       started.fire()
-      Delay(60_000)
+      hold
   )
   ct.setProofTokenReclaimer(
     proc(token: seq[byte]) {.gcsafe, raises: [].} =
@@ -701,8 +751,8 @@ suite "ConstantRateCoverTraffic cancelled emission":
       cover.sent[].len == 0
 
   asyncTest "prebuilt packet without token cancelled before send keeps slot":
-    ## A cover proof that is generated at transmission gives no token, and it may
-    ## have used a message ID.
+    ## With spam protection, a packet with no token keeps its slot, because a
+    ## proof may have used a message ID.
     let cover = pendingBeforeSend(precomputation = true)
     cover.ct.addPrebuilt(@[])
 
@@ -726,6 +776,115 @@ suite "ConstantRateCoverTraffic cancelled emission":
       cover.reclaimed[] == @[@[0x42.byte]]
       cover.ct.slotPool.coverClaimed == 0
       cover.sent[].len == 0
+
+  asyncTest "on-demand packet proved at send cancelled before send returns slot and reclaims token":
+    let proved = newAsyncEvent()
+    let cover = pendingBeforeSend(
+      builder = mockBuildCoverPacketNoToken(), generator = mockProofAtSend(proved)
+    )
+
+    let emission = cover.ct.emitCoverPacket()
+    await proved.wait().wait(5.seconds)
+    check cover.ct.slotPool.coverClaimed == 1
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[] == @[@[0x55.byte]]
+      cover.ct.slotPool.coverClaimed == 0
+      cover.sent[].len == 0
+
+  asyncTest "prebuilt packet proved at send cancelled before send returns slot and reclaims token":
+    let proved = newAsyncEvent()
+    let cover =
+      pendingBeforeSend(precomputation = true, generator = mockProofAtSend(proved))
+    cover.ct.addPrebuilt(@[])
+
+    let emission = cover.ct.emitCoverPacket()
+    await proved.wait().wait(5.seconds)
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[] == @[@[0x55.byte]]
+      cover.ct.slotPool.coverClaimed == 0
+      cover.sent[].len == 0
+
+  asyncTest "packet cancelled during proof at send keeps slot":
+    let started = newAsyncEvent()
+    let cover = pendingBeforeSend(
+      builder = mockBuildCoverPacketNoToken(),
+      generator = mockPendingProofAtSend(started),
+    )
+
+    let emission = cover.ct.emitCoverPacket()
+    await started.wait().wait(5.seconds)
+
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[].len == 0
+      cover.ct.slotPool.coverClaimed == 1
+
+  asyncTest "packet proved at send as cancel comes returns slot and reclaims token":
+    let (proofStarted, gate) = (newAsyncEvent(), newAsyncEvent())
+    let cover = pendingBeforeSend(
+      builder = mockBuildCoverPacketNoToken(),
+      generator = mockGatedProofAtSend(proofStarted, gate),
+    )
+
+    let emission = cover.ct.emitCoverPacket()
+    await proofStarted.wait().wait(5.seconds)
+    check cover.ct.slotPool.coverClaimed == 1
+
+    gate.fire()
+    await emission.cancelAndWait()
+    check:
+      cover.reclaimed[] == @[@[0x66.byte]]
+      cover.ct.slotPool.coverClaimed == 0
+      cover.sent[].len == 0
+
+  asyncTest "on-demand packet proved at send held across epoch change reclaims token":
+    let proved = newAsyncEvent()
+    let cover = pendingBeforeSend(
+      builder = mockBuildCoverPacketNoToken(),
+      generator = mockProofAtSend(proved),
+      hold = Delay(100),
+    )
+
+    let emission = cover.ct.emitCoverPacket()
+    await proved.wait().wait(5.seconds)
+    cover.ct.onEpochChange(2)
+    await emission.wait(5.seconds)
+    check:
+      cover.reclaimed[] == @[@[0x55.byte]]
+      cover.sent[].len == 0
+
+  asyncTest "prebuilt packet proved at send held across epoch change reclaims token":
+    let proved = newAsyncEvent()
+    let cover = pendingBeforeSend(
+      precomputation = true, generator = mockProofAtSend(proved), hold = Delay(100)
+    )
+    cover.ct.addPrebuilt(@[])
+
+    let emission = cover.ct.emitCoverPacket()
+    await proved.wait().wait(5.seconds)
+    cover.ct.onEpochChange(2)
+    await emission.wait(5.seconds)
+    check:
+      cover.reclaimed[] == @[@[0x55.byte]]
+      cover.sent[].len == 0
+
+  asyncTest "stale prebuilt packet reclaims token of its proof at send before rebuild":
+    let cover = pendingBeforeSend(
+      precomputation = true,
+      generator = mockProofAtSend(newAsyncEvent()),
+      hold = Delay(0),
+      staleProof = true,
+    )
+    cover.ct.addPrebuilt(@[0x7A.byte])
+
+    await cover.ct.emitCoverPacket().wait(5.seconds)
+    check:
+      cover.reclaimed[] == @[@[0x7A.byte], @[0x55.byte]]
+      cover.sent[].len == 1
 
   asyncTest "packet cancelled after epoch change reclaims token, returns no slot":
     let cover = pendingBeforeSend()

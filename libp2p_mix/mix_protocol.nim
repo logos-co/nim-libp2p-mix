@@ -1307,15 +1307,15 @@ proc buildCoverPacket*(
 
 proc generateAndAppendCoverProof(
     mixProto: MixProtocol, packet: seq[byte], epoch: Opt[uint64]
-): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
   if mixProto.spamProtection.isSome() and
       not mixProto.spamProtection.get().precomputeCoverProofs():
     let proved = await mixProto.generateAndAppendProof(packet, "Cover", epoch)
     return proved.map(
-      proc(value: auto): seq[byte] =
-        value.packet
+      proc(value: auto): CoverProofResult =
+        CoverProofResult(packet: value.packet, proofToken: value.proofToken)
     )
-  return ok(packet)
+  return ok(CoverProofResult(packet: packet))
 
 proc writeCoverPacket(
     mixProto: MixProtocol, peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte]
@@ -1345,7 +1345,7 @@ proc sendCoverPacket*(
     return err("sendCoverPacket: mix protocol is not running")
   let proved = (await mixProto.generateAndAppendCoverProof(packet, epoch)).valueOr:
     return err(error)
-  return await mixProto.writeCoverPacket(peerId, multiAddr, proved)
+  return await mixProto.writeCoverPacket(peerId, multiAddr, proved.packet)
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
@@ -1488,7 +1488,7 @@ proc init*(
     ct.setCoverProofGenerator(
       proc(
           packet: seq[byte], epoch: uint64
-      ): Future[Result[seq[byte], string]] {.async: (raises: [CancelledError]).} =
+      ): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
         return await mixProto.generateAndAppendCoverProof(packet, Opt.some(epoch))
     )
     ct.setCoverPacketSender(
