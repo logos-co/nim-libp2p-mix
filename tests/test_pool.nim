@@ -278,6 +278,19 @@ suite "MixNodePool record age":
       pool.len == 0
       pool.get(info.peerId).isNone
 
+  test "several entries become too old when the first of them does":
+    let pool = MixNodePool.new(peerStore, Opt.some(MaxAge))
+    let (first, second) = (mixNodes[0].toMixPubInfo(), mixNodes[1].toMixPubInfo())
+    pool.add(first)
+    pool.add(second)
+    let firstStaleAt = pool.staleAt(first.peerId).get()
+    check pool.staleAt([second.peerId, first.peerId]) == Opt.some(firstStaleAt)
+
+    check pool.remove(second.peerId)
+    check:
+      pool.staleAt([second.peerId, first.peerId]) == Opt.some(firstStaleAt)
+      pool.staleAt([second.peerId]).isNone
+
   test "a removed entry has no age":
     let pool = MixNodePool.new(peerStore, Opt.some(MaxAge))
     let info = mixNodes[0].toMixPubInfo()

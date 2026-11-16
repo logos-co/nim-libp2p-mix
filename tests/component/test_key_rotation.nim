@@ -225,19 +225,21 @@ suite "Mix Protocol - Key Rotation":
     let receivedMsg = await nrProto.receivedMessages.get().wait(2.seconds)
     check receivedMsg.data == data
 
-  asyncTest "SURB credentials expire when the SURB's keys may no longer be accepted":
+  asyncTest "SURB credentials expire G - D after obtaining the records the SURB uses":
     let config = fastRotationConfig()
     let store = SurbStore.new(autoStart = false)
     let (destNode, nrProto) = await setupDestNode(NoReplyProtocol.new())
     defer:
       await stopDestNode(destNode)
 
+    let beforeSetup = Moment.now()
     let (nodes, _, _) = setupKeyRotationNodes(
       10,
       destReadBehavior = Opt.some((codec: nrProto.codec, callback: readLp(1024))),
       config = config,
       senderSurbStore = store,
     )
+    let afterSetup = Moment.now()
     startAndDeferStop(nodes)
 
     let conn = nodes[0]
@@ -249,14 +251,14 @@ suite "Mix Protocol - Key Rotation":
       .expect("could not build connection")
     defer:
       await conn.close()
-    let beforeSend = Moment.now()
     await conn.writeLp(@[1.byte])
-    let afterSend = Moment.now()
 
+    # The pools obtained every record during setup. G - D is U + (G - U - D).
+    let untilExpiry = config.rotationInterval + config.surbLifetime
     check:
       store.len == 1
-      store.purgeExpired(beforeSend + config.surbLifetime - 1.milliseconds) == 0
-      store.purgeExpired(afterSend + config.surbLifetime) == 1
+      store.purgeExpired(beforeSetup + untilExpiry - 1.milliseconds) == 0
+      store.purgeExpired(afterSetup + untilExpiry) == 1
 
   asyncTest "a cover packet records when its oldest record becomes too old":
     let (nodes, _, _) = setupKeyRotationNodes(10)

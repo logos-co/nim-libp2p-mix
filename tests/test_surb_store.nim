@@ -128,12 +128,11 @@ suite "SURB Store":
       creds.surbKey.allIt(it == 0)
       creds.surbSecret.allIt(it.allIt(it == 0))
 
-  test "a group expires after its lifetime when shorter than the TTL":
-    let igroup = store.newGroup(base, lifetime = chronos.minutes(10))
-    check:
-      igroup.expiresAt == base + chronos.minutes(10)
-      store.newGroup(base, lifetime = chronos.hours(1)).expiresAt ==
-        base + chronos.minutes(30)
+  test "a group expires by the soonest deadline it is given":
+    let igroup = store.newGroup(base)
+    igroup.expireBy(base + chronos.minutes(10))
+    igroup.expireBy(base + chronos.hours(1))
+    check igroup.expiresAt == base + chronos.minutes(10)
 
   test "purge only removes groups past their own deadline":
     let old = store.newGroup(base)

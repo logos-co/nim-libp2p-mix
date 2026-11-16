@@ -36,7 +36,7 @@ type MockMixProtocol* = ref object of MixProtocol
 
 method buildSurb*(
     mock: MockMixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
-): Result[SURB, string] {.gcsafe, raises: [].} =
+): Result[SurbBuild, string] {.gcsafe, raises: [].} =
   # No forced paths configured or all sets consumed — fall back to random selection
   if mock.surbPeerSets.len == 0 or mock.surbCallIndex >= mock.surbPeerSets.len:
     return procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId)

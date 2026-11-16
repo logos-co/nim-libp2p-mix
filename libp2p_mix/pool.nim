@@ -81,6 +81,18 @@ proc staleAt*(pool: MixNodePool, peerId: PeerId): Opt[Moment] {.raises: [].} =
     return Opt.some(obtainedAt[] + maxAge)
   Opt.none(Moment)
 
+proc staleAt*(
+    pool: MixNodePool, peerIds: openArray[PeerId]
+): Opt[Moment] {.raises: [].} =
+  ## When the first of these nodes' entries becomes too old, or none if none of
+  ## them has an age.
+  var first = Opt.none(Moment)
+  for peerId in peerIds:
+    let staleAt = pool.staleAt(peerId).valueOr:
+      continue
+    first = Opt.some(min(staleAt, first.get(staleAt)))
+  first
+
 proc isFresh(pool: MixNodePool, peerId: PeerId, now: Moment): bool {.raises: [].} =
   let maxAge = pool.maxRecordAge.valueOr:
     return true

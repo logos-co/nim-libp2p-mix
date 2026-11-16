@@ -732,13 +732,21 @@ proc getMaxMessageSizeForCodec*(
     return err("cannot encode messages for this codec")
   return ok(DataSize - totalLen)
 
+type SurbBuild* = object
+  surb*: SURB
+  credentialsExpireAt*: Opt[Moment]
+    ## When the reply credentials must be unrecoverable: G - D after obtaining
+    ## the oldest record of the other hops on the SURB's return path (Mix Key
+    ## Rotation spec §7), none without a key ring
+
 method buildSurb*(
     mixProto: MixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
-): Result[SURB, string] {.base, gcsafe, raises: [].} =
+): Result[SurbBuild, string] {.base, gcsafe, raises: [].} =
   var
     publicKeys: seq[FieldElement] = @[]
     hops: seq[Hop] = @[]
     delays: seq[Delay] = @[]
+    pathPeerIds: seq[PeerId] = @[]
 
   # One time for the whole path, so that the pool lists and returns the same
   # nodes even when a record reaches its maximum age meanwhile.
@@ -763,6 +771,7 @@ method buildSurb*(
         debug "Selected mix node for surbs: ", indexInPath = i
         let mixPubInfo = mixProto.nodePool.get(randPeerId, now).valueOr:
           return err("could not get mix pub info for peer: " & $randPeerId)
+        pathPeerIds.add(randPeerId)
         (
           mixPubInfo.peerId,
           mixPubInfo.multiAddr,
@@ -787,7 +796,22 @@ method buildSurb*(
 
     delays.add(hopDelay)
 
-  return createSURB(publicKeys, delays, hops, id, mixProto.rng)
+  var surb = ?createSURB(publicKeys, delays, hops, id, mixProto.rng)
+  let ring = mixProto.keyRing.valueOr:
+    return ok(SurbBuild(surb: move(surb)))
+  # The packet carrying the SURB is sent before the oldest of these records goes
+  # stale, and the SURB's keys remain accepted for surbLifetime after sending,
+  # so every reply arrives by then: G - D after obtaining that record (Mix Key
+  # Rotation spec §5, §7).
+  ok(
+    SurbBuild(
+      surb: move(surb),
+      credentialsExpireAt: mixProto.nodePool.staleAt(pathPeerIds).map(
+          proc(staleAt: Moment): Moment =
+            staleAt + ring.config.surbLifetime
+        ),
+    )
+  )
 
 proc buildSurbs(
     mixProto: MixProtocol,
@@ -801,14 +825,7 @@ proc buildSurbs(
     return ok((@[], Opt.none(SurbSession)))
 
   var response: seq[SURB]
-  # No reply can arrive once the SURBs' keys expire (Mix Key Rotation spec §7).
-  let lifetime = mixProto.keyRing
-    .map(
-      proc(ring: MixKeyRing): Duration =
-        ring.config.surbLifetime
-    )
-    .get(mixProto.surbStore.ttl)
-  let session = mixProto.surbStore.newSession(lifetime = lifetime)
+  let session = mixProto.surbStore.newSession()
 
   for _ in 0.uint8 ..< numSurbs:
     # Uniqueness rests on 128 bits of CSPRNG output, per spec Section 8.7.2
@@ -817,11 +834,13 @@ proc buildSurbs(
     var id: SURBIdentifier
     mixProto.rng.generate(id)
 
-    var surb = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
+    var built = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
       # Release whatever this group already registered; a partially built
       # group can never receive a usable reply.
       session.release()
       return err(error)
+    if built.credentialsExpireAt.isSome:
+      session.igroup.expireBy(built.credentialsExpireAt.get())
 
     # The per-hop secrets move out of the SURB, and the store keeps the only
     # copy of the credentials, so none is left unwiped (Mix Key Rotation spec
@@ -829,8 +848,8 @@ proc buildSurbs(
     var creds = ConnCreds(
       igroup: session.igroup,
       incoming: incoming,
-      surbSecret: move(surb.secret.get()),
-      surbKey: surb.key,
+      surbSecret: move(built.surb.secret.get()),
+      surbKey: built.surb.key,
     )
     let added = mixProto.surbStore.add(id, creds)
     creds.wipe()
@@ -838,7 +857,7 @@ proc buildSurbs(
       session.release()
       return err(error)
 
-    response.add(surb)
+    response.add(built.surb)
 
   return ok((response, Opt.some(session)))
 
@@ -1314,7 +1333,6 @@ proc buildCoverPacket*(
     publicKeys: seq[FieldElement] = @[]
     hops: seq[Hop] = @[]
     delays: seq[Delay] = @[]
-    recordsStaleAt = Opt.none(Moment)
 
   for node in nodes:
     let addrBytes = multiAddrToBytes(node.peerId, node.multiAddr).valueOr:
@@ -1322,11 +1340,6 @@ proc buildCoverPacket*(
     publicKeys.add(node.mixPubKey)
     hops.add(Hop.init(addrBytes))
     delays.add(mixProto.delayStrategy.generateForEntry())
-    let staleAt = mixProto.nodePool.staleAt(node.peerId)
-    if staleAt.isSome and (
-      recordsStaleAt.isNone or staleAt.get() < recordsStaleAt.get()
-    ):
-      recordsStaleAt = staleAt
 
   let selfAddrBytes = multiAddrToBytes(
     mixProto.mixNodeInfo.peerId, mixProto.mixNodeInfo.multiAddr
@@ -1364,7 +1377,7 @@ proc buildCoverPacket*(
       firstHopPeerId: firstNode.peerId,
       firstHopAddr: firstNode.multiAddr,
       proofToken: proofToken,
-      recordsStaleAt: recordsStaleAt,
+      recordsStaleAt: mixProto.nodePool.staleAt(nodes.mapIt(it.peerId)),
     )
   )
 
@@ -1496,8 +1509,8 @@ proc init*(
   let store =
     if surbStore.isNil:
       # Expired credentials stay in memory until the next purge, so with a key
-      # ring they outlive their SURB lifetime by at most a tenth of it (Mix Key
-      # Rotation spec §7).
+      # ring they outlive their expiry by at most a tenth of the SURB lifetime
+      # (Mix Key Rotation spec §7).
       SurbStore.new(
         purgeInterval = keyRing
           .map(

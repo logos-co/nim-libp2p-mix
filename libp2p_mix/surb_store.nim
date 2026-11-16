@@ -133,13 +133,12 @@ proc purgeExpired*(s: SurbStore, now: Moment = Moment.now()): int =
 
   expired.len
 
-proc newGroup*(
-    s: SurbStore, now: Moment = Moment.now(), lifetime: Duration = s.ttl
-): SURBIdentifierGroup =
-  ## Expires after lifetime, or the store's TTL if that is shorter.
-  SURBIdentifierGroup(
-    members: initHashSet[SURBIdentifier](), expiresAt: now + min(lifetime, s.ttl)
-  )
+proc newGroup*(s: SurbStore, now: Moment = Moment.now()): SURBIdentifierGroup =
+  SURBIdentifierGroup(members: initHashSet[SURBIdentifier](), expiresAt: now + s.ttl)
+
+proc expireBy*(g: SURBIdentifierGroup, deadline: Moment) =
+  ## Expire the group by deadline, if that is sooner than its expiry.
+  g.expiresAt = min(g.expiresAt, deadline)
 
 proc add*(
     s: SurbStore, id: SURBIdentifier, creds: ConnCreds, now: Moment = Moment.now()
@@ -200,11 +199,8 @@ proc release*(s: SurbStore, igroup: SURBIdentifierGroup) =
 func igroup*(s: SurbSession): SURBIdentifierGroup {.inline.} =
   s.igroup
 
-proc newSession*(
-    s: SurbStore, now: Moment = Moment.now(), lifetime: Duration = s.ttl
-): SurbSession =
-  ## The credentials expire as `newGroup` describes.
-  SurbSession(store: s, igroup: s.newGroup(now, lifetime))
+proc newSession*(s: SurbStore, now: Moment = Moment.now()): SurbSession =
+  SurbSession(store: s, igroup: s.newGroup(now))
 
 proc release*(s: SurbSession) =
   ## Idempotent, like the underlying store release.

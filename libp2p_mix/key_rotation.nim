@@ -96,8 +96,8 @@ func acceptanceWindow*(config: KeyRotationConfig): Duration =
   config.rotationInterval + config.graceWindow
 
 func surbLifetime*(config: KeyRotationConfig): Duration =
-  ## How long a SURB's keys remain accepted after it is built, in the worst
-  ## case (Mix Key Rotation spec §7).
+  ## How long a SURB's keys remain accepted after the packet carrying it is
+  ## sent, in the worst case (Mix Key Rotation spec §7).
   config.graceWindow - config.rotationInterval - config.replacedRecordLifetime
 
 func surbHoldTime*(config: KeyRotationConfig): Duration =
