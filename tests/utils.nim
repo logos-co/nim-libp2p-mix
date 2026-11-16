@@ -4,7 +4,7 @@
 {.used.}
 
 import std/tables
-import chronos, results, strformat
+import chronos, metrics, results, strformat
 import
   libp2p/
     [protocols/ping, peerid, multiaddress, switch, builders, crypto/crypto, crypto/secp]
@@ -13,6 +13,7 @@ import libp2p_mix
 import libp2p_mix/mix_protocol
 import libp2p_mix/curve25519
 import libp2p_mix/delay_strategy
+import libp2p_mix/mix_metrics
 
 import ./tools/crypto
 import ./[mock_mix, spam_protection_impl]
@@ -40,6 +41,7 @@ proc setupMixNode[T: MixProtocol](
     destReadBehavior: Opt[tuple[codec: string, callback: DestReadBehavior]],
     spamProtectionRateLimit: Opt[int],
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
+    hopBackoff: Duration = DefaultHopBackoff,
 ): T =
   let spamProtection =
     if spamProtectionRateLimit.isSome():
@@ -59,6 +61,7 @@ proc setupMixNode[T: MixProtocol](
     switch,
     spamProtection = spamProtection,
     delayStrategy = Opt.some(actualDelayStrategy),
+    hopBackoff = hopBackoff,
   )
 
   if destReadBehavior.isSome():
@@ -73,6 +76,7 @@ proc setupMixNodes*(
     destReadBehavior = Opt.none(tuple[codec: string, callback: DestReadBehavior]),
     spamProtectionRateLimit = Opt.none(int),
     delayStrategy = Opt.none(DelayStrategy),
+    hopBackoff: Duration = DefaultHopBackoff,
 ): Future[seq[MixProtocol]] {.async.} =
   var nodes: seq[MixProtocol] = @[]
   let nodeInfos = MixNodeInfo.generateRandomMany(numNodes, rng())
@@ -80,7 +84,8 @@ proc setupMixNodes*(
     let switch =
       createSwitch(mixNodeInfo.multiAddr, Opt.some(mixNodeInfo.libp2pPrivKey))
     let mixNode = setupMixNode[MixProtocol](
-      mixNodeInfo, switch, destReadBehavior, spamProtectionRateLimit, delayStrategy
+      mixNodeInfo, switch, destReadBehavior, spamProtectionRateLimit, delayStrategy,
+      hopBackoff,
     )
     mixNode.nodePool.add(nodeInfos.includeAllExcept(mixNodeInfo))
     nodes.add(mixNode)
@@ -238,6 +243,39 @@ method generateForEntry*(self: FixedDelayStrategy): Delay =
 
 method generateForIntermediate*(self: FixedDelayStrategy, encodedDelay: Delay): Delay =
   self.delay
+
+type HoldingServer* = ref object
+  ## A TCP server that accepts and never answers, so a dial to it stays in its
+  ## handshake.
+  server: StreamServer
+  connections*: seq[StreamTransport]
+  acceptor: Future[void]
+
+proc new*(T: typedesc[HoldingServer]): T =
+  let hold = T(server: createStreamServer(initTAddress("127.0.0.1:0")))
+  proc acceptLoop() {.async.} =
+    while true:
+      hold.connections.add(await hold.server.accept())
+
+  hold.acceptor = acceptLoop()
+  hold
+
+proc address*(hold: HoldingServer): MultiAddress =
+  MultiAddress.init(hold.server.localAddress()).expect("address")
+
+proc close*(hold: HoldingServer) {.async.} =
+  await hold.acceptor.cancelAndWait()
+  for connection in hold.connections:
+    await connection.closeWait()
+  await hold.server.closeWait()
+
+proc errorCount*(role, reason: string): float64 =
+  ## The count of `mix_messages_error` for `role` and `reason`. 0 before the
+  ## label exists.
+  try:
+    mix_messages_error.value([role, reason])
+  except KeyError:
+    0.0
 
 proc outgoingMixStreams*(switch: Switch): seq[Connection] =
   ## List the open outgoing mix streams of a switch.
