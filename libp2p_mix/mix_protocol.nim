@@ -32,6 +32,17 @@ const CoverTrafficCodec* = "/mix/cover/1.0.0"
   ## Reserved codec for cover traffic packets. Cover packets use this codec
   ## so the exit node can identify and silently discard returning cover traffic.
 
+const DefaultHopBackoff* = chronos.minutes(1)
+  ## How long a first hop that failed a dial is not selected as the first hop.
+
+type
+  HopDial = Future[Connection].Raising([DialFailedError, CancelledError])
+    ## A dial of a hop, as `switch.dial` returns it.
+
+  OtherAddressDialError = object of DialFailedError
+    ## A caller of `getConn` waited for a dial of another address, and it failed.
+    ## It is no failure of the address of the caller.
+
 func isCoverTraffic*(msg: MixMessage): bool =
   ## Returns true if the message is a cover traffic packet.
   msg.codec == CoverTrafficCodec
@@ -53,9 +64,18 @@ type MixProtocol* = ref object of LPProtocol
     ## reply never arrives; see surb_store.nim.
   destReadBehaviors: TableRef[string, DestReadBehavior]
   connPool: Table[PeerId, Connection]
-  dialing: Table[PeerId, Future[Connection].Raising([DialFailedError, CancelledError])]
+  dialing: Table[PeerId, tuple[dial: HopDial, addrs: seq[MultiAddress]]]
     ## The dial in flight for each hop. Concurrent callers of getConn await
     ## the same dial and share its result.
+    ## `addrs` are the addresses that the dial uses.
+    ## The library dials through the switch of libp2p.
+    ## The switch has one dial lock and one set of connections for each peer.
+    ## So a second dial of the peer at other addresses waits for the first dial.
+    ## A forward and a reply dial the address that the sender of the packet gave.
+    ## So a caller can wait for a dial of an address that it did not select.
+  backedOffUntil: Table[PeerId, Moment]
+    ## The moment until which a first hop that failed a dial is not the first hop.
+  hopBackoff: Duration
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
   coverTraffic*: Opt[CoverTraffic]
@@ -96,6 +116,25 @@ proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
   let res = rng.generate(uint64) mod uint64(max)
   ok(res.int)
 
+proc hopIsBackedOff(mixProto: MixProtocol, peerId: PeerId): bool =
+  ## True while `peerId` waits out a failed dial. Only the first hop is filtered.
+  ## It is the one hop this node both selects and dials.
+  Moment.now() < mixProto.backedOffUntil.getOrDefault(peerId)
+
+proc backOffHop(mixProto: MixProtocol, peerId: PeerId, failure: ref DialFailedError) =
+  ## Record a failed dial of `peerId`, and delete the entries whose backoff ended.
+  ## An `OtherAddressDialError` records nothing.
+  if failure of OtherAddressDialError:
+    return
+  let now = Moment.now()
+  var expired: seq[PeerId]
+  for backedOff, until in mixProto.backedOffUntil:
+    if now >= until:
+      expired.add(backedOff)
+  for backedOff in expired:
+    mixProto.backedOffUntil.del(backedOff)
+  mixProto.backedOffUntil[peerId] = now + mixProto.hopBackoff
+
 proc removeClosedConnections(
     mixProto: MixProtocol, failed: Connection
 ) {.async: (raises: []).} =
@@ -112,16 +151,18 @@ proc removeClosedConnections(
 
 proc startDial(
     mixProto: MixProtocol, pid: PeerId, addrs: seq[MultiAddress], codecs: seq[string]
-): Future[Connection].Raising([DialFailedError, CancelledError]) =
+): HopDial =
   ## Start the one dial of `pid` that concurrent callers of `getConn` share, and
   ## keep it in `dialing` until it finishes.
   let dial = mixProto.switch.dial(pid, addrs, codecs)
-  mixProto.dialing[pid] = dial
+  mixProto.dialing[pid] = (dial: dial, addrs: addrs)
   dial.addCallback(
     proc(_: pointer) {.gcsafe, raises: [].} =
       mixProto.dialing.del(pid)
-      if dial.completed() and mixProto.started:
-        mixProto.connPool[pid] = dial.value
+      if dial.completed():
+        mixProto.backedOffUntil.del(pid)
+        if mixProto.started:
+          mixProto.connPool[pid] = dial.value
   )
   dial
 
@@ -140,9 +181,13 @@ proc getConn(
     return conn[]
   if not mixProto.started:
     raise newException(DialFailedError, "mix protocol is not running")
-  var dial = mixProto.dialing.getOrDefault(pid)
-  if dial.isNil:
-    dial = mixProto.startDial(pid, addrs, codecs)
+  let inFlight = mixProto.dialing.getOrDefault(pid)
+  let dialOfOtherAddrs = not inFlight.dial.isNil and inFlight.addrs != addrs
+  let dial =
+    if inFlight.dial.isNil:
+      mixProto.startDial(pid, addrs, codecs)
+    else:
+      inFlight.dial
   await dial.join()
   if dial.cancelled():
     # Only `stop` cancels a shared dial. A caller cancelled in `join` raises
@@ -152,6 +197,13 @@ proc getConn(
     # The dial completed after the stop began. The stop closes its stream, so
     # no caller writes to it.
     raise newException(DialFailedError, "mix protocol stopped during the dial")
+  if dial.failed() and dialOfOtherAddrs:
+    # A caller waits for one dial at most.
+    # So it does not dial its own addresses after this failure.
+    let failure = dial.error
+    raise newException(
+      OtherAddressDialError, "a dial of other addresses failed: " & failure.msg, failure
+    )
   try:
     return dial.read()
   except FuturePendingError:
@@ -781,6 +833,10 @@ proc sendPacket(
         Opt.none(PeerId),
         Opt.some(peerId)
 
+  # The SURB gives the first hop of a reply.
+  # This node did not select it.
+  let ownFirstHop = logConfig.logType == Entry
+
   # Only a failed first dial proves the packet never left this node, so its
   # messageId can be reused. After any write attempt the next hop may hold the
   # proof: reissuing the messageId in this epoch would be an RLN double-signal,
@@ -792,6 +848,8 @@ proc sendPacket(
       # A dial that the stop ended is not a failure of the hop.
       if mixProto.started:
         mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
+        if ownFirstHop:
+          mixProto.backOffHop(peerId, exc)
       if proofToken.len > 0:
         mixProto.spamProtection.withValue(sp):
           sp.reclaimProofToken(proofToken)
@@ -814,6 +872,8 @@ proc sendPacket(
     # A dial that the stop ended is not a failure of the hop.
     if mixProto.started:
       mix_messages_error.inc(labelValues = [label, "SEND_FAILED"])
+      if ownFirstHop:
+        mixProto.backOffHop(peerId, exc)
     return err(
       SendPacketError(
         msg: fmt"Failed to redial next hop ({peerId}, {multiAddress}): {exc.msg}"
@@ -942,6 +1002,8 @@ proc anonymizeLocalProtocolSend*(
 
   var nextHopAddr: MultiAddress
   var nextHopPeerId: PeerId
+  # The backed off peers that the draw of the first hop skipped.
+  var skipped: seq[int]
   while hop.len < PathLength:
     if availableIndices.len == 0:
       mix_messages_error.inc(labelValues = ["Entry", "LOW_MIX_POOL"])
@@ -953,6 +1015,10 @@ proc anonymizeLocalProtocolSend*(
     let selectedIndex = availableIndices[randomIndexPosition]
     var randPeerId = poolPeerIds[selectedIndex]
     availableIndices.del(randomIndexPosition)
+
+    if hop.len == 0 and mixProto.hopIsBackedOff(randPeerId):
+      skipped.add(selectedIndex)
+      continue
 
     if destination.kind == ForwardAddr and randPeerId == destination.peerId:
       continue
@@ -987,6 +1053,8 @@ proc anonymizeLocalProtocolSend*(
     if hop.len == 0:
       nextHopAddr = multiAddr
       nextHopPeerId = peerId
+      # The later hops draw from the whole pool.
+      availableIndices.add(skipped)
 
     delays.add(
       if hop.len != PathLength - 1:
@@ -1106,8 +1174,16 @@ proc selectRandomNodes(
         ")"
     )
 
-  let selectedPeerIds = mixProto.rng.pick(available, count).valueOr:
+  let firstCandidates = available.filterIt(not mixProto.hopIsBackedOff(it))
+  if firstCandidates.len == 0:
+    return err("Every first hop candidate is backed off")
+  let first = mixProto.rng.pickOne(firstCandidates).valueOr:
     return err("No mix nodes available in pool")
+  var selectedPeerIds = @[first]
+  if count > 1:
+    let rest = mixProto.rng.pick(available.filterIt(it != first), count - 1).valueOr:
+      return err("No mix nodes available in pool")
+    selectedPeerIds.add(rest)
 
   var selected: seq[PathNode]
   for peerId in selectedPeerIds:
@@ -1214,6 +1290,7 @@ proc writeCoverPacket(
     # A dial that the stop ended is not a failure of the hop.
     if mixProto.started:
       mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
+      mixProto.backOffHop(peerId, exc)
     return err("Failed to dial for cover packet: " & exc.msg)
   except LPStreamError as exc:
     mix_messages_error.inc(labelValues = ["Cover", "SEND_FAILED"])
@@ -1242,7 +1319,9 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   mixProto.coverTraffic.withValue(ct):
     await ct.stop()
   mixProto.started = false
-  let dials = toSeq(mixProto.dialing.values)
+  # An entry of `dialing` is the future of a dial and the addresses of that dial.
+  # The mapIt takes the futures, and the stop cancels them below.
+  let dials = toSeq(mixProto.dialing.values).mapIt(it.dial)
 
   # Cancelling fires the completion callback, which deletes from this table.
   let pending = toSeq(mixProto.ongoingMixMessages.values)
@@ -1270,6 +1349,7 @@ proc init*(
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
+    hopBackoff: Duration = DefaultHopBackoff,
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
   ##
@@ -1285,6 +1365,8 @@ proc init*(
   ## enabled the default is `SpamProtectionDelayStrategy` instead (same means,
   ## 100 ms delay floor) so proof generation time cannot dominate short sampled
   ## delays and set the send time.
+  ##
+  ## A first hop that fails a dial is not the first hop for `hopBackoff`.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
@@ -1300,6 +1382,7 @@ proc init*(
     "SURB credential TTL must not exceed the replay tag TTL"
 
   mixProto.mixNodeInfo = mixNodeInfo
+  mixProto.hopBackoff = hopBackoff
   mixProto.switch = switch
   mixProto.rng = switch.rng
   mixProto.nodePool = MixNodePool.new(switch.peerStore)
@@ -1386,6 +1469,7 @@ proc new*(
     delayStrategy: Opt[DelayStrategy] = Opt.none(DelayStrategy),
     coverTraffic: Opt[CoverTraffic] = Opt.none(CoverTraffic),
     surbStore: SurbStore = nil,
+    hopBackoff: Duration = DefaultHopBackoff,
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
   ##
@@ -1398,6 +1482,6 @@ proc new*(
   let mixProto = new(T)
   mixProto.init(
     mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic,
-    surbStore,
+    surbStore, hopBackoff,
   )
   mixProto
