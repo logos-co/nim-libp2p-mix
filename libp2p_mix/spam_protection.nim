@@ -61,7 +61,6 @@ method generateProofAsync*(
 ): Future[Result[ProofResult, string]] {.base, async: (raises: [CancelledError]).} =
   ## Epoch-aware proof providers should override this method. The default keeps
   ## existing providers compatible when their proofs do not bind an epoch.
-  ## A cancel of this call has the same effect as a cancel of the overload above.
   return await self.generateProofAsync(bindingData)
 
 method precomputeCoverProofs*(self: SpamProtection): bool {.base, gcsafe, raises: [].} =
