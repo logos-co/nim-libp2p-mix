@@ -18,7 +18,7 @@ type
     token*: seq[byte]
       ## Opaque token for proof slot tracking.
       ## Only meaningful to the concrete implementation.
-      ## Used to reclaim proof slots when precomputed cover packets are discarded.
+      ## Mix can give it back with `reclaimProofToken`.
 
   SpamProtection* = ref object of RootObj
     ## Abstract interface that spam protection mechanisms must implement
@@ -52,6 +52,7 @@ method generateProofAsync*(
     self: SpamProtection, bindingData: seq[byte]
 ): Future[Result[ProofResult, string]] {.base, async: (raises: [CancelledError]).} =
   ## External proof providers may suspend without blocking the Mix event loop.
+  ## Mix can cancel this call. A cancelled call returns no token.
   return self.generateProof(bindingData)
 
 method generateProofAsync*(
@@ -72,7 +73,8 @@ method reclaimProofToken*(
     self: SpamProtection, token: seq[byte]
 ) {.base, gcsafe, raises: [].} =
   ## Return an opaque proof token for potential reuse.
-  ## Called when a precomputed cover packet is discarded without being sent.
+  ## Called when the proof never left this node. Mix does not call it once a
+  ## write may have started.
   ## The concrete implementation may reclaim internal resources (e.g., rate limit slots).
   ## Default: no-op.
   discard
