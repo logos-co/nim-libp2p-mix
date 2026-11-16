@@ -513,11 +513,12 @@ type
 proc matchKey*(
     sphinxPacket: SphinxPacket, candidates: openArray[MixKey]
 ): Result[KeyMatch, string] {.raises: [].} =
-  ## Find the candidate key the packet was built for, without storing its tag
-  ## (Mix Key Rotation spec §6). Destroyed keys never match. KeyTableFull means
-  ## the packet was built for a key whose replay table is full (Mix Key
-  ## Rotation spec §3.4). A KeyMatched packet is completed by
-  ## `processSphinxPacket(packet, match)`.
+  ## Find the candidate key the packet was built for, without storing its tag,
+  ## trying the candidates in order and stopping at the first that has seen the
+  ## packet or that it was built for (Mix Key Rotation spec §6). Destroyed keys
+  ## never match. KeyTableFull means the packet was built for a key whose replay
+  ## table is full (Mix Key Rotation spec §3.4). A KeyMatched packet is
+  ## completed by `processSphinxPacket(packet, match)`.
   let
     (header, _) = sphinxPacket.get()
     (alpha, beta, gamma) = header.get()
@@ -525,7 +526,6 @@ proc matchKey*(
   let alphaFE = bytesToAlphaFieldElement(alpha).valueOr:
     return err("Invalid alpha: " & error)
 
-  var match = KeyMatch(status: NoKeyMatched)
   for key in candidates:
     if key.isDestroyed:
       continue
@@ -536,22 +536,13 @@ proc matchKey*(
       burnMem(secret)
       burnMem(sBytes)
 
-    # Run every candidate, even after one matches, so processing time does not
-    # reveal which key the packet was built for.
-    let
-      seen = key.isTagSeen(computeTag(sBytes))
-      valid = isMacValid(beta, gamma, sBytes)
-
-    if match.status == NoKeyMatched:
-      if seen:
-        match = KeyMatch(status: KeyReplayed)
-      elif valid:
-        match =
-          if key.isReplayTableFull:
-            KeyMatch(status: KeyTableFull)
-          else:
-            KeyMatch(status: KeyMatched, key: key, sharedSecret: secret)
-  ok(match)
+    if key.isTagSeen(computeTag(sBytes)):
+      return ok(KeyMatch(status: KeyReplayed))
+    if isMacValid(beta, gamma, sBytes):
+      if key.isReplayTableFull:
+        return ok(KeyMatch(status: KeyTableFull))
+      return ok(KeyMatch(status: KeyMatched, key: key, sharedSecret: secret))
+  ok(KeyMatch(status: NoKeyMatched))
 
 proc wipe*(match: var KeyMatch) {.raises: [].} =
   ## Wipe the shared secret of a match that is not processed, and reset it to
