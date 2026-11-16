@@ -75,14 +75,8 @@ method reclaimProofToken*(
     self: SpamProtection, token: seq[byte]
 ) {.base, gcsafe, raises: [].} =
   ## Return an opaque proof token for potential reuse.
-  ## Called when the proof of the token never leaves this node, in these cases:
-  ## - a precomputed cover packet that is discarded,
-  ## - a send, a reply or a forward that fails or is cancelled before its first
-  ##   write,
-  ## - a cover packet that is cancelled before its send starts,
-  ## - a proof that Mix rejects.
-  ## Not called for a cover packet once its send starts, or for a cover proof
-  ## that is generated at transmission.
+  ## Called when the proof never left this node. Mix does not call it once a
+  ## write may have started.
   ## The concrete implementation may reclaim internal resources (e.g., rate limit slots).
   ## Default: no-op.
   discard
