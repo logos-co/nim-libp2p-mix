@@ -665,6 +665,7 @@ proc pendingBeforeSend(
     generator: GenerateAndAppendCoverProofProc = nil,
     hold = Delay(60_000),
     staleProof = false,
+    reclaimer = true,
 ): PendingCover =
   ## The emission waits before its send.
   let
@@ -688,10 +689,11 @@ proc pendingBeforeSend(
       started.fire()
       hold
   )
-  ct.setProofTokenReclaimer(
-    proc(token: seq[byte]) {.gcsafe, raises: [].} =
-      reclaimed[].add(token)
-  )
+  if reclaimer:
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        reclaimed[].add(token)
+    )
   ct.onEpochChange(1)
   PendingCover(ct: ct, started: started, reclaimed: reclaimed, sent: sent)
 
@@ -807,6 +809,44 @@ suite "ConstantRateCoverTraffic cancelled emission":
       cover.reclaimed[] == @[@[0x55.byte]]
       cover.ct.slotPool.coverClaimed == 0
       cover.sent[].len == 0
+
+  asyncTest "packet without spam protection cancelled before send returns slot":
+    let cover =
+      pendingBeforeSend(builder = mockBuildCoverPacketNoToken(), reclaimer = false)
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+    check cover.ct.slotPool.coverClaimed == 1
+
+    await emission.cancelAndWait()
+    check:
+      cover.ct.slotPool.coverClaimed == 0
+      cover.sent[].len == 0
+
+  asyncTest "packet with build token and no reclaimer cancelled before send keeps slot":
+    let cover = pendingBeforeSend(reclaimer = false)
+
+    let emission = cover.ct.emitCoverPacket()
+    await cover.started.wait().wait(5.seconds)
+    check cover.ct.slotPool.coverClaimed == 1
+
+    await emission.cancelAndWait()
+    check cover.ct.slotPool.coverClaimed == 1
+
+  asyncTest "packet proved at send with no reclaimer cancelled before send keeps slot":
+    let proved = newAsyncEvent()
+    let cover = pendingBeforeSend(
+      builder = mockBuildCoverPacketNoToken(),
+      generator = mockProofAtSend(proved),
+      reclaimer = false,
+    )
+
+    let emission = cover.ct.emitCoverPacket()
+    await proved.wait().wait(5.seconds)
+    check cover.ct.slotPool.coverClaimed == 1
+
+    await emission.cancelAndWait()
+    check cover.ct.slotPool.coverClaimed == 1
 
   asyncTest "packet cancelled during proof at send keeps slot":
     let started = newAsyncEvent()

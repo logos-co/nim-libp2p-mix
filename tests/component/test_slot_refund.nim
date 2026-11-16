@@ -303,23 +303,35 @@ method dial(
 const LongWait = Delay(60_000)
 
 proc setupNodes(
-    numNodes: int, withSpam = true
+    numNodes: int, withSpam = true, withCover = false
 ): tuple[
   nodes: seq[MixProtocol],
   spam: seq[FakeSpamProtection],
   delays: seq[FixedDelayStrategy],
 ] =
   ## Like setupCountingNodes, but the test controls the proofs and the wait.
+  ## With `withCover`, the first node gets cover traffic through `MixProtocol.new`.
   let nodeInfos = MixNodeInfo.generateRandomMany(numNodes, rng())
   var
     nodes = newSeq[MixProtocol]()
     providers = newSeq[FakeSpamProtection]()
     delays = newSeq[FixedDelayStrategy]()
-  for mixNodeInfo in nodeInfos:
+  for i, mixNodeInfo in nodeInfos:
     let
       switch = createSwitch(mixNodeInfo.multiAddr, Opt.some(mixNodeInfo.libp2pPrivKey))
       spam = FakeSpamProtection(proofSize: newReclaimCountingSpamProtection().proofSize)
       delay = FixedDelayStrategy()
+      cover =
+        if withCover and i == 0:
+          Opt.some(
+            CoverTraffic(
+              ConstantRateCoverTraffic.new(
+                totalSlots = 4, useInternalEpochTimer = false
+              )
+            )
+          )
+        else:
+          Opt.none(CoverTraffic)
       node = MixProtocol.new(
         mixNodeInfo,
         switch,
@@ -329,6 +341,7 @@ proc setupNodes(
           else:
             Opt.none(SpamProtection),
         delayStrategy = Opt.some(DelayStrategy(delay)),
+        coverTraffic = cover,
       )
     node.registerDestReadBehavior(TestCodec, readLp(1024))
     switch.mount(node)
@@ -636,6 +649,19 @@ suite "Slot refund - packet stages":
     check:
       covers.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 0
       spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
+
+  asyncTest "cover packet without spam protection cancelled in wait returns slot":
+    let (nodes, _, delays) = setupNodes(5, withSpam = false, withCover = true)
+    let ct = ConstantRateCoverTraffic(nodes[0].coverTraffic.get())
+    ct.onEpochChange(1)
+    delays[0].delay = LongWait
+
+    let emission = ct.emitCoverPacket()
+    checkUntilTimeout:
+      ct.slotPool.coverClaimed == 1
+
+    await emission.cancelAndWait()
+    check ct.slotPool.coverClaimed == 0
 
   asyncTest "forward stopped during proof generation keeps slot":
     let (nodes, spam, delays) = setupNodes(5)

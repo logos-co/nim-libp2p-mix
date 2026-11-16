@@ -192,6 +192,8 @@ proc setProofTokenValidator*(ct: CoverTraffic, validator: ValidateProofTokenProc
   ct.validateProofToken = validator
 
 proc setProofTokenReclaimer*(ct: CoverTraffic, reclaimer: ReclaimProofTokenProc) =
+  ## A node with spam protection must set a reclaimer. Without one, a cover packet
+  ## with a token keeps its slot when it is cancelled before its send.
   ct.reclaimProofToken = reclaimer
 
 proc setCoverPacketSender*(ct: CoverTraffic, sender: SendCoverPacketProc) =
@@ -332,20 +334,27 @@ proc refundCancelledCover(
 ) {.async: (raises: []).} =
   ## Refund a cover packet that was cancelled before its send. A proof can still
   ## finish after the cancel, so this procedure cancels the proof generation and
-  ## waits for it to end. The slot goes back only with a token, from the build or
-  ## from the proof, because a proof with no token may have used a message ID.
+  ## waits for it to end. The slot goes back in the epoch of its claim, and only
+  ## when no message ID stays spent. With a reclaimer, the packet must have a
+  ## token, which goes back too. With no reclaimer, the packet must have no token.
   await proofGen.cancelAndWait()
   var proofToken: seq[byte]
   if proofGen.completed():
     let proved = proofGen.value()
     if proved.isOk:
       proofToken = proved.get().proofToken
-  if (buildToken.len > 0 or proofToken.len > 0) and ct.reclaimProofToken != nil:
+  let hasToken = buildToken.len > 0 or proofToken.len > 0
+  if ct.reclaimProofToken != nil:
     for token in [buildToken, proofToken]:
       if token.len > 0:
         ct.reclaimProofToken(token)
-    if ct.slotPool.epoch == claimEpoch:
-      ct.unclaimCoverSlot()
+  let refund =
+    if ct.reclaimProofToken == nil:
+      not hasToken
+    else:
+      hasToken
+  if refund and ct.slotPool.epoch == claimEpoch:
+    ct.unclaimCoverSlot()
 
 proc buildAndSendOnDemand(
     ct: ConstantRateCoverTraffic, claimEpoch: uint64

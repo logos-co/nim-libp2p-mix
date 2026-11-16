@@ -187,7 +187,8 @@ callback signatures introduced in this release. Builders now have the form
 `proc(epoch: uint64): Future[Result[CoverPacketBuild, string]]`, and senders
 receive the claimed epoch as a fourth argument. The epoch must be preserved so
 proof work can be discarded safely when an epoch changes. Proof generators
-return the packet and the token of its proof as a `CoverProofResult`.
+return the packet and the token of its proof as a `CoverProofResult`. A node
+with spam protection must set a token reclaimer with `setProofTokenReclaimer`.
 
 ## Building & running
 
