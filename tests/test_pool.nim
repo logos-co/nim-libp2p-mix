@@ -3,10 +3,10 @@
 
 {.used.}
 
-import results, sequtils
+import metrics, results, sequtils
 import
   libp2p/[crypto/crypto, crypto/secp, multiaddress, peeraddrpolicy, peerid, peerstore]
-import libp2p_mix/[mix_node, multiaddr, pool]
+import libp2p_mix/[mix_metrics, mix_node, multiaddr, pool]
 import ./tools/unittest
 import ./tools/crypto
 import ./utils
@@ -495,6 +495,23 @@ suite "MixNodePool Tests":
 
     peerStore[AddressBook][pubInfo.peerId] = @[relayedAddr, otherRelayedAddr]
     check pool.get(pubInfo.peerId).get().multiAddr == otherRelayedAddr
+
+  test "countUsable counts the members with a hop address":
+    pool.add(mixNodes[0 .. 3].mapIt(it.toMixPubInfo()))
+    let noAddress = mixNodes[4].toMixPubInfo()
+    peerStore[MixPubKeyBook][noAddress.peerId] = noAddress.mixPubKey
+
+    check:
+      pool.len == 5
+      pool.countUsable() == 4
+
+  test "countUsable does not set mix_pool_size":
+    pool.add(mixNodes.mapIt(it.toMixPubInfo()))
+    mix_pool_size.set(99)
+
+    check:
+      pool.countUsable() == 5
+      mix_pool_size.value == 99
 
   test "multiple operations sequence":
     # Add 3 nodes

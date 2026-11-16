@@ -125,6 +125,12 @@ proc cryptoRandomInt(rng: Rng, max: int): Result[int, string] =
     if value >= threshold:
       return ok(int(value mod bound))
 
+proc updatePoolSize(mixProto: MixProtocol) =
+  ## Sets `mix_pool_size` to the number of pool members that a path can use.
+  ## The gauge is process-wide, so it shows the count of whichever `MixProtocol`
+  ## counted last.
+  mix_pool_size.set(mixProto.nodePool.countUsable().int64)
+
 proc refreshPoolSize(mixProto: MixProtocol) =
   ## Sets `mix_pool_size` for a path build, but at most once per `PoolSizeInterval`,
   ## since the count reads every pool member.
@@ -133,7 +139,7 @@ proc refreshPoolSize(mixProto: MixProtocol) =
     if now - lastTime < PoolSizeInterval:
       return
   mixProto.poolSizeTime = Opt.some(now)
-  discard mixProto.nodePool.countUsable()
+  mixProto.updatePoolSize()
 
 proc hopIsBackedOff(mixProto: MixProtocol, peerId: PeerId): bool =
   ## True while `peerId` waits out a failed dial. Only the first hop is filtered.
@@ -1297,7 +1303,7 @@ proc sendCoverPacket*(
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
-  discard mixProto.nodePool.countUsable()
+  mixProto.updatePoolSize()
   mixProto.coverTraffic.withValue(ct):
     await ct.start()
 
@@ -1379,8 +1385,7 @@ proc init*(
   ##
   ## `start` sets `mix_pool_size` to the number of pool members that a path can use,
   ## and sends and cover packet builds refresh it at most once per `PoolSizeInterval`.
-  ## A node that does neither keeps the value from `start` until its host calls
-  ## `nodePool.countUsable()`.
+  ## A node that does neither keeps the value from `start`.
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
