@@ -8,7 +8,7 @@
 
 {.push raises: [].}
 
-import std/sets
+import std/[sequtils, sets]
 import chronicles, chronos, results
 import libp2p/crypto/[crypto, curve25519]
 import nimcrypto/utils # burnMem
@@ -139,10 +139,7 @@ proc multiply*(key: MixKey, point: FieldElement): Result[FieldElement, string] =
   ## point multiplied by this key's private scalar (X25519).
   if key.destroyed:
     return err("Destroyed mix key")
-  var scalars = [key.privateKey]
-  defer:
-    burnMem(scalars)
-  ok(multiplyPointWithScalars(point, scalars))
+  ok(multiplyPointWithSecret(point, key.privateKey))
 
 proc addTag*(key: MixKey, tag: Tag): TagInsertStatus =
   ## Tags are never evicted: a removed tag would let its packet be replayed
@@ -261,11 +258,7 @@ proc update*(ring: MixKeyRing, now: Moment = Moment.now()) =
 proc candidates*(ring: MixKeyRing, now: Moment = Moment.now()): seq[MixKey] =
   ## Keys to try on a received packet: the current key, then the old keys,
   ## newest first (Mix Key Rotation spec §6).
-  var keys: seq[MixKey]
-  for key in ring.keys:
-    if key.isAccepted(now):
-      keys.add(key)
-  keys
+  ring.keys.filterIt(it.isAccepted(now))
 
 func untilNextUpdate(ring: MixKeyRing, now: Moment): Duration =
   ## Time until the current key is due to be replaced or, if sooner, an old

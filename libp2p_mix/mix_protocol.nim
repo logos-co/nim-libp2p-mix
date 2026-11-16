@@ -1579,19 +1579,22 @@ proc init*(
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
+  var
+    maxRecordAge = Opt.none(Duration)
+    surbHoldTime = Opt.none(Duration)
+    purgeInterval = DefaultSurbCredsPurgeInterval
+  if keyRing.isSome():
+    let ring = keyRing.get()
+    maxRecordAge = Opt.some(ring.config.rotationInterval)
+    surbHoldTime = Opt.some(ring.config.surbHoldTime)
+    # The default store keeps expired credentials until its next purge, so they
+    # outlive their expiry by at most a tenth of the SURB lifetime (Mix Key
+    # Rotation spec §7).
+    purgeInterval = min(purgeInterval, ring.config.surbLifetime div 10)
+
   let store =
     if surbStore.isNil:
-      # Expired credentials stay in memory until the next purge, so with a key
-      # ring they outlive their expiry by at most a tenth of the SURB lifetime
-      # (Mix Key Rotation spec §7).
-      SurbStore.new(
-        purgeInterval = keyRing
-          .map(
-            proc(ring: MixKeyRing): Duration =
-              min(DefaultSurbCredsPurgeInterval, ring.config.surbLifetime div 10)
-          )
-          .get(DefaultSurbCredsPurgeInterval)
-      )
+      SurbStore.new(purgeInterval = purgeInterval)
     else:
       surbStore
 
@@ -1605,14 +1608,7 @@ proc init*(
   mixProto.hopBackoff = hopBackoff
   mixProto.switch = switch
   mixProto.rng = switch.rng
-  mixProto.nodePool = MixNodePool.new(
-    switch.peerStore,
-    hopAddressPolicy,
-    keyRing.map(
-      proc(ring: MixKeyRing): Duration =
-        ring.config.rotationInterval
-    ),
-  )
+  mixProto.nodePool = MixNodePool.new(switch.peerStore, hopAddressPolicy, maxRecordAge)
   mixProto.tagManager = tagManager
   mixProto.keyRing = keyRing
   mixProto.surbStore = store
@@ -1677,15 +1673,8 @@ proc init*(
     (await mixProto.sendSurbReply(surb, message)).isOkOr:
       error "could not send reply", err = error
 
-  mixProto.exitLayer = ExitLayer.init(
-    switch,
-    onReplyDialer,
-    mixProto.destReadBehaviors,
-    keyRing.map(
-      proc(ring: MixKeyRing): Duration =
-        ring.config.surbHoldTime
-    ),
-  )
+  mixProto.exitLayer =
+    ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehaviors, surbHoldTime)
 
   mixProto.codecs = @[MixProtocolID]
   mixProto.handler = proc(

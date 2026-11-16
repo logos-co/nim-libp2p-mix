@@ -321,10 +321,7 @@ proc checkSharedSecret(s: FieldElement): Result[FieldElement, string] {.raises: 
 proc computeSharedSecret(
     alphaFE: FieldElement, privateKey: FieldElement
 ): Result[FieldElement, string] {.raises: [].} =
-  var scalars = [privateKey]
-  let s = multiplyPointWithScalars(alphaFE, scalars)
-  burnMem(scalars)
-  checkSharedSecret(s)
+  checkSharedSecret(multiplyPointWithSecret(alphaFE, privateKey))
 
 proc checkReplay*(
     sphinxPacket: SphinxPacket, privateKey: FieldElement, tm: var TagManager
@@ -428,12 +425,10 @@ proc peelLayer(
       burnMem(blinderInput)
     var blinder = bytesToFieldElement(sha256_hash(blinderInput)).valueOr:
       return err("Error in bytes to field element conversion: " & error)
-    var scalars = [blinder]
     defer:
       burnMem(blinder)
-      burnMem(scalars)
 
-    let alpha_prime = multiplyPointWithScalars(alphaFE, scalars)
+    let alpha_prime = multiplyPointWithSecret(alphaFE, blinder)
 
     # Serialize sphinx packet
     let sphinxPkt = SphinxPacket.init(
@@ -449,6 +444,21 @@ proc peelLayer(
         serializedSphinxPacket: sphinxPkt.serialize(),
       )
     )
+
+proc peelLayerIfNew(
+    tagStatus: TagInsertStatus,
+    alpha, beta, payload: seq[byte],
+    alphaFE: FieldElement,
+    sBytes: seq[byte],
+): Result[ProcessedSphinxPacket, string] {.raises: [].} =
+  ## Peel the layer only when the packet's tag was newly stored.
+  case tagStatus
+  of TagAlreadyPresent:
+    ok(ProcessedSphinxPacket(status: Duplicate))
+  of TagCacheFull:
+    ok(ProcessedSphinxPacket(status: ReplayCacheFull))
+  of TagAdded:
+    peelLayer(alpha, beta, payload, alphaFE, sBytes)
 
 proc processSphinxPacket*(
     sphinxPacket: SphinxPacket,
@@ -485,15 +495,7 @@ proc processSphinxPacket*(
     return ok(ProcessedSphinxPacket(status: InvalidMAC))
 
   # Atomically add the replay tag only after authentication succeeds.
-  case tm.tryAddTag(tag)
-  of TagAlreadyPresent:
-    return ok(ProcessedSphinxPacket(status: Duplicate))
-  of TagCacheFull:
-    return ok(ProcessedSphinxPacket(status: ReplayCacheFull))
-  of TagAdded:
-    discard
-
-  peelLayer(alpha, beta, payload, alphaFE, sBytes)
+  peelLayerIfNew(tm.tryAddTag(tag), alpha, beta, payload, alphaFE, sBytes)
 
 type
   KeyMatchStatus* = enum
@@ -583,12 +585,4 @@ proc processSphinxPacket*(
   if not isMacValid(beta, gamma, sBytes):
     return ok(ProcessedSphinxPacket(status: InvalidMAC))
 
-  case key.addTag(computeTag(sBytes))
-  of TagAlreadyPresent:
-    return ok(ProcessedSphinxPacket(status: Duplicate))
-  of TagCacheFull:
-    return ok(ProcessedSphinxPacket(status: ReplayCacheFull))
-  of TagAdded:
-    discard
-
-  peelLayer(alpha, beta, payload, alphaFE, sBytes)
+  peelLayerIfNew(key.addTag(computeTag(sBytes)), alpha, beta, payload, alphaFE, sBytes)
