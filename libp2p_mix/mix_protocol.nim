@@ -1361,6 +1361,7 @@ proc buildCoverPacket*(
     PathLength - 1, [mixProto.mixNodeInfo.peerId].toHashSet
   ).valueOr:
     return err(error)
+  let recordsStaleAt = mixProto.nodePool.staleAt(nodes.mapIt(it.info.peerId))
 
   var
     publicKeys: seq[FieldElement] = @[]
@@ -1408,7 +1409,7 @@ proc buildCoverPacket*(
       firstHopPeerId: firstNode.info.peerId,
       firstHopAddr: firstNode.info.multiAddr,
       proofToken: proofToken,
-      recordsStaleAt: mixProto.nodePool.staleAt(nodes.mapIt(it.info.peerId)),
+      recordsStaleAt: recordsStaleAt,
     )
   )
 
