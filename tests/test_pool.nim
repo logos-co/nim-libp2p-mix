@@ -3,7 +3,7 @@
 
 {.used.}
 
-import metrics, results, sequtils
+import chronos, metrics, results, sequtils
 import
   libp2p/[crypto/crypto, crypto/secp, multiaddress, peeraddrpolicy, peerid, peerstore]
 import libp2p_mix/[mix_metrics, mix_node, multiaddr, pool]
@@ -535,3 +535,77 @@ suite "MixNodePool Tests":
       pool.add(pubInfo)
 
     check pool.len == 4
+
+suite "MixNodePool record age":
+  const MaxAge = chronos.minutes(60)
+
+  var
+    peerStore {.threadvar.}: PeerStore
+    mixNodes {.threadvar.}: seq[MixNodeInfo]
+
+  setup:
+    peerStore = PeerStore.new()
+    mixNodes = MixNodeInfo.generateRandomMany(2, rng())
+
+  test "an entry is left out once it is older than the maximum age":
+    let pool = MixNodePool.new(peerStore, maxRecordAge = Opt.some(MaxAge))
+    let info = mixNodes[0].toMixPubInfo()
+    let before = Moment.now()
+    pool.add(info)
+    let after = Moment.now()
+
+    check:
+      pool.peerIds(before + MaxAge) == @[info.peerId]
+      pool.get(info.peerId, before + MaxAge).isSome
+      pool.len(after + MaxAge + 1.nanoseconds) == 0
+      pool.peerIds(after + MaxAge + 1.nanoseconds).len == 0
+      pool.get(info.peerId, after + MaxAge + 1.nanoseconds).isNone
+
+  test "peerIds and get agree at the age boundary":
+    let pool = MixNodePool.new(peerStore, maxRecordAge = Opt.some(MaxAge))
+    let info = mixNodes[0].toMixPubInfo()
+    pool.add(info)
+    let staleAt = pool.staleAt(info.peerId).get()
+    check:
+      pool.peerIds(staleAt) == @[info.peerId]
+      pool.get(info.peerId, staleAt).isSome
+      pool.peerIds(staleAt + 1.nanoseconds).len == 0
+      pool.get(info.peerId, staleAt + 1.nanoseconds).isNone
+
+  test "entries set before the pool was created count as never obtained":
+    let info = mixNodes[0].toMixPubInfo()
+    MixNodePool.new(peerStore).add(info)
+
+    let pool = MixNodePool.new(peerStore, maxRecordAge = Opt.some(MaxAge))
+    check:
+      pool.staleAt(info.peerId).isNone
+      pool.len == 0
+      pool.get(info.peerId).isNone
+
+  test "several entries become too old when the first of them does":
+    let pool = MixNodePool.new(peerStore, maxRecordAge = Opt.some(MaxAge))
+    let (first, second) = (mixNodes[0].toMixPubInfo(), mixNodes[1].toMixPubInfo())
+    pool.add(first)
+    pool.add(second)
+    let firstStaleAt = pool.staleAt(first.peerId).get()
+    check pool.staleAt([second.peerId, first.peerId]) == Opt.some(firstStaleAt)
+
+    check pool.remove(second.peerId)
+    check:
+      pool.staleAt([second.peerId, first.peerId]) == Opt.some(firstStaleAt)
+      pool.staleAt([second.peerId]).isNone
+
+  test "a removed entry has no age":
+    let pool = MixNodePool.new(peerStore, maxRecordAge = Opt.some(MaxAge))
+    let info = mixNodes[0].toMixPubInfo()
+    pool.add(info)
+    check pool.remove(info.peerId)
+    check pool.staleAt(info.peerId).isNone
+
+  test "without a maximum age, entries never become too old":
+    let pool = MixNodePool.new(peerStore)
+    let info = mixNodes[0].toMixPubInfo()
+    pool.add(info)
+    check:
+      pool.staleAt(info.peerId).isNone
+      pool.len(Moment.now() + chronos.days(365)) == 1

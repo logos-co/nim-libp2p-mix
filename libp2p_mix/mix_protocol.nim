@@ -7,12 +7,13 @@ import
   ./[
     curve25519, delay, padding, mix_message, mix_node, sphinx, serialization,
     tag_manager, mix_metrics, exit_layer, multiaddr, exit_connection, spam_protection,
-    delay_strategy, pool, cover_traffic, surb_store,
+    delay_strategy, pool, cover_traffic, surb_store, key_rotation,
   ]
 import libp2p/protocols/protocol
 import libp2p/stream/[connection, lpstream]
 import libp2p/[switch, multicodec, peeraddrpolicy, peerinfo, varint]
 import libp2p/crypto/crypto
+import nimcrypto/utils # burnMem
 import libp2p/utils/heartbeat
 
 export pool
@@ -85,6 +86,7 @@ type MixProtocol* = ref object of LPProtocol
   spamProtection: Opt[SpamProtection]
   delayStrategy: DelayStrategy
   coverTraffic*: Opt[CoverTraffic]
+  keyRing: Opt[MixKeyRing]
   ongoingMixMessages: Table[uint64, Future[void]]
     ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
     ## removal on completion is O(1).
@@ -101,8 +103,23 @@ proc registerDestReadBehavior*(
 ) =
   mixProto.destReadBehaviors[codec] = behavior
 
-proc localMixPubInfo*(mixProto: MixProtocol): MixPubInfo =
-  mixProto.mixNodeInfo.toMixPubInfo()
+proc ownMixPubKey(mixProto: MixProtocol): Result[FieldElement, string] {.raises: [].} =
+  ## The public key for this node's own hop in a packet built now.
+  let ring = mixProto.keyRing.valueOr:
+    return ok(mixProto.mixNodeInfo.mixPubKey)
+  let key = ring.currentPublicKey().valueOr:
+    return err("No current mix key")
+  ok(key)
+
+proc localMixPubInfo*(
+    mixProto: MixProtocol
+): Result[MixPubInfo, string] {.raises: [].} =
+  ## This node's record, with its current mix key. With a key ring there is no
+  ## key before start or after stop, and the record is replaced at each rotation,
+  ## so publish through the ring's key handler (Mix Key Rotation spec §4).
+  var info = mixProto.mixNodeInfo.toMixPubInfo()
+  info.mixPubKey = ?mixProto.ownMixPubKey()
+  ok(info)
 
 proc setLocalMultiAddr*(
     mixProto: MixProtocol, multiAddr: MultiAddress
@@ -341,6 +358,73 @@ proc verifyProof(
   trace "Spam protection proof verified successfully"
   return ok()
 
+type PacketKey = object
+  ## The key a received packet was built for, found before its spam proof is
+  ## verified.
+  case rotating: bool
+  of true:
+    match: KeyMatch
+  of false:
+    sharedSecret: FieldElement
+
+proc checkPacketKey(
+    mixProto: MixProtocol, sphinxPacket: SphinxPacket
+): Opt[PacketKey] {.raises: [].} =
+  ## None when the packet is discarded; the reason is counted here.
+  let ring = mixProto.keyRing.valueOr:
+    var replay = checkReplay(
+      sphinxPacket, mixProto.mixNodeInfo.mixPrivKey, mixProto.tagManager
+    ).valueOr:
+      error "Replay check failed", err = error
+      mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
+      return Opt.none(PacketKey)
+    defer:
+      burnMem(replay.sharedSecret)
+    if replay.isReplay:
+      mix_messages_error.inc(labelValues = ["Intermediate/Exit", "DUPLICATE"])
+      return Opt.none(PacketKey)
+    return Opt.some(PacketKey(rotating: false, sharedSecret: replay.sharedSecret))
+
+  var match = matchKey(sphinxPacket, ring.candidates()).valueOr:
+    error "Key matching failed", err = error
+    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
+    return Opt.none(PacketKey)
+  defer:
+    match.wipe()
+  let reason =
+    case match.status
+    of KeyMatched:
+      return Opt.some(PacketKey(rotating: true, match: match))
+    of KeyReplayed:
+      "DUPLICATE"
+    of KeyTableFull:
+      "REPLAY_CACHE_FULL"
+    of NoKeyMatched:
+      "INVALID_MAC"
+  mix_messages_error.inc(labelValues = ["Intermediate/Exit", reason])
+  Opt.none(PacketKey)
+
+proc wipe(key: var PacketKey) {.raises: [].} =
+  ## Processing wipes the shared secret only when it runs; this covers every
+  ## other way out, such as a failed spam proof (Mix Key Rotation spec §3.3).
+  if key.rotating:
+    key.match.wipe()
+  else:
+    burnMem(key.sharedSecret)
+
+proc processWithKey(
+    mixProto: MixProtocol, sphinxPacket: SphinxPacket, key: var PacketKey
+): Result[ProcessedSphinxPacket, string] {.raises: [].} =
+  if key.rotating:
+    processSphinxPacket(sphinxPacket, key.match)
+  else:
+    processSphinxPacket(
+      sphinxPacket,
+      mixProto.mixNodeInfo.mixPrivKey,
+      mixProto.tagManager,
+      Opt.some(key.sharedSecret),
+    )
+
 proc refundUnwritten(
     mixProto: MixProtocol, claimEpoch: uint64, proofToken: seq[byte] = @[]
 ) =
@@ -400,16 +484,10 @@ method handleMixMessages*(
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
     return
 
-  let (isReplay, sharedSecret) = checkReplay(
-    sphinxPacket, mixProto.mixNodeInfo.mixPrivKey, mixProto.tagManager
-  ).valueOr:
-    error "Replay check failed", err = error
-    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
+  var packetKey = mixProto.checkPacketKey(sphinxPacket).valueOr:
     return
-
-  if isReplay:
-    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "DUPLICATE"])
-    return
+  defer:
+    packetKey.wipe()
 
   # Step 3: Verify spam proof
   # Only done after replay check passes to avoid wasting cycles on duplicates
@@ -417,14 +495,15 @@ method handleMixMessages*(
     error "Spam protection verification failed", err = error
     return
 
+  # The matched key's grace window can end while the proof is verified.
+  if packetKey.rotating and not packetKey.match.key.isAccepted(Moment.now()):
+    debug "Mix key expired before processing"
+    mix_messages_error.inc(labelValues = ["Intermediate/Exit", "EXPIRED_KEY"])
+    return
+
   # Step 4: Full Sphinx processing
   # Reuse the shared secret computed in step 2 to avoid duplicate EC multiplication
-  let processedSP = processSphinxPacket(
-    sphinxPacket,
-    mixProto.mixNodeInfo.mixPrivKey,
-    mixProto.tagManager,
-    Opt.some(sharedSecret),
-  ).valueOr:
+  let processedSP = mixProto.processWithKey(sphinxPacket, packetKey).valueOr:
     error "Failed to process Sphinx packet", err = error
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
     return
@@ -480,9 +559,11 @@ method handleMixMessages*(
     trace "# Reply", id = processedSP.id
 
     # Expired credentials are invisible here even if no sweep has run yet.
-    let connCred = mixProto.surbStore.get(processedSP.id).valueOr:
+    var connCred = mixProto.surbStore.get(processedSP.id).valueOr:
       mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
       return
+    defer:
+      connCred.wipe()
 
     let reply = processReply(
       connCred.surbKey, connCred.surbSecret, processedSP.delta_prime
@@ -740,13 +821,21 @@ proc drawHops(
     hops.add(mixHop)
   ok(hops)
 
+type SurbBuild* = object
+  surb*: SURB
+  credentialsExpireAt*: Opt[Moment]
+    ## When the reply credentials must be unrecoverable: G - D after obtaining
+    ## the oldest record of the other hops on the SURB's return path (Mix Key
+    ## Rotation spec §7), none without a key ring
+
 method buildSurb*(
     mixProto: MixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
-): Result[SURB, string] {.base, gcsafe, raises: [].} =
+): Result[SurbBuild, string] {.base, gcsafe, raises: [].} =
   var
     publicKeys: seq[FieldElement] = @[]
     hops: seq[Hop] = @[]
     delays: seq[Delay] = @[]
+    pathPeerIds: seq[PeerId] = @[]
 
   # Remove exit and dest node from nodes to consider for surbs
   var poolPeerIds =
@@ -767,6 +856,7 @@ method buildSurb*(
         let mixHop = mixProto.drawUsable(poolPeerIds, "Entry/SURB").valueOr:
           return err(error)
         debug "Selected mix node for surbs: ", indexInPath = i
+        pathPeerIds.add(mixHop.info.peerId)
         (
           mixHop.info.mixPubKey,
           mixHop.addrBytes,
@@ -778,7 +868,7 @@ method buildSurb*(
         ).valueOr:
           mix_messages_error.inc(labelValues = ["Entry/SURB", "INVALID_MIX_INFO"])
           return err("failed to convert multiaddress to bytes: " & error)
-        (mixProto.mixNodeInfo.mixPubKey, selfAddrBytes, NoDelay) # No delay for last hop
+        (?mixProto.ownMixPubKey(), selfAddrBytes, NoDelay) # No delay for last hop
 
     publicKeys.add(mixPubKey)
 
@@ -786,7 +876,22 @@ method buildSurb*(
 
     delays.add(hopDelay)
 
-  return createSURB(publicKeys, delays, hops, id, mixProto.rng)
+  var surb = ?createSURB(publicKeys, delays, hops, id, mixProto.rng)
+  let ring = mixProto.keyRing.valueOr:
+    return ok(SurbBuild(surb: move(surb)))
+  # The packet carrying the SURB is sent before the oldest of these records goes
+  # stale, and the SURB's keys remain accepted for surbLifetime after sending,
+  # so every reply arrives by then: G - D after obtaining that record (Mix Key
+  # Rotation spec §5, §7).
+  ok(
+    SurbBuild(
+      surb: move(surb),
+      credentialsExpireAt: mixProto.nodePool.staleAt(pathPeerIds).map(
+          proc(staleAt: Moment): Moment =
+            staleAt + ring.config.surbLifetime
+        ),
+    )
+  )
 
 proc buildSurbs(
     mixProto: MixProtocol,
@@ -809,25 +914,30 @@ proc buildSurbs(
     var id: SURBIdentifier
     mixProto.rng.generate(id)
 
-    let surb = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
+    var built = mixProto.buildSurb(id, destPeerId, exitPeerId).valueOr:
       # Release whatever this group already registered; a partially built
       # group can never receive a usable reply.
       session.release()
       return err(error)
+    if built.credentialsExpireAt.isSome:
+      session.igroup.expireBy(built.credentialsExpireAt.get())
 
-    mixProto.surbStore.add(
-      id,
-      ConnCreds(
-        igroup: session.igroup,
-        incoming: incoming,
-        surbSecret: surb.secret.get(),
-        surbKey: surb.key,
-      ),
-    ).isOkOr:
+    # The per-hop secrets move out of the SURB, and the store keeps the only
+    # copy of the credentials, so none is left unwiped (Mix Key Rotation spec
+    # §7). The reply key stays in the SURB for the exit.
+    var creds = ConnCreds(
+      igroup: session.igroup,
+      incoming: incoming,
+      surbSecret: move(built.surb.secret.get()),
+      surbKey: built.surb.key,
+    )
+    let added = mixProto.surbStore.add(id, creds)
+    creds.wipe()
+    added.isOkOr:
       session.release()
       return err(error)
 
-    response.add(surb)
+    response.add(built.surb)
 
   return ok((response, Opt.some(session)))
 
@@ -1065,9 +1175,13 @@ proc sendLocal(
   # it are drawn.
   let lastHop =
     if destination.kind == MixNode:
+      # A node whose record is too old is treated as offline (Mix Key Rotation
+      # spec §5).
       let mixHop = mixProto.nodePool.getHop(destination.peerId).valueOr:
         mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
-        return err("Destination is not a mix node with a usable address")
+        return err(
+          "Destination is not a mix node with a usable address and a current record"
+        )
       Opt.some(mixHop)
     else:
       Opt.none(MixHop)
@@ -1247,6 +1361,7 @@ proc buildCoverPacket*(
     PathLength - 1, [mixProto.mixNodeInfo.peerId].toHashSet
   ).valueOr:
     return err(error)
+  let recordsStaleAt = mixProto.nodePool.staleAt(nodes.mapIt(it.info.peerId))
 
   var
     publicKeys: seq[FieldElement] = @[]
@@ -1262,7 +1377,7 @@ proc buildCoverPacket*(
     mixProto.mixNodeInfo.peerId, mixProto.mixNodeInfo.multiAddr
   ).valueOr:
     return err("Failed to convert self multiaddress to bytes: " & error)
-  publicKeys.add(mixProto.mixNodeInfo.mixPubKey)
+  publicKeys.add(?mixProto.ownMixPubKey())
   hops.add(Hop.init(selfAddrBytes))
   delays.add(NoDelay)
 
@@ -1294,6 +1409,7 @@ proc buildCoverPacket*(
       firstHopPeerId: firstNode.info.peerId,
       firstHopAddr: firstNode.info.multiAddr,
       proofToken: proofToken,
+      recordsStaleAt: recordsStaleAt,
     )
   )
 
@@ -1349,6 +1465,8 @@ proc sendCoverPacket*(
 
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
+  if mixProto.keyRing.isSome():
+    mixProto.keyRing.get().start()
   mixProto.tagManager.start()
   mixProto.surbStore.start()
   if mixProto.poolSizeLoop.isNil or mixProto.poolSizeLoop.finished:
@@ -1394,6 +1512,9 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
 
   await mixProto.tagManager.stop()
 
+  if mixProto.keyRing.isSome():
+    await mixProto.keyRing.get().stop()
+
   await mixProto.surbStore.stop()
   mixProto.surbStore.clear()
 
@@ -1408,12 +1529,21 @@ proc init*(
     surbStore: SurbStore = nil,
     hopBackoff: Duration = DefaultHopBackoff,
     hopAddressPolicy: PeerAddressPolicy = defaultAddressPolicy,
+    keyRing: Opt[MixKeyRing] = Opt.none(MixKeyRing),
 ) {.raises: [].} =
   ## Initialize a MixProtocol instance.
   ##
-  ## A nil `surbStore` gets a default one. Defaulting to nil rather than
-  ## `SurbStore.new()` keeps the constructor out of the parameter list, so
-  ## callers do not need `surb_store`'s `new` in scope.
+  ## A nil `surbStore` gets a default one, which with a `keyRing` purges every
+  ## tenth of the SURB lifetime; a supplied store keeps its own purge interval.
+  ## Defaulting to nil rather than `SurbStore.new()` keeps the constructor out
+  ## of the parameter list, so callers do not need `surb_store`'s `new` in scope.
+  ##
+  ## With a `keyRing` the node rotates its mix key (Mix Key Rotation spec), and
+  ## start and stop also start and stop the ring; stopping destroys its keys.
+  ## Paths then use only nodes whose MixPubKeyBook entry was set within the
+  ## rotation interval, so mix keys must come from discovery, not from
+  ## configuration or the node's own storage. Without one it uses
+  ## `mixNodeInfo.mixPrivKey` and `tagManager`.
   ##
   ## Mix node public keys should be populated via the nodePool after
   ## initialization using `mixProto.nodePool.add(mixPubInfo)`.
@@ -1450,14 +1580,28 @@ proc init*(
 
   doAssert not switch.rng.isNil, "Switch must have RNG initialized"
 
+  var
+    maxRecordAge = Opt.none(Duration)
+    surbHoldTime = Opt.none(Duration)
+    purgeInterval = DefaultSurbCredsPurgeInterval
+  if keyRing.isSome():
+    let ring = keyRing.get()
+    maxRecordAge = Opt.some(ring.config.rotationInterval)
+    surbHoldTime = Opt.some(ring.config.surbHoldTime)
+    # The default store keeps expired credentials until its next purge, so they
+    # outlive their expiry by at most a tenth of the SURB lifetime (Mix Key
+    # Rotation spec §7).
+    purgeInterval = min(purgeInterval, ring.config.surbLifetime div 10)
+
   let store =
     if surbStore.isNil:
-      SurbStore.new()
+      SurbStore.new(purgeInterval = purgeInterval)
     else:
       surbStore
 
-  # A SURB reply is only accepted while its replay tag is still cached, so
-  # holding credentials longer than the tag TTL cannot buy anything.
+  # Without a key ring, a SURB reply is only accepted while its replay tag is
+  # still cached, so holding credentials longer than the tag TTL cannot buy
+  # anything.
   doAssert store.ttl <= tagManager.tagTTL,
     "SURB credential TTL must not exceed the replay tag TTL"
 
@@ -1465,8 +1609,9 @@ proc init*(
   mixProto.hopBackoff = hopBackoff
   mixProto.switch = switch
   mixProto.rng = switch.rng
-  mixProto.nodePool = MixNodePool.new(switch.peerStore, hopAddressPolicy)
+  mixProto.nodePool = MixNodePool.new(switch.peerStore, hopAddressPolicy, maxRecordAge)
   mixProto.tagManager = tagManager
+  mixProto.keyRing = keyRing
   mixProto.surbStore = store
   mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
 
@@ -1529,7 +1674,8 @@ proc init*(
     (await mixProto.sendSurbReply(surb, message)).isOkOr:
       error "could not send reply", err = error
 
-  mixProto.exitLayer = ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehaviors)
+  mixProto.exitLayer =
+    ExitLayer.init(switch, onReplyDialer, mixProto.destReadBehaviors, surbHoldTime)
 
   mixProto.codecs = @[MixProtocolID]
   mixProto.handler = proc(
@@ -1551,6 +1697,7 @@ proc new*(
     surbStore: SurbStore = nil,
     hopBackoff: Duration = DefaultHopBackoff,
     hopAddressPolicy: PeerAddressPolicy = defaultAddressPolicy,
+    keyRing: Opt[MixKeyRing] = Opt.none(MixKeyRing),
 ): T {.raises: [].} =
   ## Create a new MixProtocol instance.
   ##
@@ -1563,6 +1710,6 @@ proc new*(
   let mixProto = new(T)
   mixProto.init(
     mixNodeInfo, switch, tagManager, spamProtection, delayStrategy, coverTraffic,
-    surbStore, hopBackoff, hopAddressPolicy,
+    surbStore, hopBackoff, hopAddressPolicy, keyRing,
   )
   mixProto

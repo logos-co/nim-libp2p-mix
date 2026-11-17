@@ -2,6 +2,7 @@
 # Copyright (c) Status Research & Development GmbH
 
 import results
+import nimcrypto/utils # burnMem
 import libp2p/crypto/[crypto, curve25519]
 
 const FieldElementSize* = Curve25519KeySize
@@ -95,6 +96,16 @@ proc multiplyPointWithScalars*(
   for scalar in scalars:
     Curve25519.mul(res, scalar)
   res
+
+proc multiplyPointWithSecret*(
+    point: FieldElement, scalar: FieldElement
+): FieldElement {.raises: [].} =
+  ## Multiply a Curve25519 point with one secret scalar, wiping the copy made
+  ## for the multiplication.
+  var scalars = [scalar]
+  defer:
+    burnMem(scalars)
+  multiplyPointWithScalars(point, scalars)
 
 proc multiplyBasePointWithScalars*(
     scalars: openArray[FieldElement]

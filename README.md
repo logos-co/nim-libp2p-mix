@@ -22,6 +22,7 @@ code follows the spec, not the other way round.
 |---|---|---|
 | **LIBP2P-MIX** — core mix protocol, Sphinx packet construction & handling | 99 | [lip.logos.co/ift-ts/raw/mix.html](https://lip.logos.co/ift-ts/raw/mix.html) |
 | **Mix Cover Traffic** — constant-rate cover traffic, slot accounting, epoch handling | TBD | [lip.logos.co/ift-ts/raw/mix-cover-traffic.html](https://lip.logos.co/ift-ts/raw/mix-cover-traffic.html) |
+| **Mix Key Rotation** — local-timer mix key rotation, grace window, per-key replay tables | TBD | [lip.logos.co/anoncomms/raw/mix-key-rotation.html](https://lip.logos.co/anoncomms/raw/mix-key-rotation.html) |
 | **RLN DoS Protection for Mixnet** — per-hop RLN proof, membership tree | 144 | [lip.logos.co/ift-ts/raw/mix-spam-protection-rln.html](https://lip.logos.co/ift-ts/raw/mix-spam-protection-rln.html) |
 | **Mix DoS Protection** — abstract spam-protection interface | TBD | [lip.logos.co/ift-ts/raw/mix-dos-protection.html](https://lip.logos.co/ift-ts/raw/mix-dos-protection.html) |
 
@@ -29,9 +30,10 @@ code follows the spec, not the other way round.
 
 ```
 libp2p_mix.nim            Top-level facade — re-exports the public API
-libp2p_mix/               Protocol implementation (24 modules)
+libp2p_mix/               Protocol implementation (25 modules)
   ├── mix_protocol.nim    Core mix protocol (mounts on a libp2p Switch)
   ├── sphinx.nim          Sphinx packet format with LIONESS payload encryption
+  ├── key_rotation.nim    Mix key ring, replay tables, and rotation config
   ├── cover_traffic.nim   Constant-rate cover-traffic generator
   ├── exit_layer.nim      Exit-node behaviour & dest read framing
   ├── entry_connection.nim/exit_connection.nim/reply_connection.nim

@@ -622,7 +622,7 @@ suite "Slot refund - packet stages":
     let exitPeerId = nodes[^1].switch.peerInfo.peerId
     let surb = nodes[0]
       .buildSurb(rng().generate(SURBIdentifier), exitPeerId, exitPeerId)
-      .expect("SURB")
+      .expect("SURB").surb
     let ct = nodes[^1].attachCover()
     delays[^1].delay = LongWait
 

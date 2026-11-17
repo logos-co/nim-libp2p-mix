@@ -8,7 +8,7 @@
 ## providing a clean interface for the mix protocol to interact with mix node data.
 
 import std/[sequtils, tables]
-import results
+import chronos, results
 import libp2p/peerstore
 import libp2p/peerid
 import libp2p/multiaddress
@@ -67,17 +67,62 @@ type MixNodePool* = ref object
   hopAddressPolicy: PeerAddressPolicy
     ## Decides which addresses of a pool member can be its hop address, that is, the
     ## address that the previous node on a path dials.
+  maxRecordAge: Opt[Duration]
+  obtainedAt: Table[PeerId, Moment] ## When each MixPubKeyBook entry was last set
 
 proc new*(
     T: typedesc[MixNodePool],
     peerStore: PeerStore,
     hopAddressPolicy: PeerAddressPolicy = defaultAddressPolicy,
+    maxRecordAge: Opt[Duration] = Opt.none(Duration),
 ): T {.raises: [].} =
   ## Create a new MixNodePool instance backed by the given peerStore.
   ## A nil `hopAddressPolicy` is replaced by the default policy, which accepts any
   ## address, so the pool can call the policy without a nil check.
+  ##
+  ## With maxRecordAge, a node is left out once its MixPubKeyBook entry was
+  ## last set longer ago, until it is set again (Mix Key Rotation spec §5).
+  ## Entries already in the book count as never set.
   let policy = if hopAddressPolicy.isNil(): defaultAddressPolicy else: hopAddressPolicy
-  T(peerStore: peerStore, hopAddressPolicy: policy)
+  let pool =
+    T(peerStore: peerStore, hopAddressPolicy: policy, maxRecordAge: maxRecordAge)
+  if maxRecordAge.isSome:
+    peerStore[MixPubKeyBook].addHandler(
+      proc(peerId: PeerId) {.gcsafe, raises: [].} =
+        if peerId in pool.peerStore[MixPubKeyBook]:
+          pool.obtainedAt[peerId] = Moment.now()
+        else:
+          pool.obtainedAt.del(peerId)
+    )
+  pool
+
+proc staleAt*(pool: MixNodePool, peerId: PeerId): Opt[Moment] {.raises: [].} =
+  ## When the node's entry becomes too old, or none without maxRecordAge or an
+  ## entry set since the pool was created.
+  let maxAge = pool.maxRecordAge.valueOr:
+    return Opt.none(Moment)
+  pool.obtainedAt.withValue(peerId, obtainedAt):
+    return Opt.some(obtainedAt[] + maxAge)
+  Opt.none(Moment)
+
+proc staleAt*(
+    pool: MixNodePool, peerIds: openArray[PeerId]
+): Opt[Moment] {.raises: [].} =
+  ## When the first of these nodes' entries becomes too old, or none if none of
+  ## them has an age.
+  var first = Opt.none(Moment)
+  for peerId in peerIds:
+    let staleAt = pool.staleAt(peerId).valueOr:
+      continue
+    first = Opt.some(min(staleAt, first.get(staleAt)))
+  first
+
+proc isFresh(pool: MixNodePool, peerId: PeerId, now: Moment): bool {.raises: [].} =
+  if pool.maxRecordAge.isNone:
+    return true
+  let staleAt = pool.staleAt(peerId).valueOr:
+    return false
+  now <= staleAt
 
 proc add*(pool: MixNodePool, info: MixPubInfo) =
   ## Add a mix node to the pool.
@@ -147,12 +192,15 @@ proc selectHopAddress(pool: MixNodePool, peerId: PeerId): Opt[HopAddress] =
           return Opt.some((maddr, addrBytes))
   Opt.none(HopAddress)
 
-proc getHop*(pool: MixNodePool, peerId: PeerId): Opt[MixHop] {.raises: [].} =
+proc getHop*(
+    pool: MixNodePool, peerId: PeerId, now: Moment = Moment.now()
+): Opt[MixHop] {.raises: [].} =
   ## Get MixPubInfo for a peer together with its hop address already encoded for the
   ## Sphinx header, so that a path builder does not have to encode it again.
-  ## Returns none if the peer is not in the pool, or has no key or no hop address.
+  ## Returns none if the peer is not in the pool, its entry is too old, or it has no
+  ## key or no hop address.
   let mixPubKey = pool.peerStore[MixPubKeyBook][peerId]
-  if mixPubKey == default(Curve25519Key):
+  if mixPubKey == default(Curve25519Key) or not pool.isFresh(peerId, now):
     return Opt.none(MixHop)
 
   let pubKey = pool.peerStore[KeyBook][peerId]
@@ -169,20 +217,38 @@ proc getHop*(pool: MixNodePool, peerId: PeerId): Opt[MixHop] {.raises: [].} =
     )
   )
 
-proc get*(pool: MixNodePool, peerId: PeerId): Opt[MixPubInfo] {.raises: [].} =
+proc get*(
+    pool: MixNodePool, peerId: PeerId, now: Moment = Moment.now()
+): Opt[MixPubInfo] {.raises: [].} =
   ## Get MixPubInfo for a peer.
-  ## Returns none if the peer is not in the pool, or has no key or no hop address.
-  let hop = pool.getHop(peerId).valueOr:
+  ## Returns none if the peer is not in the pool, its entry is too old, or it has no
+  ## key or no hop address.
+  let hop = pool.getHop(peerId, now).valueOr:
     return Opt.none(MixPubInfo)
   Opt.some(hop.info)
 
-proc peerIds*(pool: MixNodePool): seq[PeerId] =
-  ## Get all peer IDs in the mix node pool.
-  pool.peerStore[MixPubKeyBook].book.keys.toSeq()
+proc peerIds*(
+    pool: MixNodePool, now: Moment = Moment.now()
+): seq[PeerId] {.raises: [].} =
+  ## Get all peer IDs in the mix node pool, leaving out entries that are too old.
+  if pool.maxRecordAge.isNone:
+    return pool.peerStore[MixPubKeyBook].book.keys.toSeq()
+  var peerIds: seq[PeerId]
+  for peerId in pool.peerStore[MixPubKeyBook].book.keys:
+    if pool.isFresh(peerId, now):
+      peerIds.add(peerId)
+  peerIds
 
-proc len*(pool: MixNodePool): int =
-  ## Get the number of mix nodes in the pool.
-  pool.peerStore[MixPubKeyBook].len
+proc len*(pool: MixNodePool, now: Moment = Moment.now()): int {.raises: [].} =
+  ## Get the number of mix nodes in the pool, leaving out entries that are too
+  ## old.
+  if pool.maxRecordAge.isNone:
+    return pool.peerStore[MixPubKeyBook].len
+  var count = 0
+  for peerId in pool.peerStore[MixPubKeyBook].book.keys:
+    if pool.isFresh(peerId, now):
+      count += 1
+  count
 
 proc countUsable*(pool: MixNodePool): int {.raises: [].} =
   ## Counts the pool members that a path can use, which means reading every member's
