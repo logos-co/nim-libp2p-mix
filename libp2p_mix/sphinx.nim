@@ -3,6 +3,7 @@
 
 import results
 import stew/ctops
+import nimcrypto/utils # burnMem
 import ./[crypto, curve25519, delay, lioness, serialization, tag_manager]
 import libp2p/crypto/crypto
 
@@ -40,41 +41,67 @@ proc computeAlpha(
     alpha: FieldElement
     secret: FieldElement
     blinders: seq[FieldElement] = @[]
+  # The blinders include the ephemeral scalar, so they are wiped too. The
+  # secrets in s are moved out on success and wiped on every early return.
+  defer:
+    burnMem(secret)
+    for blinder in blinders.mitems:
+      burnMem(blinder)
+    for hopSecret in s.mitems:
+      burnMem(hopSecret)
 
-  let x = generateRandomFieldElement().valueOr:
+  var x = generateRandomFieldElement().valueOr:
     return err("Generate field element error: " & error)
 
   blinders.add(x)
+  burnMem(x)
 
   for i in 0 ..< publicKeys.len:
     if publicKeys[i].len != FieldElementSize:
       return err("Invalid public key size: " & $i)
 
     # Compute alpha, shared secret, and blinder
+    var scalars = [blinders[i]]
+    defer:
+      burnMem(scalars)
     if i == 0:
-      alpha = multiplyBasePointWithScalars([blinders[i]]).valueOr:
+      alpha = multiplyBasePointWithScalars(scalars).valueOr:
         return err("Multiply base point with scalars error: " & error)
 
       alpha_0 = fieldElementToBytes(alpha)
     else:
-      alpha = multiplyPointWithScalars(alpha, [blinders[i]])
+      alpha = multiplyPointWithScalars(alpha, scalars)
 
     # TODO: Optimize point multiplication by multiplying scalars first
     secret = multiplyPointWithScalars(publicKeys[i], blinders)
+    var
+      secretBytes = fieldElementToBytes(secret)
+      blinderInput = fieldElementToBytes(alpha) & secretBytes
+      blinderHash = sha256_hash(blinderInput)
+    defer:
+      burnMem(secretBytes)
+      burnMem(blinderInput)
+      burnMem(blinderHash)
 
-    let blinder = bytesToFieldElement(
-      sha256_hash(fieldElementToBytes(alpha) & fieldElementToBytes(secret))
-    ).valueOr:
+    var blinder = bytesToFieldElement(blinderHash).valueOr:
       return err("Error in bytes to field element conversion: " & error)
 
     blinders.add(blinder)
+    burnMem(blinder)
 
-    s[i] = fieldElementToBytes(secret)
+    s[i] = secretBytes
 
-  return ok((alpha_0, s))
+  return ok((alpha_0, move(s)))
 
 proc deriveKeyMaterial(keyName: string, s: seq[byte]): seq[byte] =
   @(keyName.toOpenArrayByte(0, keyName.high)) & s
+
+proc deriveKey(label: string, sBytes: seq[byte]): seq[byte] {.raises: [].} =
+  ## KDF over label and the shared secret, wiping the input that holds the secret.
+  var material = deriveKeyMaterial(label, sBytes)
+  defer:
+    burnMem(material)
+  material.kdf()
 
 proc isZeros(data: seq[byte], startIdx: int, endIdx: int): bool =
   doAssert 0 <= startIdx and endIdx < data.len and startIdx <= endIdx
@@ -88,9 +115,12 @@ proc computeFillerStrings(s: seq[seq[byte]]): Result[seq[byte], string] =
 
   for i in 1 ..< s.len:
     # Derive AES key and IV
-    let
-      aes_key = deriveKeyMaterial(AesKeyLabel, s[i - 1]).kdf()
-      iv = deriveKeyMaterial(IvLabel, s[i - 1]).kdf()
+    var
+      aes_key = deriveKey(AesKeyLabel, s[i - 1])
+      iv = deriveKey(IvLabel, s[i - 1])
+    defer:
+      burnMem(aes_key)
+      burnMem(iv)
 
     # Compute filler string
     let
@@ -124,10 +154,14 @@ proc computeBetaGamma(
 
   for i in countdown(sLen - 1, 0):
     # Derive AES key, MAC key, and IV
-    let
-      beta_aes_key = deriveKeyMaterial(AesKeyLabel, s[i]).kdf()
-      mac_key = deriveKeyMaterial(MacKeyLabel, s[i]).kdf()
-      beta_iv = deriveKeyMaterial(IvLabel, s[i]).kdf()
+    var
+      beta_aes_key = deriveKey(AesKeyLabel, s[i])
+      mac_key = deriveKey(MacKeyLabel, s[i])
+      beta_iv = deriveKey(IvLabel, s[i])
+    defer:
+      burnMem(beta_aes_key)
+      burnMem(mac_key)
+      burnMem(beta_iv)
 
     # Compute Beta and Gamma
     if i == sLen - 1:
@@ -157,7 +191,10 @@ proc computeDelta(s: seq[seq[byte]], msg: Message): Result[seq[byte], string] =
 
   for i in countdown(sLen - 1, 0):
     # delta_key = KDF("payload_enc_key", s_i) is the LIONESS seed for this layer.
-    let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+    var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+    defer:
+      burnMem(delta_key)
+
     var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
       return err("LIONESS init error: " & $error)
     defer:
@@ -187,8 +224,12 @@ proc createSURB*(
     return err("id should be initialized")
 
   # Compute alpha and shared secrets
-  let (alpha_0, s) = computeAlpha(publicKeys).valueOr:
+  var (alpha_0, s) = computeAlpha(publicKeys).valueOr:
     return err("Error in alpha generation: " & error)
+  # The secrets move into the SURB, or are wiped if it cannot be built.
+  defer:
+    for hopSecret in s.mitems:
+      burnMem(hopSecret)
 
   # Compute beta and gamma
   let (beta_0, gamma_0) = computeBetaGamma(s, hops, delay, Hop(), id).valueOr:
@@ -202,7 +243,7 @@ proc createSURB*(
     SURB(
       hop: hops[0],
       header: Header.init(alpha_0, beta_0, gamma_0),
-      secret: Opt.some(s),
+      secret: Opt.some(move(s)),
       key: key,
     )
   )
@@ -229,7 +270,10 @@ proc processReply*(
   # return-path secrets (i = L-1 downto 0), reversing each return hop's
   # decryption so that only the reply sender's initial encryption remains.
   for i in countdown(s.len - 1, 0):
-    let delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+    var delta_key = sha256DomSepKdf(PayloadEncKeyLabel, s[i])
+    defer:
+      burnMem(delta_key)
+
     var lion = Lioness.init(MixLionessScheme, delta_key).valueOr:
       return err("LIONESS init error: " & $error)
     defer:
@@ -265,8 +309,11 @@ proc wrapInSphinxPacket*(
     destHop: Hop,
 ): Result[SphinxPacket, string] =
   # Compute alpha and shared secrets
-  let (alpha_0, s) = computeAlpha(publicKeys).valueOr:
+  var (alpha_0, s) = computeAlpha(publicKeys).valueOr:
     return err("Error in alpha generation: " & error)
+  defer:
+    for hopSecret in s.mitems:
+      burnMem(hopSecret)
 
   # Compute beta and gamma
   let (beta_0, gamma_0) = computeBetaGamma(
