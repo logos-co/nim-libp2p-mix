@@ -4,48 +4,13 @@
 {.used.}
 
 import std/sequtils
-import chronos, metrics, results
+import chronos, results
 import libp2p/[switch, peerid, multiaddress]
 import libp2p_mix
 import
-  libp2p_mix/[
-    mix_protocol, mix_node, mix_metrics, cover_traffic, delay_strategy, spam_protection
-  ]
+  libp2p_mix/[mix_protocol, mix_node, cover_traffic, delay_strategy, spam_protection]
 import ../tools/[lifecycle, unittest, crypto]
 import ../[utils, spam_protection_impl]
-
-type HoldingServer = ref object
-  ## A TCP server that accepts and never answers, so a dial to it stays in its
-  ## handshake.
-  server: StreamServer
-  connections: seq[StreamTransport]
-  acceptor: Future[void]
-
-proc new(T: typedesc[HoldingServer]): T =
-  let hold = T(server: createStreamServer(initTAddress("127.0.0.1:0")))
-  proc acceptLoop() {.async.} =
-    while true:
-      hold.connections.add(await hold.server.accept())
-
-  hold.acceptor = acceptLoop()
-  hold
-
-proc address(hold: HoldingServer): MultiAddress =
-  MultiAddress.init(hold.server.localAddress()).expect("address")
-
-proc close(hold: HoldingServer) {.async.} =
-  await hold.acceptor.cancelAndWait()
-  for connection in hold.connections:
-    await connection.closeWait()
-  await hold.server.closeWait()
-
-proc errorCount(role, reason: string): float64 =
-  ## The count of `mix_messages_error` for `role` and `reason`. 0 before the
-  ## label exists.
-  try:
-    mix_messages_error.value([role, reason])
-  except KeyError:
-    0.0
 
 const ReplyParams = MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8))
 
@@ -111,7 +76,7 @@ suite "Hop stream cache":
     check:
       stopped.isErr
       errorCount("Cover", "SEND_FAILED") == errorsBefore
-    # A dial refused by the stop counts nothing either.
+    # A send that the stop refuses counts nothing either.
     let refused = await nodes[0].sendCoverPacket(hopPeerId, hopAddr, @[1.byte])
     check:
       refused.isErr
@@ -133,6 +98,20 @@ suite "Hop stream cache":
     checkUntilTimeout:
       hold.connections.len == 1
     await sending.cancelAndWait()
+
+  asyncTest "protocol stop closes the cached hop streams":
+    let echoProto = EchoProtocol.new()
+    let nodes = await setupMixNodes(
+      5, destReadBehavior = Opt.some((codec: echoProto.codec, callback: readLp(1024)))
+    )
+    nodes[^1].switch.mount(echoProto)
+    startAndDeferStop(nodes)
+    let sender = nodes[0]
+
+    await exchange(sender, nodes[^1].toMixDestination(), echoProto.codec, 7)
+    check outgoingMixStreams(sender.switch).len > 0
+    await sender.stop()
+    check outgoingMixStreams(sender.switch).len == 0
 
   asyncTest "protocol stop fails a send that waits on a dial and refunds its slot and proof":
     # A node that counts the proofs it reclaims, with a slot pool whose epochs
