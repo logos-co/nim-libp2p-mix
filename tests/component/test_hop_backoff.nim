@@ -166,7 +166,7 @@ suite "Hop backoff":
     await startNodes(nodes)
     defer:
       await stopNodes(nodes)
-    let hop = nodes[4].localMixPubInfo()
+    let hop = nodes[4].localMixPubInfo().expect("local mix info")
     await nodes[4].switch.stop()
     let first = await nodes[0].sendUntilFirstHopFails(nodes[5], 40)
     check first
@@ -185,7 +185,7 @@ suite "Hop backoff":
     await startNodes(nodes)
     defer:
       await stopNodes(nodes)
-    let hop = nodes[4].localMixPubInfo()
+    let hop = nodes[4].localMixPubInfo().expect("local mix info")
     # A direct cover send caches a stream to the hop.
     let cached = await nodes[0].sendCoverPacket(hop.peerId, hop.multiAddr, @[1.byte])
     check cached.isOk
@@ -228,7 +228,7 @@ suite "Hop backoff":
     await startNodes(nodes)
     defer:
       await stopNodes(nodes)
-    let hop = nodes[1].localMixPubInfo()
+    let hop = nodes[1].localMixPubInfo().expect("local mix info")
     await nodes[0].stop()
     let refused = await nodes[0].sendCoverPacket(hop.peerId, hop.multiAddr, @[1.byte])
     check refused.isErr
@@ -265,8 +265,12 @@ suite "Hop backoff":
     await startNodes(nodes)
     defer:
       await stopNodes(nodes)
-    let hop = nodes[1].localMixPubInfo()
-    let path = @[hop, nodes[2].localMixPubInfo(), nodes[3].localMixPubInfo()]
+    let hop = nodes[1].localMixPubInfo().expect("local mix info")
+    let path = @[
+      hop,
+      nodes[2].localMixPubInfo().expect("local mix info"),
+      nodes[3].localMixPubInfo().expect("local mix info"),
+    ]
     let wrong = makeSurb(path, closedPortAddress())
     # No stream to the hop is cached, so the reply fails its first dial.
     let firstDial = await nodes[0].sendSurbReply(wrong, @[1.byte])
@@ -298,8 +302,12 @@ suite "Hop backoff":
     defer:
       await stopNodes(nodes)
     let hold = HoldingServer.new()
-    let hop = nodes[1].localMixPubInfo()
-    let path = @[hop, nodes[2].localMixPubInfo(), nodes[3].localMixPubInfo()]
+    let hop = nodes[1].localMixPubInfo().expect("local mix info")
+    let path = @[
+      hop,
+      nodes[2].localMixPubInfo().expect("local mix info"),
+      nodes[3].localMixPubInfo().expect("local mix info"),
+    ]
     # The reply dials the hop at the address of the server.
     # The dial stays in its handshake.
     let reply = nodes[0].sendSurbReply(makeSurb(path, hold.address()), @[1.byte])

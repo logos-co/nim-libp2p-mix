@@ -24,7 +24,6 @@
 import std/[sets, tables]
 import chronicles, chronos, metrics
 import libp2p/utils/[heartbeat, opt]
-import nimcrypto/utils # burnMem
 import results
 import ./[mix_metrics, serialization, sphinx]
 

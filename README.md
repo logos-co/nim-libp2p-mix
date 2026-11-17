@@ -200,7 +200,8 @@ A mounted, started `MixProtocol` can deliver opaque service payloads through
 or change the peer store. It applies the configured hop-address policy to the
 explicit address; relays use normal usable-address selection and first-hop backoff.
 
-`createSurb` returns a `surb` and a separate `ReplyCredential`. Keep the credential
+`createSurb` returns a `SurbBuild` containing a `surb` and a separate
+`ReplyCredential`. Keep the credential
 at the requester, serialize only the SURB, and send a reply with `sendWithSurb`.
 Treat the supplied SURB as consumed even when the send fails. A registered raw
 reply handler can recover its payload with `recoverReply(credential, reply)`;
@@ -208,6 +209,17 @@ return `Unhandled` to retain the embedded connection fallback. Each embedded
 SURB is consumed independently, so other replies in its group remain usable.
 This replaces the lower-level key/secret reply interface; connection-based
 consumers can continue using `toConnection`.
+
+With key rotation enabled, `SurbBuild` also exposes `dispatchBefore`,
+`replyHoldTime`, `replyTransitAllowance` and `credentialsExpireAt`. These are
+local monotonic-clock bounds: dispatch before the first deadline, limit how long
+the recipient holds the block, and wipe retained credentials by their expiry.
+The transit allowance covers supply delivery and reply transit under the
+configured Mix timing assumptions. Plug-ins must account for time spent waiting
+and retrying; passing a SURB to `sendWithSurb` does not enforce these bounds.
+Without rotation these fields are absent. Call `wipe` when retiring a credential.
+An explicit destination address does not bypass rotation: its key must match a
+fresh record in the node pool.
 
 Both service-send overloads and `sendWithSurb` participate in protocol shutdown.
 Stopping the protocol ends pending sends with an error; caller cancellation

@@ -529,6 +529,11 @@ suite "Sphinx Tests":
       recoverSphinxReply(created.credential, rawReply).expect("Reply processing failed")
 
     check msg == message
+    var retired = created.credential
+    retired.wipe()
+    check recoverSphinxReply(retired, rawReply).isErr
+    # Wiping a retained copy must not corrupt the credential still owned by caller.
+    check recoverSphinxReply(created.credential, rawReply).get() == message
 
   test "surb reply rejects tampered payload":
     let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()

@@ -10,7 +10,7 @@ import libp2p/stream/connection
 import chronos
 from ./libp2p_mix/serialization import
   SURB, SURBIdentifier, deserializeSurb, serializeSurb
-from ./libp2p_mix/sphinx import ReplyCredential, RawSurbReply, identifier
+from ./libp2p_mix/sphinx import wipe, ReplyCredential, RawSurbReply, identifier
 
 export toConnection
 export MixProtocolID
@@ -45,6 +45,8 @@ export SURB
 export SURBIdentifier
 export deserializeSurb
 export serializeSurb
+export SurbBuild
+export wipe
 export ReplyCredential
 export RawSurbReply
 export identifier

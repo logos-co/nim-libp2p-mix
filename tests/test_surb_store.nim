@@ -124,8 +124,7 @@ suite "SURB Store":
     var creds = makeCreds(store.newGroup(base))
     creds.wipe()
     check:
-      creds.surbKey.allIt(it == 0)
-      creds.surbSecret.allIt(it.allIt(it == 0))
+      creds.credential == default(ReplyCredential)
 
   test "a group expires by the soonest deadline it is given":
     let igroup = store.newGroup(base)

@@ -186,7 +186,9 @@ suite "Slot refund - forward":
     let exitPeer = nodes[4].switch.peerInfo.peerId
     for node in nodes[1 .. 3]:
       let conn = await node.switch.dial(
-        exitPeer, @[nodes[4].localMixPubInfo().multiAddr], @[MixProtocolID]
+        exitPeer,
+        @[nodes[4].localMixPubInfo().expect("local mix info").multiAddr],
+        @[MixProtocolID],
       )
       node.connPool[exitPeer] = conn
 
@@ -846,7 +848,9 @@ suite "Slot refund - message API lifecycle":
       delays[0].delay = LongWait
       let sending =
         if explicitDestination:
-          nodes[0].send(nodes[^1].localMixPubInfo(), TestCodec, @[1.byte])
+          nodes[0].send(
+            nodes[^1].localMixPubInfo().expect("local mix info"), TestCodec, @[1.byte]
+          )
         else:
           nodes[0].send(MixDestination.exitNode(nodes[^1].peerId), TestCodec, @[1.byte])
       checkUntilTimeout:
@@ -867,7 +871,9 @@ suite "Slot refund - message API lifecycle":
       delays[0].delay = LongWait
       let sending =
         if explicitDestination:
-          nodes[0].send(nodes[^1].localMixPubInfo(), TestCodec, @[1.byte])
+          nodes[0].send(
+            nodes[^1].localMixPubInfo().expect("local mix info"), TestCodec, @[1.byte]
+          )
         else:
           nodes[0].send(MixDestination.exitNode(nodes[^1].peerId), TestCodec, @[1.byte])
       checkUntilTimeout:

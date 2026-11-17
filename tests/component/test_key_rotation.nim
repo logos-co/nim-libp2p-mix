@@ -269,3 +269,19 @@ suite "Mix Protocol - Key Rotation":
       built.recordsStaleAt.isSome
       built.recordsStaleAt.get() <=
         nodes[0].nodePool.staleAt(built.firstHopPeerId).expect("first hop stale at")
+
+  asyncTest "the plug-in SURB API exposes dispatch, holding and credential bounds":
+    let config = fastRotationConfig()
+    let (nodes, _, _) = setupKeyRotationNodes(5, config = config)
+    startAndDeferStop(nodes)
+    var built = nodes[0]
+      .createSurb(MixDestination.exitNode(nodes[4].switch.peerInfo.peerId))
+      .expect("plug-in SURB")
+    defer:
+      built.credential.wipe()
+    check:
+      built.dispatchBefore.isSome
+      built.replyHoldTime == Opt.some(config.surbHoldTime)
+      built.credentialsExpireAt ==
+        Opt.some(built.dispatchBefore.get() + config.surbLifetime)
+      built.credential.identifier != default(SURBIdentifier)

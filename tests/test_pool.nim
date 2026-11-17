@@ -627,3 +627,14 @@ suite "MixNodePool record age":
     check:
       pool.staleAt(info.peerId).isNone
       pool.len(Moment.now() + chronos.days(365)) == 1
+
+  test "explicit destinations cannot bypass record age or replace the recorded key":
+    let pool = MixNodePool.new(peerStore, maxRecordAge = Opt.some(MaxAge))
+    var info = mixNodes[0].toMixPubInfo()
+    check pool.getHop(info).isNone
+    pool.add(info)
+    let deadline = pool.staleAt(info.peerId).get()
+    check pool.getHop(info, deadline).isSome
+    check pool.getHop(info, deadline + 1.nanoseconds).isNone
+    info.mixPubKey = mixNodes[1].toMixPubInfo().mixPubKey
+    check pool.getHop(info).isNone

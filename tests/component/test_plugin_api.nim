@@ -22,7 +22,8 @@ suite "Mix Protocol - Plug-in API":
     let sender = nodes[0]
     let destination = nodes[1]
     let forwardDestination = MixDestination.forwardToAddr(
-      destination.switch.peerInfo.peerId, destination.localMixPubInfo().multiAddr
+      destination.switch.peerInfo.peerId,
+      destination.localMixPubInfo().expect("local mix info").multiAddr,
     )
 
     check sender.createSurb(forwardDestination).isErr
@@ -62,7 +63,7 @@ suite "Mix Protocol - Plug-in API":
     # A provider learned outside relay discovery can be the exit node without
     # joining the relay pool. The explicit send must deliver through that node
     # while leaving it absent from the sender's pool.
-    let destinationInfo = destination.localMixPubInfo()
+    let destinationInfo = destination.localMixPubInfo().expect("local mix info")
     discard sender.nodePool.remove(destinationId)
     let explicitPayload = @[9.byte, 8, 7]
     (await sender.send(destinationInfo, fallbackProto.codec, explicitPayload)).expect(

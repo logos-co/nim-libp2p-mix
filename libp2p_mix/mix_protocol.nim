@@ -936,6 +936,12 @@ proc drawHops(
 type SurbBuild* = object
   surb*: SURB
   credential*: ReplyCredential
+  dispatchBefore*: Opt[Moment]
+    ## Send the packet carrying this SURB before the oldest path record is stale.
+  replyTransitAllowance*: Opt[Duration]
+    ## Budget for supply delivery and reply transit under the rotation configuration.
+  replyHoldTime*: Opt[Duration]
+    ## Maximum time a receiver may retain a freshly dispatched SURB.
   credentialsExpireAt*: Opt[Moment]
     ## When the reply credentials must be unrecoverable: G - D after obtaining
     ## the oldest record of the other hops on the SURB's return path (Mix Key
@@ -1000,6 +1006,10 @@ method buildSurb*(
     SurbBuild(
       surb: move(created.surb),
       credential: move(created.credential),
+      dispatchBefore: mixProto.nodePool.staleAt(pathPeerIds),
+      replyHoldTime: Opt.some(ring.config.surbHoldTime),
+      replyTransitAllowance:
+        Opt.some(ring.config.surbLifetime - ring.config.surbHoldTime),
       credentialsExpireAt: mixProto.nodePool.staleAt(pathPeerIds).map(
           proc(staleAt: Moment): Moment =
             staleAt + ring.config.surbLifetime
@@ -1040,9 +1050,7 @@ proc buildSurbs(
     # copy of the credentials, so none is left unwiped (Mix Key Rotation spec
     # §7). The reply key stays in the SURB for the exit.
     var creds = ConnCreds(
-      igroup: session.igroup,
-      incoming: incoming,
-      credential: move(built.credential),
+      igroup: session.igroup, incoming: incoming, credential: move(built.credential)
     )
     let added = mixProto.surbStore.add(id, creds)
     creds.wipe()
@@ -1236,7 +1244,7 @@ proc init*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
 
 proc createSurb*(
     mixProto: MixProtocol, destination: MixDestination
-): Result[tuple[surb: SURB, credential: ReplyCredential], string] =
+): Result[SurbBuild, string] =
   ## Create a reply block that returns to this Mix node. The destination is
   ## excluded from the independently selected return path.
   if destination.kind != MixNode:

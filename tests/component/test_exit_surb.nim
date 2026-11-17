@@ -15,9 +15,9 @@ import ../utils
 const SurbHoldCodec = "/mix/test/surb-hold"
 
 proc setupExit(
-    destHandler: LPProtoHandler, replies: ref int
+    destHandler: LPProtoHandler, replies: ref int, holdTime = 100.milliseconds
 ): Future[tuple[exit, dest: Switch, layer: ExitLayer, destHop: Hop]] {.async.} =
-  ## An exit with a 100 ms SURB hold time, and a destination that runs
+  ## An exit with a configurable SURB hold time, and a destination that runs
   ## destHandler for SurbHoldCodec.
   let dest = createSwitch()
   dest.mount(LPProtocol.new(codecs = @[SurbHoldCodec], handler = destHandler))
@@ -37,7 +37,7 @@ proc setupExit(
     proc(surb: SURB, message: seq[byte]) {.async: (raises: [CancelledError]).} =
       replies[] += 1,
     behaviors,
-    surbHoldTime = Opt.some(100.milliseconds),
+    surbHoldTime = Opt.some(holdTime),
   )
   let destHop = Hop.init(
     multiAddrToBytes(dest.peerInfo.peerId, dest.peerInfo.addrs[0]).expect("dest hop")
@@ -55,6 +55,7 @@ suite "Exit SURB hold time":
           check false
       ,
       replies,
+      holdTime = 2.seconds, # Allow connection setup; the expiry test retains 100ms.
     )
     defer:
       await exit.stop()
