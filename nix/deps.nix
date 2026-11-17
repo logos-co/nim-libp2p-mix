@@ -12,8 +12,8 @@
 
   boringssl = pkgs.fetchgit {
     url = "https://github.com/vacp2p/nim-boringssl";
-    rev = "a57b97f5ba45353a1a38c81b4f5e6f537469a63e";
-    sha256 = "0xn06vk54z123fp7k6d7h97nnxz43ldswyakqg110riiwmqr4fhi";
+    rev = "c8d9c125df334e82249869788e533acf4bad3c9a";
+    sha256 = "10sw77dw56dg04c5sknzjpnx42m2mq6mxf5js9p7q2wr1v55mrh4";
     fetchSubmodules = true;
   };
 
