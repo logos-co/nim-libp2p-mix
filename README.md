@@ -192,6 +192,31 @@ proof work can be discarded safely when an epoch changes. Proof generators
 return the packet and the token of its proof as a `CoverProofResult`. A node
 with spam protection must set a token reclaimer with `setProofTokenReclaimer`.
 
+## Message-oriented transport integration
+
+A mounted, started `MixProtocol` can deliver opaque service payloads through
+`send(destination, service, payload)` and `registerMixDeliveryHandler`. The
+`MixPubInfo` destination overload does not add the destination to the relay pool
+or change the peer store. It applies the configured hop-address policy to the
+explicit address; relays use normal usable-address selection and first-hop backoff.
+
+`createSurb` returns a `surb` and a separate `ReplyCredential`. Keep the credential
+at the requester, serialize only the SURB, and send a reply with `sendWithSurb`.
+Treat the supplied SURB as consumed even when the send fails. A registered raw
+reply handler can recover its payload with `recoverReply(credential, reply)`;
+return `Unhandled` to retain the embedded connection fallback. Each embedded
+SURB is consumed independently, so other replies in its group remain usable.
+This replaces the lower-level key/secret reply interface; connection-based
+consumers can continue using `toConnection`.
+
+Both service-send overloads and `sendWithSurb` participate in protocol shutdown.
+Stopping the protocol ends pending sends with an error; caller cancellation
+propagates. Slots and completed proofs are refunded only when no write was
+attempted. An interrupted proof can retain its slot because its provider may
+already have spent the message ID. Delivery and raw-reply callbacks must handle
+recoverable errors internally; their effect types allow only cancellation to
+escape. Exit-is-destination dispatch is available without a compile-time flag.
+
 ## Building & running
 
 > You can set up the project and run the tests in either a native or Nix shell.

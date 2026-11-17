@@ -170,6 +170,13 @@ proc hopAddressBytes(
     return Opt.none(seq[byte])
   mix_multiaddr.multiAddrToBytes(peerId, maddr).optValue()
 
+proc getHop*(pool: MixNodePool, info: MixPubInfo): Opt[MixHop] {.raises: [].} =
+  ## Validate an explicit destination with the same address policy as pool hops,
+  ## without adding it to the pool or changing the peer store.
+  let addrBytes = pool.hopAddressBytes(info.peerId, info.multiAddr).valueOr:
+    return Opt.none(MixHop)
+  Opt.some(MixHop(info: info, addrBytes: addrBytes))
+
 type HopAddress = tuple[multiAddr: MultiAddress, addrBytes: seq[byte]]
   ## A hop address together with its encoding for the Sphinx header.
 

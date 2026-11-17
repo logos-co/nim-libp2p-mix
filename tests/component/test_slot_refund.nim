@@ -698,6 +698,8 @@ suite "Slot refund - packet stages":
       provider.wrongSize = true
 
     check (await nodes.sendToLast()).isOk
+    checkUntilTimeout:
+      spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
       covers.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 0
     check spam[1 .. 3].mapIt(it.generated).foldl(a + b) == 1
 
@@ -761,6 +763,8 @@ suite "Slot refund - packet stages":
     let covers = nodes[1 .. 3].mapIt(it.attachCover())
 
     check (await nodes.sendToLast()).isOk
+    checkUntilTimeout:
+      spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 1
     check covers.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 0
 
   asyncTest "forward stopped in dial refunds slot and reclaims proof":
@@ -828,3 +832,73 @@ suite "Slot refund - packet stages":
     checkUntilTimeout:
       covers.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 2
     check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 0
+
+suite "Slot refund - message API lifecycle":
+  asyncTeardown:
+    checkTrackers()
+
+  for explicitDestination in [false, true]:
+    asyncTest "service send cancellation refunds unwritten proof, explicit=" &
+      $explicitDestination:
+      let (nodes, spam, delays) = setupNodes(5)
+      startAndDeferStop(nodes)
+      let ct = nodes[0].attachCover()
+      delays[0].delay = LongWait
+      let sending =
+        if explicitDestination:
+          nodes[0].send(nodes[^1].localMixPubInfo(), TestCodec, @[1.byte])
+        else:
+          nodes[0].send(MixDestination.exitNode(nodes[^1].peerId), TestCodec, @[1.byte])
+      checkUntilTimeout:
+        spam[0].generated == 1
+      check ct.slotPool.nonCoverClaimed == 1
+      await sending.cancelAndWait()
+      check:
+        sending.cancelled
+        ct.slotPool.nonCoverClaimed == 0
+        spam[0].reclaimed == @[@[1.byte]]
+        nodes[0].surbCredsLen == 0
+
+    asyncTest "stop ends service send and refunds unwritten proof, explicit=" &
+      $explicitDestination:
+      let (nodes, spam, delays) = setupNodes(5)
+      startAndDeferStop(nodes)
+      let ct = nodes[0].attachCover()
+      delays[0].delay = LongWait
+      let sending =
+        if explicitDestination:
+          nodes[0].send(nodes[^1].localMixPubInfo(), TestCodec, @[1.byte])
+        else:
+          nodes[0].send(MixDestination.exitNode(nodes[^1].peerId), TestCodec, @[1.byte])
+      checkUntilTimeout:
+        spam[0].generated == 1
+      await nodes[0].stop()
+      check:
+        (await sending.wait(2.seconds)).isErr
+        ct.slotPool.nonCoverClaimed == 0
+        spam[0].reclaimed == @[@[1.byte]]
+        nodes[0].ongoingLocalSends.len == 0
+
+  for stopProtocol in [false, true]:
+    asyncTest "caller-owned SURB send ends and refunds unwritten proof, stop=" &
+      $stopProtocol:
+      let (nodes, spam, delays) = setupNodes(5)
+      startAndDeferStop(nodes)
+      let ct = nodes[0].attachCover()
+      delays[0].delay = LongWait
+      var created =
+        nodes[^1].createSurb(MixDestination.exitNode(nodes[0].peerId)).expect("SURB")
+      let sending = nodes[0].sendWithSurb(move(created.surb), @[1.byte])
+      checkUntilTimeout:
+        spam[0].generated == 1
+      check ct.slotPool.nonCoverClaimed == 1
+      if stopProtocol:
+        await nodes[0].stop()
+        check (await sending.wait(2.seconds)).isErr
+      else:
+        await sending.cancelAndWait()
+        check sending.cancelled
+      check:
+        ct.slotPool.nonCoverClaimed == 0
+        spam[0].reclaimed == @[@[1.byte]]
+        nodes[0].ongoingLocalSends.len == 0

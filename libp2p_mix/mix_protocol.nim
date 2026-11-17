@@ -688,16 +688,14 @@ method handleMixMessages*(
         error "could not recover Sphinx reply", id = processedSP.id, err = error.message
         mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
       of ReplyRecoveryErrorKind.PayloadDecodingFailed:
-        # Cryptographic recovery succeeded, so every redundant reply contains
-        # the same malformed payload and the group cannot provide a valid copy.
-        mixProto.surbStore.release(connCred.igroup)
+        # Consume only this malformed reply; other SURBs are independent.
+        mixProto.surbStore.release(processedSP.id)
         error "could not decode reply payload", id = processedSP.id, err = error.message
         mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
       return
 
-    # The exit replies via every SURB in the group, so N replies race; the
-    # first valid reply invalidates the rest.
-    mixProto.surbStore.release(connCred.igroup)
+    # Each SURB is single-use; other blocks can still deliver their replies.
+    mixProto.surbStore.release(processedSP.id)
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Reply",
@@ -1307,9 +1305,10 @@ proc sendLocal(
   let lastHop =
     if destinationInfo.isSome:
       let info = destinationInfo.get()
-      let addressBytes = multiAddrToBytes(info.peerId, info.multiAddr).valueOr:
-        return err("Invalid explicit Mix destination address: " & error)
-      Opt.some(MixHop(info: info, addrBytes: addressBytes))
+      let mixHop = mixProto.nodePool.getHop(info).valueOr:
+        mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
+        return err("Explicit Mix destination has no usable address")
+      Opt.some(mixHop)
     elif destination.kind == MixNode:
       let mixHop = mixProto.nodePool.getHop(destination.peerId).valueOr:
         mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
@@ -1432,7 +1431,15 @@ proc sendInternal(
   ## returns an error.
   if not mixProto.started:
     return err("anonymizeLocalProtocolSend: mix protocol is not running")
-  let pending = mixProto.sendLocal(incoming, move(msg), codec, destination, numSurbs, useLegacySurbEnvelope, destinationInfo)
+  let pending = mixProto.sendLocal(
+    incoming,
+    move(msg),
+    codec,
+    destination,
+    numSurbs,
+    useLegacySurbEnvelope,
+    destinationInfo,
+  )
   let id = mixProto.nextLocalSendId
   mixProto.nextLocalSendId.inc()
   mixProto.ongoingLocalSends[id] = FutureBase(pending)
@@ -1551,7 +1558,18 @@ proc sendWithSurb*(
   ## Send one opaque payload through a caller-supplied SURB. The caller must
   ## treat the SURB as consumed once it invokes this operation, including when
   ## the result is an error.
-  return await mixProto.sendSurbReply(surb, move(payload))
+  let pending = mixProto.sendSurbReply(surb, move(payload))
+  let id = mixProto.nextLocalSendId
+  mixProto.nextLocalSendId.inc()
+  mixProto.ongoingLocalSends[id] = FutureBase(pending)
+  try:
+    return await pending
+  except CancelledError as e:
+    if not mixProto.started:
+      return err("sendWithSurb: mix protocol has stopped")
+    raise e
+  finally:
+    mixProto.ongoingLocalSends.del(id)
 
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]

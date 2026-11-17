@@ -4,7 +4,7 @@
 {.used.}
 
 import chronos, results
-import libp2p/[protocols/ping, peerid, switch, builders]
+import libp2p/[protocols/ping, peerid, switch, builders, multiaddress]
 import libp2p_mix
 import libp2p_mix/mix_protocol
 import libp2p_mix/pool
@@ -84,6 +84,10 @@ suite "Mix Protocol - Plug-in API":
         destinationInfo, fallbackProto.codec, newSeq[byte](rawCapacity + 1)
       )
     ).isErr
+    var unusableDestination = destinationInfo
+    unusableDestination.multiAddr = MultiAddress.init("/ip4/127.0.0.1/tcp/0").get()
+    check (await sender.send(unusableDestination, fallbackProto.codec, @[1.byte])).isErr
+    check sender.nodePool.get(destinationId).isNone
     sender.nodePool.add(destinationInfo)
 
     destination.unregisterMixDeliveryHandler(fallbackProto.codec)
