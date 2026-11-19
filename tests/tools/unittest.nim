@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 # Copyright (c) Status Research & Development GmbH
 
-import chronos, unittest2, macros
+import chronos, unittest2, macros, results
 import ./trackers
 
 export checkTrackers # TODO: maybe consider importing it on demand?
 export unittest2 except suite
+
+proc expectMove*[T, E](res: sink Result[T, E], message: string): T =
+  ## Extract an owned value, including values that prohibit copies.
+  move(res.expect(message))
 
 ## suite wraps unittest2.suite in a proc to avoid issue with too many global variables
 ## See https://github.com/nim-lang/Nim/issues/8500

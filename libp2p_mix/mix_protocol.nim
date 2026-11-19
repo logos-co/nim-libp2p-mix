@@ -678,11 +678,9 @@ method handleMixMessages*(
 
     # No plug-in recognized this reply, so preserve the embedded connection path.
     # Expired credentials are invisible here even if no sweep has run yet.
-    var connCred = mixProto.surbStore.get(rawReply.identifier).valueOr:
+    let connCred = mixProto.surbStore.get(rawReply.identifier).valueOr:
       mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
       return
-    defer:
-      connCred.wipe()
 
     let payload = recoverReply(connCred.credential, rawReply).valueOr:
       case error.kind
@@ -1063,8 +1061,7 @@ proc buildSurbs(
     var creds = ConnCreds(
       igroup: session.igroup, incoming: incoming, credential: move(built.credential)
     )
-    let added = mixProto.surbStore.add(id, creds)
-    creds.wipe()
+    let added = mixProto.surbStore.add(id, move(creds))
     added.isOkOr:
       session.release()
       return err(error)
@@ -1257,7 +1254,9 @@ proc createSurb*(
     mixProto: MixProtocol, destination: MixDestination
 ): Result[SurbBuild, string] =
   ## Create a reply block that returns to this Mix node. The destination is
-  ## excluded from the independently selected return path.
+  ## excluded from the independently selected return path. Move the credential
+  ## into its owner and wipe it on use, by credentialsExpireAt when present,
+  ## or on shutdown, whichever comes first.
   if destination.kind != MixNode:
     return err("SURBs require exit == destination")
 

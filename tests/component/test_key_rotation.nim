@@ -276,7 +276,7 @@ suite "Mix Protocol - Key Rotation":
     startAndDeferStop(nodes)
     var built = nodes[0]
       .createSurb(MixDestination.exitNode(nodes[4].switch.peerInfo.peerId))
-      .expect("plug-in SURB")
+      .expectMove("plug-in SURB")
     defer:
       built.credential.wipe()
     check:

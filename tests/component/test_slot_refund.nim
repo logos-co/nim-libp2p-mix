@@ -869,8 +869,9 @@ suite "Slot refund - message API lifecycle":
       startAndDeferStop(nodes)
       let ct = nodes[0].attachCover()
       delays[0].delay = LongWait
-      var created =
-        nodes[^1].createSurb(MixDestination.exitNode(nodes[0].peerId)).expect("SURB")
+      var created = nodes[^1]
+        .createSurb(MixDestination.exitNode(nodes[0].peerId))
+        .expectMove("SURB")
       let sending = nodes[0].sendWithSurb(move(created.surb), @[1.byte])
       checkUntilTimeout:
         spam[0].generated == 1

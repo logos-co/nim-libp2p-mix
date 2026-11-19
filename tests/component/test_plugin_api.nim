@@ -111,8 +111,10 @@ suite "Mix Protocol - Plug-in API":
     let mixDestination = MixDestination.exitNode(destination.switch.peerInfo.peerId)
     let recoveredPayloads = newAsyncQueue[seq[byte]]()
 
-    var created = sender.createSurb(mixDestination).expect("could not create SURB")
-    let credential = created.credential
+    var created = sender.createSurb(mixDestination).expectMove("could not create SURB")
+    var credential = move(created.credential)
+    defer:
+      credential.wipe()
 
     let handler: RawSurbReplyHandler = proc(
         reply: RawSurbReply
@@ -121,6 +123,7 @@ suite "Mix Protocol - Plug-in API":
         return RawSurbReplyDisposition.Unhandled
 
       let payload = recoverReply(credential, reply).expect("could not recover reply")
+      credential.wipe()
       await recoveredPayloads.put(payload)
       return RawSurbReplyDisposition.Handled
 

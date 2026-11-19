@@ -3,10 +3,9 @@
 
 {.used.}
 
-import std/sequtils
 import chronos
-import libp2p_mix/[serialization, sphinx, surb_store]
-import ./tools/unittest
+import libp2p_mix/[curve25519, delay, serialization, sphinx, surb_store, tag_manager]
+import ./tools/[crypto, unittest]
 
 proc makeId(seed: int): SURBIdentifier =
   for i in 0 ..< result.len:
@@ -121,10 +120,24 @@ suite "SURB Store":
     check store.len == 0
 
   test "wiping credentials makes their reply keys unrecoverable":
-    var creds = makeCreds(store.newGroup(base))
+    let
+      id = makeId(1)
+      (privateKey, publicKey) = generateKeyPair().expect("key pair")
+      hop = Hop.init(newSeq[byte](AddrSize))
+    var created =
+      createSURB([publicKey], [NoDelay], [hop], id, rng()).expectMove("SURB")
+    var message = newSeq[byte](MessageSize)
+    message[0] = 42
+    var tags = TagManager.new(autoStart = false)
+    let packet = processSphinxPacket(useSURB(created.surb, message), privateKey, tags)
+      .expect("process reply")
+    require packet.status == Reply
+    let reply = RawSurbReply(identifier: id, encryptedPayload: packet.delta_prime)
+    var creds = ConnCreds(credential: move(created.credential))
+
+    require recoverSphinxReply(creds.credential, reply).get() == message
     creds.wipe()
-    check:
-      creds.credential == default(ReplyCredential)
+    check recoverSphinxReply(creds.credential, reply).isErr
 
   test "a group expires by the soonest deadline it is given":
     let igroup = store.newGroup(base)

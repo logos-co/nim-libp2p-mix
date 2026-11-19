@@ -477,8 +477,9 @@ suite "Sphinx Tests":
   test "create and use surb":
     let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()
 
-    let created =
-      createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
+    var created = createSURB(publicKeys, delay, hops, randomI(), rng()).expectMove(
+        "Create SURB error"
+      )
     let packetBytes = useSURB(created.surb, message).serialize()
 
     check packetBytes.len == PacketSize
@@ -525,21 +526,16 @@ suite "Sphinx Tests":
       RawSurbReply(identifier: wrongId, encryptedPayload: rawReply.encryptedPayload),
     ).isErr
 
-    let msg =
-      recoverSphinxReply(created.credential, rawReply).expect("Reply processing failed")
-
-    check msg == message
-    var retired = created.credential
-    retired.wipe()
-    check recoverSphinxReply(retired, rawReply).isErr
-    # Wiping a retained copy must not corrupt the credential still owned by caller.
     check recoverSphinxReply(created.credential, rawReply).get() == message
+    created.credential.wipe()
+    check recoverSphinxReply(created.credential, rawReply).isErr
 
   test "surb reply rejects tampered payload":
     let (message, privateKeys, publicKeys, delay, hops, _) = createDummyData()
 
-    let created =
-      createSURB(publicKeys, delay, hops, randomI(), rng()).expect("Create SURB error")
+    let created = createSURB(publicKeys, delay, hops, randomI(), rng()).expectMove(
+        "Create SURB error"
+      )
     var packetBytes = useSURB(created.surb, message).serialize()
     check packetBytes.len == PacketSize
 
@@ -647,7 +643,7 @@ suite "Sphinx Tests":
         message[i] = byte(rand(256))
       let paddedMessage = addPadding(message, MessageSize)
 
-      let created = createSURB(publicKeys, delay, hops, randomI(), rng()).expect(
+      let created = createSURB(publicKeys, delay, hops, randomI(), rng()).expectMove(
           "Create SURB error"
         )
 

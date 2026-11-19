@@ -201,8 +201,9 @@ or change the peer store. It applies the configured hop-address policy to the
 explicit address; relays use normal usable-address selection and first-hop backoff.
 
 `createSurb` returns a `SurbBuild` containing a `surb` and a separate
-`ReplyCredential`. Keep the credential
-at the requester, serialize only the SURB, and send a reply with `sendWithSurb`.
+`ReplyCredential`. Move the credential into its owner at the requester. Wipe it
+after use, by `credentialsExpireAt` when present, or on shutdown, whichever
+comes first. Serialize only the SURB and send a reply with `sendWithSurb`.
 Treat the supplied SURB as consumed even when the send fails. A registered raw
 reply handler can recover its payload with `recoverReply(credential, reply)`;
 return `Unhandled` to retain the embedded connection fallback. Each embedded

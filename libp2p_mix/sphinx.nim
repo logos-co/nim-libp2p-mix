@@ -229,6 +229,14 @@ proc wipe*(credential: var ReplyCredential) =
     burnMem(secret)
   burnMem(credential.key)
 
+proc `=destroy`(credential: var ReplyCredential) =
+  credential.wipe()
+  `=destroy`(credential.key)
+  `=destroy`(credential.secret)
+
+proc `=copy`(dst: var ReplyCredential, src: ReplyCredential) {.error.}
+proc `=dup`(src: ReplyCredential): ReplyCredential {.error.}
+
 proc createSURB*(
     publicKeys: openArray[FieldElement],
     delay: openArray[Delay],

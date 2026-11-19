@@ -51,7 +51,7 @@ type
     credential*: ReplyCredential
 
   SurbStore* = ref object
-    creds: Table[SURBIdentifier, ConnCreds]
+    creds: Table[SURBIdentifier, ref ConnCreds]
     sweepThreshold: int
     peakLen: int
     sweeps: int
@@ -73,7 +73,7 @@ proc wipe*(creds: var ConnCreds) =
 
 proc wipeAndDel(s: SurbStore, id: SURBIdentifier) =
   s.creds.withValue(id, c):
-    c[].wipe()
+    c[][].wipe()
   s.creds.del(id)
 
 func len*(s: SurbStore): int {.inline.} =
@@ -98,7 +98,7 @@ proc rebuildIfSparse(s: SurbStore) =
     return
 
   # Moved, not copied, so that no unwiped copy of the keys is freed.
-  var fresh = initTable[SURBIdentifier, ConnCreds](s.creds.len)
+  var fresh = initTable[SURBIdentifier, ref ConnCreds](s.creds.len)
   for id, c in s.creds.mpairs:
     fresh[id] = move(c)
   s.creds = move(fresh)
@@ -137,7 +137,7 @@ proc expireBy*(g: SURBIdentifierGroup, deadline: Moment) =
   g.expiresAt = min(g.expiresAt, deadline)
 
 proc add*(
-    s: SurbStore, id: SURBIdentifier, creds: ConnCreds, now: Moment = Moment.now()
+    s: SurbStore, id: SURBIdentifier, creds: sink ConnCreds, now: Moment = Moment.now()
 ): Result[void, string] =
   ## Sweeps first if occupancy has crossed the threshold, which is then reset
   ## to twice the post-sweep size -- so each sweep requires at least that many
@@ -161,20 +161,22 @@ proc add*(
     )
 
   creds.igroup.members.incl(id)
-  s.creds[id] = creds
+  let entry = new ConnCreds
+  entry[] = move(creds)
+  s.creds[id] = entry
   s.peakLen = max(s.peakLen, s.creds.len)
   mix_surb_creds_active.set(s.creds.len.int64)
   ok()
 
 proc get*(
     s: SurbStore, id: SURBIdentifier, now: Moment = Moment.now()
-): Opt[ConnCreds] =
+): Opt[ref ConnCreds] =
   ## Expired entries are invisible here whether or not a sweep has run yet.
   s.creds.withValue(id, c):
     if c.igroup.expiresAt <= now:
-      return Opt.none(ConnCreds)
+      return Opt.none(ref ConnCreds)
     return Opt.some(c[])
-  Opt.none(ConnCreds)
+  Opt.none(ref ConnCreds)
 
 proc release*(s: SurbStore, id: SURBIdentifier) =
   ## Consumes one reply block without invalidating other replies for the send.
@@ -205,7 +207,7 @@ proc release*(s: SurbSession) =
 
 proc clear*(s: SurbStore) =
   for c in s.creds.mvalues:
-    c.wipe()
+    c[].wipe()
   s.creds.clear()
   s.peakLen = 0
   s.sweepThreshold = MinSweepThreshold
@@ -241,7 +243,7 @@ proc new*(
   doAssert maxCreds > 0, "SurbStore maxCreds must be greater than zero"
 
   let s = T(
-    creds: initTable[SURBIdentifier, ConnCreds](),
+    creds: initTable[SURBIdentifier, ref ConnCreds](),
     sweepThreshold: MinSweepThreshold,
     ttl: ttl,
     maxCreds: maxCreds,
