@@ -194,9 +194,80 @@ with spam protection must set a token reclaimer with `setProofTokenReclaimer`.
 
 ## Message-oriented transport integration
 
-A mounted, started `MixProtocol` can deliver opaque service payloads through
-`send(destination, service, payload)` and `registerMixDeliveryHandler`. The
-`MixPubInfo` destination overload does not add the destination to the relay pool
+| | Connection API | Message API |
+|---|---|---|
+| Use it for | A libp2p protocol that reads and writes a stream | A plug-in that defines its own message framing and manages its reply blocks |
+| Send | Open a stream with `toConnection` | Send bytes with `send(destination, service, payload)` |
+| Receive and reply | A mounted protocol reads and writes the connection | A delivery handler receives the payload and can reply with `sendWithSurb` |
+| Destination | Exit node or forwarding address | The destination is the exit node |
+
+### A one-request ping
+
+This example uses two started Mix nodes with populated relay pools and rotation
+disabled. Install `installPing(responder)` once on the destination. On the
+requester, call `await ping(requester, MixDestination.exitNode(responderId))`.
+The entire request is a serialized SURB. The responder uses it to send back
+one byte (`42`), and only the requester retains the reply credential.
+
+```nim
+import chronos, results
+import libp2p_mix
+
+const Service = "/example/ping/1.0.0"
+
+proc installPing(responder: MixProtocol) =
+  let handler: MixDeliveryHandler = proc(
+      delivery: MixDelivery
+  ): Future[void] {.async: (raises: [CancelledError]).} =
+    var surb = deserializeSurb(delivery.payload).valueOr:
+      return
+    discard await responder.sendWithSurb(move(surb), @[42.byte])
+  responder.registerMixDeliveryHandler(Service, handler).expect("register ping")
+
+proc ping(requester: MixProtocol, destination: MixDestination): Future[seq[byte]] {.async.} =
+  var build = requester.createSurb(destination)
+  let request = serializeSurb(build.get().surb).get()
+  var credential = move(build.get().credential)
+  defer:
+    credential.wipe()
+
+  let received = newFuture[seq[byte]]("ping")
+  let handler: RawSurbReplyHandler = proc(
+      reply: RawSurbReply
+  ): Future[RawSurbReplyDisposition] {.async: (raises: [CancelledError]).} =
+    if reply.identifier != credential.identifier:
+      return RawSurbReplyDisposition.Unhandled
+    if not received.finished:
+      let payload = recoverReply(credential, reply).valueOr:
+        return RawSurbReplyDisposition.Handled
+      credential.wipe()
+      received.complete(payload)
+    return RawSurbReplyDisposition.Handled
+
+  requester.registerRawSurbReplyHandler(handler).expect("register reply handler")
+  defer:
+    requester.unregisterRawSurbReplyHandler()
+  (await requester.send(destination, Service, request)).expect("send ping")
+  return await received.wait(2.seconds)
+```
+
+### Sharing a node with connection-based protocols
+
+Choose a dedicated service name. A registered delivery handler gets every
+delivery for its codec, including connection traffic with a SURB envelope.
+Each node has one raw reply handler. The example owns that handler for a
+single request. A host running several plug-ins should register it once and
+route replies by identifier. Return `Unhandled` for unknown identifiers so
+Mix can deliver replies to its own connections.
+
+Both APIs draw on the same slot pool, cover traffic and spam protection. A
+send rejected for lack of slots is not queued. Use
+`getMaxServicePayloadSize(service)` when sizing message frames, including any
+serialized SURBs carried inside the payload.
+
+### Explicit destinations and key rotation
+
+The `MixPubInfo` destination overload does not add the destination to the relay pool
 or change the peer store. It applies the configured hop-address policy to the
 explicit address. Relays use normal usable-address selection and first-hop backoff.
 
