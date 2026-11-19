@@ -198,7 +198,14 @@ A mounted, started `MixProtocol` can deliver opaque service payloads through
 `send(destination, service, payload)` and `registerMixDeliveryHandler`. The
 `MixPubInfo` destination overload does not add the destination to the relay pool
 or change the peer store. It applies the configured hop-address policy to the
-explicit address; relays use normal usable-address selection and first-hop backoff.
+explicit address. Relays use normal usable-address selection and first-hop backoff.
+
+With key rotation disabled, the explicit destination may be outside the pool.
+With rotation enabled, the supplied Mix public key must match a locally
+unexpired pool record for that peer. Mix measures the record's age from the
+last local update. If that update supplied an obsolete key and the destination
+has already retired it, the local check can pass but the destination cannot
+process its layer of the packet.
 
 `createSurb` returns a `SurbBuild` containing a `surb` and a separate
 `ReplyCredential`. Move the credential into its owner at the requester. Wipe it
@@ -219,8 +226,6 @@ The transit allowance covers supply delivery and reply transit under the
 configured Mix timing assumptions. Plug-ins must account for time spent waiting
 and retrying; passing a SURB to `sendWithSurb` does not enforce these bounds.
 Without rotation these fields are absent. Call `wipe` when retiring a credential.
-An explicit destination address does not bypass rotation: its key must match a
-fresh record in the node pool.
 
 Both service-send overloads and `sendWithSurb` participate in protocol shutdown.
 Stopping the protocol ends pending sends with an error; caller cancellation

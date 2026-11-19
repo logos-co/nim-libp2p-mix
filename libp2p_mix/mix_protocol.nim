@@ -1546,9 +1546,11 @@ proc send*(
     service: string,
     payload: sink seq[byte],
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-  ## Send to an explicit exit node without adding it to the relay pool or
-  ## changing its peer-store entries. Other hops come from the normal pool;
-  ## the destination is excluded from their selection even if already known.
+  ## Use the supplied address for the final hop. With key rotation enabled,
+  ## the supplied Mix public key must match a locally unexpired pool record
+  ## for the destination peer. With rotation disabled, the destination may
+  ## be outside the pool. This send leaves the pool and peer store unchanged
+  ## and excludes the destination when selecting the preceding hops.
   if service.len == 0:
     return err("Mix service must not be empty")
   discard multiAddrToBytes(destination.peerId, destination.multiAddr).valueOr:
