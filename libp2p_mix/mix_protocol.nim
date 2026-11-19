@@ -133,8 +133,10 @@ proc unregisterMixDeliveryHandler*(mixProto: MixProtocol, service: string) =
 proc registerRawSurbReplyHandler*(
     mixProto: MixProtocol, handler: RawSurbReplyHandler
 ): Result[void, string] =
-  ## Handlers must handle their own recoverable errors and return Unhandled
-  ## when appropriate. Only CancelledError may escape the callback; cancellation
+  ## Each MixProtocol accepts one raw reply handler. A host with multiple
+  ## plug-ins routes replies by identifier inside that handler. Return Unhandled
+  ## for unknown identifiers so embedded connections can receive their replies.
+  ## Handlers must handle their own recoverable errors. Only CancelledError may escape the callback; cancellation
   ## propagates instead of invoking the embedded-connection fallback.
   if handler.isNil:
     return err("raw SURB reply handler must not be nil")
@@ -596,7 +598,7 @@ method handleMixMessages*(
 
   # Step 4: Full Sphinx processing
   # Reuse the shared secret computed in step 2 to avoid duplicate EC multiplication
-  let processedSP = mixProto.processWithKey(sphinxPacket, packetKey).valueOr:
+  var processedSP = mixProto.processWithKey(sphinxPacket, packetKey).valueOr:
     error "Failed to process Sphinx packet", err = error
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
     return
@@ -664,7 +666,7 @@ method handleMixMessages*(
     trace "# Reply", id = processedSP.id
 
     let rawReply = RawSurbReply(
-      identifier: processedSP.id, encryptedPayload: processedSP.delta_prime
+      identifier: processedSP.id, encryptedPayload: move(processedSP.delta_prime)
     )
 
     # Keep a local copy so unregistering concurrently only affects subsequent
@@ -886,16 +888,25 @@ proc handleMixNodeConnection(
     let receivedBytes = await conn.readLp(maxWireSize)
     mixProto.spawnMixMessage(conn.peerId, receivedBytes, metadataBytes)
 
+proc payloadCapacity(codec: string, envelopeSize: int): Result[int, string] =
+  let capacity = DataSize - serializedLen(codec, 0) - envelopeSize
+  if capacity < 0:
+    return err("cannot encode messages for this codec")
+  ok(capacity)
+
+proc getMaxServicePayloadSize*(service: string): Result[int, string] =
+  ## Maximum opaque payload accepted by the message-oriented send overloads.
+  if service.len == 0:
+    return err("Mix service must not be empty")
+  payloadCapacity(service, 0)
+
 proc getMaxMessageSizeForCodec*(
     codec: string, numberOfSurbs: uint8 = 0
 ): Result[int, string] =
   ## Computes the maximum payload size (in bytes) available for a message when encoded  
   ## with the given `codec`, optionally including space for the chosen number of surbs.  
   ## Returns an error if the codec + surb overhead exceeds the data capacity.  
-  let totalLen = serializedLen(codec, 0) + SurbLenSize + (int(numberOfSurbs) * SurbSize)
-  if totalLen > DataSize:
-    return err("cannot encode messages for this codec")
-  return ok(DataSize - totalLen)
+  payloadCapacity(codec, SurbLenSize + int(numberOfSurbs) * SurbSize)
 
 proc drawUsable(
     mixProto: MixProtocol, peerIds: var seq[PeerId], label: string
@@ -1275,10 +1286,9 @@ proc sendLocal(
       SurbLenSize + int(numSurbs) * SurbSize
     else:
       0
-  let capacity = DataSize - serializedLen(codec, 0) - envelopeSize
-  if capacity < 0:
+  let capacity = payloadCapacity(codec, envelopeSize).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
-    return err("cannot encode messages for this codec")
+    return err(error)
   if msg.len > capacity:
     mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
     return err(
@@ -1437,8 +1447,9 @@ proc sendInternal(
   ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
   ## promptly when its connection closes. A send that a protocol stop cancels
   ## returns an error.
+  let caller = if useLegacySurbEnvelope: "anonymizeLocalProtocolSend" else: "send"
   if not mixProto.started:
-    return err("anonymizeLocalProtocolSend: mix protocol is not running")
+    return err(caller & ": mix protocol is not running")
   let pending = mixProto.sendLocal(
     incoming,
     move(msg),
@@ -1456,7 +1467,7 @@ proc sendInternal(
   except CancelledError as exc:
     # `stop` cancels each pending send. The caller did not, so it gets an error.
     if not mixProto.started:
-      return err("anonymizeLocalProtocolSend: mix protocol has stopped")
+      return err(caller & ": mix protocol has stopped")
     raise exc
   finally:
     mixProto.ongoingLocalSends.del(id)

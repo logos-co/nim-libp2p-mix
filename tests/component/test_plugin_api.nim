@@ -8,7 +8,6 @@ import libp2p/[protocols/ping, peerid, switch, builders, multiaddress]
 import libp2p_mix
 import libp2p_mix/mix_protocol
 import libp2p_mix/pool
-import libp2p_mix/serialization
 
 import ../tools/[lifecycle, unittest, crypto]
 import ../utils
@@ -17,7 +16,7 @@ suite "Mix Protocol - Plug-in API":
   asyncTeardown:
     checkTrackers()
 
-  asyncTest "SURB creation rejects a forwarding destination":
+  asyncTest "SURB creation and service send reject a forwarding destination":
     let nodes = await setupMixNodes(2)
     let sender = nodes[0]
     let destination = nodes[1]
@@ -27,6 +26,8 @@ suite "Mix Protocol - Plug-in API":
     )
 
     check sender.createSurb(forwardDestination).isErr
+    let sent = await sender.send(forwardDestination, "/test", @[1.byte])
+    check sent.error == "Mix service delivery requires exit == destination"
 
   asyncTest "registered service handles delivery and unregister restores fallback":
     let nodes = await setupMixNodes(5)
@@ -74,7 +75,7 @@ suite "Mix Protocol - Plug-in API":
 
     # Raw service messages have no legacy SURB-count prefix. Exercise the
     # extra byte as well as rejection beyond the actual message capacity.
-    let rawCapacity = getMaxMessageSizeForCodec(fallbackProto.codec).get() + SurbLenSize
+    let rawCapacity = getMaxServicePayloadSize(fallbackProto.codec).get()
     let fullPayload = newSeq[byte](rawCapacity)
     (await sender.send(destinationInfo, fallbackProto.codec, fullPayload)).expect(
       "could not send a full-capacity service payload"

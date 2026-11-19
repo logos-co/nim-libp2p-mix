@@ -23,7 +23,7 @@ export RawSurbReplyHandler
 export get
 export `new`
 export init
-export getMaxMessageSizeForCodec
+export getMaxMessageSizeForCodec, getMaxServicePayloadSize
 export send
 export createSurb
 export sendWithSurb

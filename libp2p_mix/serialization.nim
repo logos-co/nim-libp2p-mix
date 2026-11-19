@@ -2,7 +2,6 @@
 # Copyright (c) Status Research & Development GmbH
 
 import results
-import std/sequtils
 import libp2p/utils/opt
 import ./delay
 
@@ -209,9 +208,15 @@ type
     header*: Header
     key*: Key
 
-proc serializeSurb*(surb: SURB): seq[byte] =
-  doAssert surb.key.len == k, "SURB key must be exactly " & $k & " bytes"
-  surb.hop.serialize() & surb.header.serialize() & surb.key
+proc serializeSurb*(surb: SURB): Result[seq[byte], string] =
+  if surb.key.len != k:
+    return err("SURB key must be exactly " & $k & " bytes")
+  if surb.hop.MultiAddress.len notin [0, AddrSize]:
+    return err("invalid SURB hop address length")
+  if surb.header.Alpha.len != AlphaSize or surb.header.Beta.len != BetaSize or
+      surb.header.Gamma.len != GammaSize:
+    return err("invalid SURB header dimensions")
+  ok(surb.hop.serialize() & surb.header.serialize() & surb.key)
 
 proc deserializeSurb*(data: openArray[byte]): Result[SURB, string] =
   if data.len != SurbSize:
@@ -230,8 +235,11 @@ proc serializeMessageWithSURBs*(
   if surbs.len > (MessageSize - SurbLenSize - 1) div SurbSize:
     return err("too many SURBs")
 
-  let surbBytes = surbs.mapIt(it.serializeSurb()).concat()
-  ok(byte(surbs.len) & surbBytes & msg)
+  var encoded = @[byte(surbs.len)]
+  for surb in surbs:
+    encoded.add(?surb.serializeSurb())
+  encoded.add(msg)
+  ok(encoded)
 
 proc extractSURBs*(msg: seq[byte]): Result[(seq[SURB], seq[byte]), string] =
   var offset = 0

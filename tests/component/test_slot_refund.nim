@@ -839,50 +839,27 @@ suite "Slot refund - message API lifecycle":
   asyncTeardown:
     checkTrackers()
 
-  for explicitDestination in [false, true]:
-    asyncTest "service send cancellation refunds unwritten proof, explicit=" &
-      $explicitDestination:
+  for stopProtocol in [false, true]:
+    asyncTest "service send ends and refunds unwritten proof, stop=" & $stopProtocol:
       let (nodes, spam, delays) = setupNodes(5)
       startAndDeferStop(nodes)
       let ct = nodes[0].attachCover()
       delays[0].delay = LongWait
       let sending =
-        if explicitDestination:
-          nodes[0].send(
-            nodes[^1].localMixPubInfo().expect("local mix info"), TestCodec, @[1.byte]
-          )
-        else:
-          nodes[0].send(MixDestination.exitNode(nodes[^1].peerId), TestCodec, @[1.byte])
+        nodes[0].send(MixDestination.exitNode(nodes[^1].peerId), TestCodec, @[1.byte])
       checkUntilTimeout:
         spam[0].generated == 1
       check ct.slotPool.nonCoverClaimed == 1
-      await sending.cancelAndWait()
+      if stopProtocol:
+        await nodes[0].stop()
+        check (await sending.wait(2.seconds)).error == "send: mix protocol has stopped"
+      else:
+        await sending.cancelAndWait()
+        check sending.cancelled
       check:
-        sending.cancelled
         ct.slotPool.nonCoverClaimed == 0
         spam[0].reclaimed == @[@[1.byte]]
         nodes[0].surbCredsLen == 0
-
-    asyncTest "stop ends service send and refunds unwritten proof, explicit=" &
-      $explicitDestination:
-      let (nodes, spam, delays) = setupNodes(5)
-      startAndDeferStop(nodes)
-      let ct = nodes[0].attachCover()
-      delays[0].delay = LongWait
-      let sending =
-        if explicitDestination:
-          nodes[0].send(
-            nodes[^1].localMixPubInfo().expect("local mix info"), TestCodec, @[1.byte]
-          )
-        else:
-          nodes[0].send(MixDestination.exitNode(nodes[^1].peerId), TestCodec, @[1.byte])
-      checkUntilTimeout:
-        spam[0].generated == 1
-      await nodes[0].stop()
-      check:
-        (await sending.wait(2.seconds)).isErr
-        ct.slotPool.nonCoverClaimed == 0
-        spam[0].reclaimed == @[@[1.byte]]
         nodes[0].ongoingLocalSends.len == 0
 
   for stopProtocol in [false, true]:
