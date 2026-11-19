@@ -41,8 +41,8 @@ benchmarkBuild:
 # produces the committed `nix/deps.nix`. The Nim-matrix CI jobs install
 # deps via `make setup NIMBLE_FLAGS="$NIMBLE_FLAGS"`, with `NIMBLE_FLAGS`
 # defined once at workflow level, and don't read `nimble.lock`;
-# only the `ci / nix` job regenerates `nimble.lock` on the fly (via
-# `make deps`) and uses it as input to `gen-deps.sh`.
+# only the `ci / nix` and `ci / nix refresh` jobs regenerate `nimble.lock`
+# on the fly (via `make refresh-deps`) and use it as input to `gen-deps.sh`.
 nimble.lock: libp2p_mix.nimble
 	$(NIMBLE) lock $(NIMBLE_FLAGS)
 	@test -f "$@" || { echo "error: Nimble did not create $@" >&2; exit 1; }

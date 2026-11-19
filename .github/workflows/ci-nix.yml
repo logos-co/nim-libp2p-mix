@@ -5,11 +5,12 @@ name: ci / nix
 #
 # - pull_request: only when nix-relevant files actually change.
 # - push to master: post-merge smoke test (catches merge_group bypass).
-# - schedule: weekly cron to catch external drift (nimble release,
-#   nixpkgs bump, upstream rev moves) that no in-repo file change
-#   would otherwise surface.
 # - workflow_dispatch: manual trigger for ad-hoc validation (e.g.
 #   after bumping the libp2p pin in libp2p_mix.nimble).
+#
+# Weekly external drift (upstream releases moving what `make
+# refresh-deps` resolves) is handled by refresh-deps.yml, which opens a
+# refresh PR instead of failing this job on master.
 on:
   pull_request:
     paths:
@@ -22,8 +23,6 @@ on:
       - '.github/workflows/ci-nix.yml'
   push:
     branches: [master]
-  schedule:
-    - cron: '0 6 * * 1'   # Monday 06:00 UTC
   workflow_dispatch:
 
 permissions:
