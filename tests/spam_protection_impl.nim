@@ -141,6 +141,7 @@ type
   # Issues reclaimable proofs and counts how many come back
   ReclaimCountingSpamProtection* = ref object of SpamProtection
     reclaimCount*: int
+    generateCount*: int
 
 proc newReclaimCountingSpamProtection*(): ReclaimCountingSpamProtection =
   ReclaimCountingSpamProtection(proofSize: RateLimitProofSize)
@@ -148,6 +149,7 @@ proc newReclaimCountingSpamProtection*(): ReclaimCountingSpamProtection =
 method generateProof*(
     self: ReclaimCountingSpamProtection, bindingData: seq[byte]
 ): Result[ProofResult, string] =
+  inc self.generateCount
   ok(ProofResult(proof: newSeq[byte](RateLimitProofSize), token: @[1.byte]))
 
 method verifyProof*(

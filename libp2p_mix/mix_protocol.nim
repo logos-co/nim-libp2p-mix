@@ -25,9 +25,6 @@ when defined(enable_mix_benchmarks):
 logScope:
   topics = "mix_protocol"
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  {.warning: "experimental support for mix exit == destination is enabled!".}
-
 const MixProtocolID* = "/mix/1.0.0"
 
 const CoverTrafficCodec* = "/mix/cover/1.0.0"
@@ -58,42 +55,100 @@ func isCoverTraffic*(msg: MixMessage): bool =
 ## network composed of participating libp2p nodes, known as mix nodes. Each message is
 ## routed independently in a stateless manner, allowing other libp2p protocols to selectively
 ## anonymize messages without modifying their core protocol behavior.
-type MixProtocol* = ref object of LPProtocol
-  mixNodeInfo: MixNodeInfo
-  switch*: Switch
-  nodePool*: MixNodePool
-  tagManager: TagManager
-  exitLayer: ExitLayer
-  rng: Rng
-  surbStore: SurbStore
-    ## Reply credentials for SURBs this node has issued. Expires entries whose
-    ## reply never arrives; see surb_store.nim.
-  destReadBehaviors: TableRef[string, DestReadBehavior]
-  connPool: Table[PeerId, Connection]
-  dialing: Table[PeerId, tuple[dial: HopDial, addrs: seq[MultiAddress]]]
-    ## The dial in flight for each hop. Concurrent callers of getConn await
-    ## the same dial and share its result.
-    ## `addrs` are the addresses that the dial uses.
-    ## The library dials through the switch of libp2p.
-    ## The switch has one dial lock and one set of connections for each peer.
-    ## So a second dial of the peer at other addresses waits for the first dial.
-    ## A forward and a reply dial the address that the sender of the packet gave.
-    ## So a caller can wait for a dial of an address that it did not select.
-  backedOffUntil: Table[PeerId, Moment]
-    ## The moment until which a first hop that failed a dial is not the first hop.
-  hopBackoff: Duration
-  poolSizeLoop: Future[void] ## The timer that sets `mix_pool_size`.
-  spamProtection: Opt[SpamProtection]
-  delayStrategy: DelayStrategy
-  coverTraffic*: Opt[CoverTraffic]
-  keyRing: Opt[MixKeyRing]
-  ongoingMixMessages: Table[uint64, Future[void]]
-    ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
-    ## removal on completion is O(1).
-  nextMixMessageId: uint64
-  ongoingLocalSends: Table[uint64, FutureBase]
-    ## In-flight local sends, cancelled on stop.
-  nextLocalSendId: uint64
+type
+  MixDelivery* = object
+    service*: string
+    payload*: seq[byte]
+
+  MixDeliveryHandler* =
+    proc(delivery: MixDelivery): Future[void] {.async: (raises: [CancelledError]).}
+
+  RawSurbReplyDisposition* {.pure.} = enum
+    Unhandled
+    Handled
+
+  RawSurbReplyHandler* = proc(reply: RawSurbReply): Future[RawSurbReplyDisposition] {.
+    async: (raises: [CancelledError])
+  .}
+
+  MixProtocol* = ref object of LPProtocol
+    mixNodeInfo: MixNodeInfo
+    switch*: Switch
+    nodePool*: MixNodePool
+    tagManager: TagManager
+    exitLayer: ExitLayer
+    rng: Rng
+    surbStore: SurbStore
+      ## Reply credentials for SURBs this node has issued. Expires entries whose
+      ## reply never arrives; see surb_store.nim.
+    deliveryHandlers: Table[string, MixDeliveryHandler]
+    rawSurbReplyHandler: RawSurbReplyHandler
+    destReadBehaviors: TableRef[string, DestReadBehavior]
+    connPool: Table[PeerId, Connection]
+    dialing: Table[PeerId, tuple[dial: HopDial, addrs: seq[MultiAddress]]]
+      ## The dial in flight for each hop. Concurrent callers of getConn await
+      ## the same dial and share its result.
+      ## `addrs` are the addresses that the dial uses.
+      ## The library dials through the switch of libp2p.
+      ## The switch has one dial lock and one set of connections for each peer.
+      ## So a second dial of the peer at other addresses waits for the first dial.
+      ## A forward and a reply dial the address that the sender of the packet gave.
+      ## So a caller can wait for a dial of an address that it did not select.
+    backedOffUntil: Table[PeerId, Moment]
+      ## The moment until which a first hop that failed a dial is not the first hop.
+    hopBackoff: Duration
+    poolSizeLoop: Future[void] ## The timer that sets `mix_pool_size`.
+    spamProtection: Opt[SpamProtection]
+    delayStrategy: DelayStrategy
+    coverTraffic*: Opt[CoverTraffic]
+    keyRing: Opt[MixKeyRing]
+    ongoingMixMessages: Table[uint64, Future[void]]
+      ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
+      ## removal on completion is O(1).
+    nextMixMessageId: uint64
+    ongoingLocalSends: Table[uint64, FutureBase]
+      ## In-flight local sends, cancelled on stop.
+    nextLocalSendId: uint64
+
+proc registerMixDeliveryHandler*(
+    mixProto: MixProtocol, service: string, handler: MixDeliveryHandler
+): Result[void, string] =
+  ## Handlers must handle their own recoverable errors. The callback's async
+  ## effect type permits only CancelledError, which propagates to the owner.
+  if service.len == 0:
+    return err("Mix delivery service must not be empty")
+
+  if handler.isNil:
+    return err("Mix delivery handler must not be nil")
+
+  if mixProto.deliveryHandlers.hasKey(service):
+    return err("Mix delivery handler is already registered for service: " & service)
+
+  mixProto.deliveryHandlers[service] = handler
+  ok()
+
+proc unregisterMixDeliveryHandler*(mixProto: MixProtocol, service: string) =
+  mixProto.deliveryHandlers.del(service)
+
+proc registerRawSurbReplyHandler*(
+    mixProto: MixProtocol, handler: RawSurbReplyHandler
+): Result[void, string] =
+  ## Each MixProtocol accepts one raw reply handler. A host with multiple
+  ## plug-ins routes replies by identifier inside that handler. Return Unhandled
+  ## for unknown identifiers so embedded connections can receive their replies.
+  ## Handlers must handle their own recoverable errors. Only CancelledError may escape the callback; cancellation
+  ## propagates instead of invoking the embedded-connection fallback.
+  if handler.isNil:
+    return err("raw SURB reply handler must not be nil")
+
+  if not mixProto.rawSurbReplyHandler.isNil:
+    return err("raw SURB reply handler is already registered")
+
+  mixProto.rawSurbReplyHandler = handler
+  ok()
+
+proc unregisterRawSurbReplyHandler*(mixProto: MixProtocol) =
+  mixProto.rawSurbReplyHandler = nil
 
 proc hasDestReadBehavior*(mixProto: MixProtocol, codec: string): bool =
   return mixProto.destReadBehaviors.hasKey(codec)
@@ -453,6 +508,46 @@ proc refundCancelledHold(
     else:
       mixProto.refundUnwritten(claimEpoch)
 
+type
+  ReplyRecoveryErrorKind* {.pure.} = enum
+    SphinxRecoveryFailed
+    PayloadDecodingFailed
+
+  ReplyRecoveryError* = object
+    kind*: ReplyRecoveryErrorKind
+    message*: string
+
+proc decodeReplyPayload(recovered: seq[byte]): Result[seq[byte], string] =
+  let unpadded = removePadding(recovered).valueOr:
+    return err("invalid reply padding: " & error)
+
+  let mixMessage = MixMessage.deserialize(unpadded).valueOr:
+    return err("invalid reply message: " & error)
+
+  if mixMessage.codec.len > 0:
+    return err("unexpected codec in SURB reply")
+
+  ok(mixMessage.message)
+
+proc recoverReply*(
+    credential: ReplyCredential, reply: RawSurbReply
+): Result[seq[byte], ReplyRecoveryError] =
+  let recovered = recoverSphinxReply(credential, reply).valueOr:
+    return err(
+      ReplyRecoveryError(
+        kind: ReplyRecoveryErrorKind.SphinxRecoveryFailed, message: error
+      )
+    )
+
+  let payload = decodeReplyPayload(recovered).valueOr:
+    return err(
+      ReplyRecoveryError(
+        kind: ReplyRecoveryErrorKind.PayloadDecodingFailed, message: error
+      )
+    )
+
+  ok(payload)
+
 method handleMixMessages*(
     mixProto: MixProtocol,
     fromPeerId: PeerId,
@@ -503,7 +598,7 @@ method handleMixMessages*(
 
   # Step 4: Full Sphinx processing
   # Reuse the shared secret computed in step 2 to avoid duplicate EC multiplication
-  let processedSP = mixProto.processWithKey(sphinxPacket, packetKey).valueOr:
+  var processedSP = mixProto.processWithKey(sphinxPacket, packetKey).valueOr:
     error "Failed to process Sphinx packet", err = error
     mix_messages_error.inc(labelValues = ["Intermediate/Exit", "INVALID_SPHINX"])
     return
@@ -534,6 +629,18 @@ method handleMixMessages*(
         ct.onCoverReceived()
       return
 
+    if processedSP.destination == Hop():
+      # Keep a local copy so unregistering concurrently only affects later
+      # deliveries. A registered service owns the payload in its entirety;
+      # the legacy SURB envelope is not interpreted on this path.
+      let deliveryHandler = mixProto.deliveryHandlers.getOrDefault(deserialized.codec)
+      if not deliveryHandler.isNil:
+        await deliveryHandler(
+          MixDelivery(service: deserialized.codec, payload: deserialized.message)
+        )
+        mix_messages_forwarded.inc(labelValues = ["Exit"])
+        return
+
     let (surbs, message) = extractSURBs(deserialized.message).valueOr:
       error "Extracting surbs from payload failed", err = error
       mix_messages_error.inc(labelValues = ["Exit", "INVALID_MSG_SURBS"])
@@ -558,32 +665,37 @@ method handleMixMessages*(
   of Reply:
     trace "# Reply", id = processedSP.id
 
+    let rawReply = RawSurbReply(
+      identifier: processedSP.id, encryptedPayload: move(processedSP.delta_prime)
+    )
+
+    # Keep a local copy so unregistering concurrently only affects subsequent
+    # deliveries. A handler owns the reply only when it recognizes its id.
+    let rawReplyHandler = mixProto.rawSurbReplyHandler
+    if not rawReplyHandler.isNil and
+        (await rawReplyHandler(rawReply)) == RawSurbReplyDisposition.Handled:
+      return
+
+    # No plug-in recognized this reply, so preserve the embedded connection path.
     # Expired credentials are invisible here even if no sweep has run yet.
-    var connCred = mixProto.surbStore.get(processedSP.id).valueOr:
+    let connCred = mixProto.surbStore.get(rawReply.identifier).valueOr:
       mix_messages_error.inc(labelValues = ["Sender/Reply", "NO_CONN_FOUND"])
       return
-    defer:
-      connCred.wipe()
 
-    let reply = processReply(
-      connCred.surbKey, connCred.surbSecret, processedSP.delta_prime
-    ).valueOr:
-      error "could not process reply", id = processedSP.id
-      mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
+    let payload = recoverReply(connCred.credential, rawReply).valueOr:
+      case error.kind
+      of ReplyRecoveryErrorKind.SphinxRecoveryFailed:
+        error "could not recover Sphinx reply", id = processedSP.id, err = error.message
+        mix_messages_error.inc(labelValues = ["Reply", "INVALID_CREDS"])
+      of ReplyRecoveryErrorKind.PayloadDecodingFailed:
+        # Consume only this malformed reply; other SURBs are independent.
+        mixProto.surbStore.release(processedSP.id)
+        error "could not decode reply payload", id = processedSP.id, err = error.message
+        mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
       return
 
     # Each SURB is single-use; other blocks can still deliver their replies.
     mixProto.surbStore.release(processedSP.id)
-
-    let unpaddedMsg = removePadding(reply).valueOr:
-      error "Unpadding message failed", err = error
-      mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
-      return
-
-    let deserialized = MixMessage.deserialize(unpaddedMsg).valueOr:
-      error "Deserialization failed", err = error
-      mix_messages_error.inc(labelValues = ["Reply", "INVALID_SPHINX"])
-      return
 
     when defined(enable_mix_benchmarks):
       benchmarkLog "Reply",
@@ -593,7 +705,7 @@ method handleMixMessages*(
         Opt.some(fromPeerId),
         Opt.none(PeerId)
 
-    await connCred.incoming.put(deserialized.message)
+    await connCred.incoming.put(payload)
   of Intermediate:
     trace "Intermediate node processing",
       peerId = mixProto.mixNodeInfo.peerId, multiAddr = mixProto.mixNodeInfo.multiAddr
@@ -774,16 +886,25 @@ proc handleMixNodeConnection(
     let receivedBytes = await conn.readLp(maxWireSize)
     mixProto.spawnMixMessage(conn.peerId, receivedBytes, metadataBytes)
 
+proc payloadCapacity(codec: string, envelopeSize: int): Result[int, string] =
+  let capacity = DataSize - serializedLen(codec, 0) - envelopeSize
+  if capacity < 0:
+    return err("cannot encode messages for this codec")
+  ok(capacity)
+
+proc getMaxServicePayloadSize*(service: string): Result[int, string] =
+  ## Maximum opaque payload accepted by the message-oriented send overloads.
+  if service.len == 0:
+    return err("Mix service must not be empty")
+  payloadCapacity(service, 0)
+
 proc getMaxMessageSizeForCodec*(
     codec: string, numberOfSurbs: uint8 = 0
 ): Result[int, string] =
   ## Computes the maximum payload size (in bytes) available for a message when encoded  
   ## with the given `codec`, optionally including space for the chosen number of surbs.  
   ## Returns an error if the codec + surb overhead exceeds the data capacity.  
-  let totalLen = serializedLen(codec, 0) + SurbLenSize + (int(numberOfSurbs) * SurbSize)
-  if totalLen > DataSize:
-    return err("cannot encode messages for this codec")
-  return ok(DataSize - totalLen)
+  payloadCapacity(codec, SurbLenSize + int(numberOfSurbs) * SurbSize)
 
 proc drawUsable(
     mixProto: MixProtocol, peerIds: var seq[PeerId], label: string
@@ -823,6 +944,13 @@ proc drawHops(
 
 type SurbBuild* = object
   surb*: SURB
+  credential*: ReplyCredential
+  dispatchBefore*: Opt[Moment]
+    ## Send the packet carrying this SURB before the oldest path record is stale.
+  replyTransitAllowance*: Opt[Duration]
+    ## Budget for supply delivery and reply transit under the rotation configuration.
+  replyHoldTime*: Opt[Duration]
+    ## Maximum time a receiver may retain a freshly dispatched SURB.
   credentialsExpireAt*: Opt[Moment]
     ## When the reply credentials must be unrecoverable: G - D after obtaining
     ## the oldest record of the other hops on the SURB's return path (Mix Key
@@ -876,16 +1004,21 @@ method buildSurb*(
 
     delays.add(hopDelay)
 
-  var surb = ?createSURB(publicKeys, delays, hops, id, mixProto.rng)
+  var created = ?createSURB(publicKeys, delays, hops, id, mixProto.rng)
   let ring = mixProto.keyRing.valueOr:
-    return ok(SurbBuild(surb: move(surb)))
+    return ok(SurbBuild(surb: move(created.surb), credential: move(created.credential)))
   # The packet carrying the SURB is sent before the oldest of these records goes
   # stale, and the SURB's keys remain accepted for surbLifetime after sending,
   # so every reply arrives by then: G - D after obtaining that record (Mix Key
   # Rotation spec §5, §7).
   ok(
     SurbBuild(
-      surb: move(surb),
+      surb: move(created.surb),
+      credential: move(created.credential),
+      dispatchBefore: mixProto.nodePool.staleAt(pathPeerIds),
+      replyHoldTime: Opt.some(ring.config.surbHoldTime),
+      replyTransitAllowance:
+        Opt.some(ring.config.surbLifetime - ring.config.surbHoldTime),
       credentialsExpireAt: mixProto.nodePool.staleAt(pathPeerIds).map(
           proc(staleAt: Moment): Moment =
             staleAt + ring.config.surbLifetime
@@ -926,13 +1059,9 @@ proc buildSurbs(
     # copy of the credentials, so none is left unwiped (Mix Key Rotation spec
     # §7). The reply key stays in the SURB for the exit.
     var creds = ConnCreds(
-      igroup: session.igroup,
-      incoming: incoming,
-      surbSecret: move(built.surb.secret.get()),
-      surbKey: built.surb.key,
+      igroup: session.igroup, incoming: incoming, credential: move(built.credential)
     )
-    let added = mixProto.surbStore.add(id, creds)
-    creds.wipe()
+    let added = mixProto.surbStore.add(id, move(creds))
     added.isOkOr:
       session.release()
       return err(error)
@@ -1112,15 +1241,28 @@ proc `$`*(d: MixDestination): string =
   of MixNode:
     return "MixDestination[MixNode](" & $d.peerId & ")"
 
-when defined(libp2p_mix_experimental_exit_is_dest):
-  proc exitNode*(T: typedesc[MixDestination], p: PeerId): T =
-    T(kind: DestinationType.MixNode, peerId: p)
+proc exitNode*(T: typedesc[MixDestination], p: PeerId): T =
+  T(kind: DestinationType.MixNode, peerId: p)
 
 proc forwardToAddr*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
   T(kind: DestinationType.ForwardAddr, peerId: p, address: address)
 
 proc init*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
   MixDestination.forwardToAddr(p, address)
+
+proc createSurb*(
+    mixProto: MixProtocol, destination: MixDestination
+): Result[SurbBuild, string] =
+  ## Create a reply block that returns to this Mix node. The destination is
+  ## excluded from the independently selected return path. Move the credential
+  ## into its owner and wipe it on use, by credentialsExpireAt when present,
+  ## or on shutdown, whichever comes first.
+  if destination.kind != MixNode:
+    return err("SURBs require exit == destination")
+
+  var id: SURBIdentifier
+  mixProto.rng.generate(id)
+  mixProto.buildSurb(id, destination.peerId, destination.peerId)
 
 proc sendLocal(
     mixProto: MixProtocol,
@@ -1129,19 +1271,23 @@ proc sendLocal(
     codec: string,
     destination: MixDestination,
     numSurbs: uint8,
+    useLegacySurbEnvelope: bool,
+    destinationInfo: Opt[MixPubInfo] = Opt.none(MixPubInfo),
 ): Future[Result[Opt[SurbSession], string]] {.
     async: (raises: [CancelledError, LPStreamError])
 .} =
   ## On success returns a handle to the reply credentials registered for this
   ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
   ## promptly when its connection closes.
-  when not defined(libp2p_mix_experimental_exit_is_dest):
-    doAssert destination.kind == ForwardAddr, "Only exit != destination is allowed"
-
   mix_messages_recvd.inc(labelValues = ["Entry"])
-  let capacity = getMaxMessageSizeForCodec(codec, numSurbs).valueOr:
+  let envelopeSize =
+    if useLegacySurbEnvelope:
+      SurbLenSize + int(numSurbs) * SurbSize
+    else:
+      0
+  let capacity = payloadCapacity(codec, envelopeSize).valueOr:
     mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
-    return err("failure when calling getMaxMessageSizeForCodec: " & error)
+    return err(error)
   if msg.len > capacity:
     mix_messages_error.inc(labelValues = ["Entry", "INVALID_SIZE"])
     return err(
@@ -1174,9 +1320,13 @@ proc sendLocal(
   # A destination that is a mix node is itself the last hop, so only the hops before
   # it are drawn.
   let lastHop =
-    if destination.kind == MixNode:
-      # A node whose record is too old is treated as offline (Mix Key Rotation
-      # spec §5).
+    if destinationInfo.isSome:
+      let info = destinationInfo.get()
+      let mixHop = mixProto.nodePool.getHop(info).valueOr:
+        mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
+        return err("Explicit Mix destination has no usable address")
+      Opt.some(mixHop)
+    elif destination.kind == MixNode:
       let mixHop = mixProto.nodePool.getHop(destination.peerId).valueOr:
         mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
         return err(
@@ -1226,10 +1376,14 @@ proc sendLocal(
     else:
       Hop()
 
-  var prepared = mixProto.prepareMsgWithSurbs(
-    incoming, move(msg), numSurbs, destination.peerId, exitPeerId
-  ).valueOr:
-    return err(fmt"Could not prepend SURBs: {error}")
+  var prepared =
+    if useLegacySurbEnvelope:
+      mixProto.prepareMsgWithSurbs(
+        incoming, move(msg), numSurbs, destination.peerId, exitPeerId
+      ).valueOr:
+        return err(fmt"Could not prepend SURBs: {error}")
+    else:
+      (msg: move(msg), session: Opt.none(SurbSession))
 
   let session = prepared.session
 
@@ -1276,13 +1430,15 @@ proc sendLocal(
   sent = true
   return ok(session)
 
-proc anonymizeLocalProtocolSend*(
+proc sendInternal(
     mixProto: MixProtocol,
     incoming: AsyncQueue[seq[byte]],
     msg: sink seq[byte],
     codec: string,
     destination: MixDestination,
     numSurbs: uint8,
+    useLegacySurbEnvelope: bool,
+    destinationInfo: Opt[MixPubInfo] = Opt.none(MixPubInfo),
 ): Future[Result[Opt[SurbSession], string]] {.
     async: (raises: [CancelledError, LPStreamError])
 .} =
@@ -1290,9 +1446,18 @@ proc anonymizeLocalProtocolSend*(
   ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
   ## promptly when its connection closes. A send that a protocol stop cancels
   ## returns an error.
+  let caller = if useLegacySurbEnvelope: "anonymizeLocalProtocolSend" else: "send"
   if not mixProto.started:
-    return err("anonymizeLocalProtocolSend: mix protocol is not running")
-  let pending = mixProto.sendLocal(incoming, move(msg), codec, destination, numSurbs)
+    return err(caller & ": mix protocol is not running")
+  let pending = mixProto.sendLocal(
+    incoming,
+    move(msg),
+    codec,
+    destination,
+    numSurbs,
+    useLegacySurbEnvelope,
+    destinationInfo,
+  )
   let id = mixProto.nextLocalSendId
   mixProto.nextLocalSendId.inc()
   mixProto.ongoingLocalSends[id] = FutureBase(pending)
@@ -1301,7 +1466,7 @@ proc anonymizeLocalProtocolSend*(
   except CancelledError as exc:
     # `stop` cancels each pending send. The caller did not, so it gets an error.
     if not mixProto.started:
-      return err("anonymizeLocalProtocolSend: mix protocol has stopped")
+      return err(caller & ": mix protocol has stopped")
     raise exc
   finally:
     mixProto.ongoingLocalSends.del(id)
@@ -1338,6 +1503,93 @@ proc sendSurbReply*(
   ).isOkOr:
     return err("could not send reply: " & error)
   return ok()
+
+proc anonymizeLocalProtocolSend*(
+    mixProto: MixProtocol,
+    incoming: AsyncQueue[seq[byte]],
+    msg: sink seq[byte],
+    codec: string,
+    destination: MixDestination,
+    numSurbs: uint8,
+): Future[Result[Opt[SurbSession], string]] {.
+    async: (raises: [CancelledError, LPStreamError])
+.} =
+  ## Legacy request/reply send. New message-oriented consumers should use
+  ## `send`, supplying and owning their SURBs separately.
+  await mixProto.sendInternal(incoming, move(msg), codec, destination, numSurbs, true)
+
+proc send*(
+    mixProto: MixProtocol,
+    destination: MixDestination,
+    service: string,
+    payload: sink seq[byte],
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Send one opaque payload to a service at a Mix destination. This operation
+  ## creates no reply credentials and applies no legacy SURB envelope.
+  if service.len == 0:
+    return err("Mix service must not be empty")
+
+  if destination.kind != MixNode:
+    return err("Mix service delivery requires exit == destination")
+
+  try:
+    (await mixProto.sendInternal(nil, move(payload), service, destination, 0, false)).isOkOr:
+      return err(error)
+  except LPStreamError as exc:
+    return err("could not send Mix service payload: " & exc.msg)
+
+  ok()
+
+proc send*(
+    mixProto: MixProtocol,
+    destination: MixPubInfo,
+    service: string,
+    payload: sink seq[byte],
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Use the supplied address for the final hop. With key rotation enabled,
+  ## the supplied Mix public key must match a locally unexpired pool record
+  ## for the destination peer. With rotation disabled, the destination may
+  ## be outside the pool. This send leaves the pool and peer store unchanged
+  ## and excludes the destination when selecting the preceding hops.
+  if service.len == 0:
+    return err("Mix service must not be empty")
+  discard multiAddrToBytes(destination.peerId, destination.multiAddr).valueOr:
+    return err("Invalid explicit Mix destination address: " & error)
+  try:
+    (
+      await mixProto.sendInternal(
+        nil,
+        move(payload),
+        service,
+        MixDestination.exitNode(destination.peerId),
+        0,
+        false,
+        Opt.some(destination),
+      )
+    ).isOkOr:
+      return err(error)
+  except LPStreamError as exc:
+    return err("could not send Mix service payload: " & exc.msg)
+  ok()
+
+proc sendWithSurb*(
+    mixProto: MixProtocol, surb: sink SURB, payload: sink seq[byte]
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Send one opaque payload through a caller-supplied SURB. The caller must
+  ## treat the SURB as consumed once it invokes this operation, including when
+  ## the result is an error.
+  let pending = mixProto.sendSurbReply(surb, move(payload))
+  let id = mixProto.nextLocalSendId
+  mixProto.nextLocalSendId.inc()
+  mixProto.ongoingLocalSends[id] = FutureBase(pending)
+  try:
+    return await pending
+  except CancelledError as e:
+    if not mixProto.started:
+      return err("sendWithSurb: mix protocol has stopped")
+    raise e
+  finally:
+    mixProto.ongoingLocalSends.del(id)
 
 proc selectRandomNodes(
     mixProto: MixProtocol, count: int, excludePeerIds: HashSet[PeerId]
@@ -1613,6 +1865,7 @@ proc init*(
   mixProto.tagManager = tagManager
   mixProto.keyRing = keyRing
   mixProto.surbStore = store
+  mixProto.deliveryHandlers = initTable[string, MixDeliveryHandler]()
   mixProto.destReadBehaviors = newTable[string, DestReadBehavior]()
 
   mixProto.spamProtection = spamProtection
@@ -1669,9 +1922,9 @@ proc init*(
     # `message` is passed by value (the closure signature is fixed by
     # `ExitLayer.init`'s callback type). A full sink-through chain
     # would require updating the callback type in libp2p_mix.
-    # For now: sendSurbReply() takes `sink seq[byte]` and `move()`s into
+    # For now: sendWithSurb() takes `sink seq[byte]` and `move()`s into
     # buildMessage internally — the optimization stops at this boundary.
-    (await mixProto.sendSurbReply(surb, message)).isOkOr:
+    (await mixProto.sendWithSurb(surb, message)).isOkOr:
       error "could not send reply", err = error
 
   mixProto.exitLayer =

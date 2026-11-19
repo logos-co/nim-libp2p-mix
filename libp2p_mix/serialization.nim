@@ -2,7 +2,6 @@
 # Copyright (c) Status Research & Development GmbH
 
 import results
-import std/sequtils
 import libp2p/utils/opt
 import ./delay
 
@@ -208,7 +207,27 @@ type
     hop*: Hop
     header*: Header
     key*: Key
-    secret*: Opt[Secret]
+
+proc serializeSurb*(surb: SURB): Result[seq[byte], string] =
+  if surb.key.len != k:
+    return err("SURB key must be exactly " & $k & " bytes")
+  if surb.hop.MultiAddress.len notin [0, AddrSize]:
+    return err("invalid SURB hop address length")
+  if surb.header.Alpha.len != AlphaSize or surb.header.Beta.len != BetaSize or
+      surb.header.Gamma.len != GammaSize:
+    return err("invalid SURB header dimensions")
+  ok(surb.hop.serialize() & surb.header.serialize() & surb.key)
+
+proc deserializeSurb*(data: openArray[byte]): Result[SURB, string] =
+  if data.len != SurbSize:
+    return err("Serialized SURB must be exactly " & $SurbSize & " bytes")
+
+  var offset = 0
+  let
+    hop = ?Hop.deserialize(?data.readBytes(offset, Opt.some(AddrSize)))
+    header = ?Header.deserialize(?data.readBytes(offset, Opt.some(HeaderSize)))
+    key = ?data.readBytes(offset, Opt.some(k))
+  ok(SURB(hop: hop, header: header, key: key))
 
 proc serializeMessageWithSURBs*(
     msg: seq[byte], surbs: seq[SURB]
@@ -216,9 +235,11 @@ proc serializeMessageWithSURBs*(
   if surbs.len > (MessageSize - SurbLenSize - 1) div SurbSize:
     return err("too many SURBs")
 
-  let surbBytes =
-    surbs.mapIt(it.hop.serialize() & it.header.serialize() & it.key).concat()
-  ok(byte(surbs.len) & surbBytes & msg)
+  var encoded = @[byte(surbs.len)]
+  for surb in surbs:
+    encoded.add(?surb.serializeSurb())
+  encoded.add(msg)
+  ok(encoded)
 
 proc extractSURBs*(msg: seq[byte]): Result[(seq[SURB], seq[byte]), string] =
   var offset = 0
@@ -230,10 +251,6 @@ proc extractSURBs*(msg: seq[byte]): Result[(seq[SURB], seq[byte]), string] =
 
   var surbs: seq[SURB] = newSeq[SURB](surbsLen)
   for i in 0 ..< surbsLen:
-    let hopBytes = ?readBytes(msg, offset, Opt.some(AddrSize))
-    let headerBytes = ?readBytes(msg, offset, Opt.some(HeaderSize))
-    surbs[i].hop = ?Hop.deserialize(hopBytes)
-    surbs[i].header = ?Header.deserialize(headerBytes)
-    surbs[i].key = ?readBytes(msg, offset, Opt.some(k))
+    surbs[i] = ?deserializeSurb(?readBytes(msg, offset, Opt.some(SurbSize)))
   let msg = ?readBytes(msg, offset)
   return ok((surbs, msg))

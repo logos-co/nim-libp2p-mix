@@ -607,64 +607,48 @@ suite "Mix Protocol - Node Failures":
       failure = exc.msg
     check "Ran out of usable mix nodes" in failure
 
-  when defined(libp2p_mix_experimental_exit_is_dest):
-    proc exitSendFailure(nodes: seq[MixProtocol]): Future[string] {.async.} =
-      ## Sends from the first node to the second node as the exit, and returns
-      ## the error of the send.
-      let nrProto = NoReplyProtocol.new()
-      nodes[1].switch.mount(nrProto)
-      startAndDeferStop(nodes)
+  proc exitSendFailure(nodes: seq[MixProtocol]): Future[string] {.async.} =
+    ## Sends from the first node to the second node as the exit, and returns
+    ## the error of the send.
+    let nrProto = NoReplyProtocol.new()
+    nodes[1].switch.mount(nrProto)
+    startAndDeferStop(nodes)
 
-      let conn = nodes[0]
-        .toConnection(
-          MixDestination.exitNode(nodes[1].switch.peerInfo.peerId), nrProto.codec
-        )
-        .expect("could not build connection")
-      defer:
-        await conn.close()
-      try:
-        await conn.writeLp("test message".toBytes())
-      except LPStreamError as exc:
-        return exc.msg
-      ""
+    let conn = nodes[0]
+      .toConnection(
+        MixDestination.exitNode(nodes[1].switch.peerInfo.peerId), nrProto.codec
+      )
+      .expect("could not build connection")
+    defer:
+      await conn.close()
+    try:
+      await conn.writeLp("test message".toBytes())
+    except LPStreamError as exc:
+      return exc.msg
+    ""
 
-    asyncTest "a send to an exit with no usable address fails at once":
-      ## The exit is the last hop of the path, so the sender needs a hop address
-      ## for it.
-      let nodes = await setupMixNodes(5)
-      discard
-        nodes[0].switch.peerStore[AddressBook].del(nodes[1].switch.peerInfo.peerId)
-      let invalidDestBefore = errorCount("Entry", "INVALID_DEST")
+  asyncTest "a send to an exit with no usable address fails at once":
+    ## The exit is the last hop of the path, so the sender needs a hop address
+    ## for it.
+    let nodes = await setupMixNodes(5)
+    discard nodes[0].switch.peerStore[AddressBook].del(nodes[1].switch.peerInfo.peerId)
+    let invalidDestBefore = errorCount("Entry", "INVALID_DEST")
 
-      let failure = await exitSendFailure(nodes)
-      check:
-        "Destination is not a mix node with a usable address" in failure
-        errorCount("Entry", "INVALID_DEST") == invalidDestBefore + 1
+    let failure = await exitSendFailure(nodes)
+    check:
+      "Destination is not a mix node with a usable address" in failure
+      errorCount("Entry", "INVALID_DEST") == invalidDestBefore + 1
 
-    asyncTest "a send to an exit works with two usable pool members and one with no hop address":
-      ## The pool has the exit, two usable members and one with no hop address, so
-      ## the path must be the two usable members followed by the exit.
-      let nodes = await setupMixNodes(4)
-      let sender = nodes[0]
-      discard sender.addUnusableMember()
-      startAndDeferStop(nodes)
+  asyncTest "a send to an exit works with two usable pool members and one with no hop address":
+    ## The pool has the exit, two usable members and one with no hop address, so
+    ## the path must be the two usable members followed by the exit.
+    let nodes = await setupMixNodes(4)
+    let sender = nodes[0]
+    discard sender.addUnusableMember()
+    startAndDeferStop(nodes)
 
-      for _ in 0 ..< 20:
-        let sent = await sender.anonymizeLocalProtocolSend(
-          newAsyncQueue[seq[byte]](),
-          "test message".toBytes(),
-          "/test/1.0.0",
-          MixDestination.exitNode(nodes[1].switch.peerInfo.peerId),
-          0,
-        )
-        check sent.isOk
-
-    asyncTest "a send to an exit works with two other pool members":
-      ## The path is the two other members followed by the exit.
-      let nodes = await setupMixNodes(4)
-      startAndDeferStop(nodes)
-
-      let sent = await nodes[0].anonymizeLocalProtocolSend(
+    for _ in 0 ..< 20:
+      let sent = await sender.anonymizeLocalProtocolSend(
         newAsyncQueue[seq[byte]](),
         "test message".toBytes(),
         "/test/1.0.0",
@@ -673,25 +657,39 @@ suite "Mix Protocol - Node Failures":
       )
       check sent.isOk
 
-    asyncTest "a send to an exit with one other pool member counts LOW_MIX_POOL":
-      let nodes = await setupMixNodes(3)
-      startAndDeferStop(nodes)
-      let lowPoolBefore = errorCount("Entry", "LOW_MIX_POOL")
+  asyncTest "a send to an exit works with two other pool members":
+    ## The path is the two other members followed by the exit.
+    let nodes = await setupMixNodes(4)
+    startAndDeferStop(nodes)
 
-      let sent = await nodes[0].anonymizeLocalProtocolSend(
-        newAsyncQueue[seq[byte]](),
-        "test message".toBytes(),
-        "/test/1.0.0",
-        MixDestination.exitNode(nodes[1].switch.peerInfo.peerId),
-        0,
-      )
-      check:
-        sent.isErr
-        sent.error.startsWith("Not enough mix nodes for a send (available=1,")
-        errorCount("Entry", "LOW_MIX_POOL") == lowPoolBefore + 1
+    let sent = await nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      "test message".toBytes(),
+      "/test/1.0.0",
+      MixDestination.exitNode(nodes[1].switch.peerInfo.peerId),
+      0,
+    )
+    check sent.isOk
 
-    asyncTest "a send to an exit with no address that the policy accepts fails at once":
-      let nodes = await setupMixNodes(5, hopAddressPolicy = publicHopAddressPolicy)
+  asyncTest "a send to an exit with one other pool member counts LOW_MIX_POOL":
+    let nodes = await setupMixNodes(3)
+    startAndDeferStop(nodes)
+    let lowPoolBefore = errorCount("Entry", "LOW_MIX_POOL")
 
-      check "Destination is not a mix node with a usable address" in
-        await exitSendFailure(nodes)
+    let sent = await nodes[0].anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](),
+      "test message".toBytes(),
+      "/test/1.0.0",
+      MixDestination.exitNode(nodes[1].switch.peerInfo.peerId),
+      0,
+    )
+    check:
+      sent.isErr
+      sent.error.startsWith("Not enough mix nodes for a send (available=1,")
+      errorCount("Entry", "LOW_MIX_POOL") == lowPoolBefore + 1
+
+  asyncTest "a send to an exit with no address that the policy accepts fails at once":
+    let nodes = await setupMixNodes(5, hopAddressPolicy = publicHopAddressPolicy)
+
+    check "Destination is not a mix node with a usable address" in
+      await exitSendFailure(nodes)

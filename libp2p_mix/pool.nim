@@ -170,6 +170,22 @@ proc hopAddressBytes(
     return Opt.none(seq[byte])
   mix_multiaddr.multiAddrToBytes(peerId, maddr).optValue()
 
+proc getHop*(
+    pool: MixNodePool, info: MixPubInfo, now: Moment = Moment.now()
+): Opt[MixHop] {.raises: [].} =
+  ## Validate an explicit destination with the same address policy as pool hops,
+  ## without adding it to the pool or changing the peer store.
+  # With rotation enabled, explicit routing must use a currently known key.
+  # An address override must not refresh or bypass the key record's age.
+  if pool.maxRecordAge.isSome and (
+    not pool.isFresh(info.peerId, now) or
+    pool.peerStore[MixPubKeyBook][info.peerId] != info.mixPubKey
+  ):
+    return Opt.none(MixHop)
+  let addrBytes = pool.hopAddressBytes(info.peerId, info.multiAddr).valueOr:
+    return Opt.none(MixHop)
+  Opt.some(MixHop(info: info, addrBytes: addrBytes))
+
 type HopAddress = tuple[multiAddr: MultiAddress, addrBytes: seq[byte]]
   ## A hop address together with its encoding for the Sphinx header.
 

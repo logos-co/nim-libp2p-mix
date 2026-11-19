@@ -536,6 +536,24 @@ suite "MixNodePool Tests":
 
     check pool.len == 4
 
+  test "explicit hops enforce address policy without changing the peer store":
+    let original = mixNodes[0].toMixPubInfo()
+    let publicPool = MixNodePool.new(peerStore, publicHopAddressPolicy)
+    for address in [
+      "/ip4/127.0.0.1/tcp/4242", "/ip4/8.8.8.8/tcp/0", "/ip4/224.0.0.1/tcp/4242"
+    ]:
+      var info = original
+      info.multiAddr = MultiAddress.init(address).get()
+      check publicPool.getHop(info).isNone
+    var info = original
+    info.multiAddr = MultiAddress.init("/ip4/8.8.8.8/tcp/4242").get()
+    let hop = publicPool.getHop(info).get()
+    check:
+      hop.info == info
+      hop.addrBytes == multiAddrToBytes(info.peerId, info.multiAddr).get()
+      publicPool.len == 0
+      peerStore[AddressBook][info.peerId].len == 0
+
 suite "MixNodePool record age":
   const MaxAge = chronos.minutes(60)
 
@@ -609,3 +627,14 @@ suite "MixNodePool record age":
     check:
       pool.staleAt(info.peerId).isNone
       pool.len(Moment.now() + chronos.days(365)) == 1
+
+  test "explicit destinations cannot bypass record age or replace the recorded key":
+    let pool = MixNodePool.new(peerStore, maxRecordAge = Opt.some(MaxAge))
+    var info = mixNodes[0].toMixPubInfo()
+    check pool.getHop(info).isNone
+    pool.add(info)
+    let deadline = pool.staleAt(info.peerId).get()
+    check pool.getHop(info, deadline).isSome
+    check pool.getHop(info, deadline + 1.nanoseconds).isNone
+    info.mixPubKey = mixNodes[1].toMixPubInfo().mixPubKey
+    check pool.getHop(info).isNone
