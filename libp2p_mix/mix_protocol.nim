@@ -94,6 +94,10 @@ type
       ## So a second dial of the peer at other addresses waits for the first dial.
       ## A forward and a reply dial the address that the sender of the packet gave.
       ## So a caller can wait for a dial of an address that it did not select.
+    hopReaders: Table[uint64, Future[void]]
+      ## The `readHopStream` future of each hop stream, cancelled on stop. Keyed
+      ## so removal on completion is O(1).
+    nextHopReaderId: uint64
     backedOffUntil: Table[PeerId, Moment]
       ## The moment until which a first hop that failed a dial is not the first hop.
     hopBackoff: Duration
@@ -241,6 +245,31 @@ proc removeClosedConnections(
   for (_, conn) in stale:
     await conn.close()
 
+proc readHopStream(conn: Connection) {.async: (raises: [CancelledError]).} =
+  ## Read `conn` until it ends, and discard what it carries.
+  ## This node only writes to a hop stream. libp2p 2.5 can return the stream
+  ## of a dial before the next hop has acknowledged the protocol, and only a
+  ## read takes that acknowledgement off the stream. An mplex connection
+  ## delivers no other stream while the acknowledgement is unread.
+  var buf: array[64, byte]
+  try:
+    while not conn.atEof:
+      discard await conn.readOnce(addr buf[0], buf.len)
+  except LPStreamError as e:
+    trace "Hop stream ended", conn, err = e.msg
+
+proc spawnHopReader(mixProto: MixProtocol, conn: Connection) =
+  ## Start `readHopStream` for `conn`, track its future in `hopReaders`, and
+  ## remove it from there when it finishes.
+  let id = mixProto.nextHopReaderId
+  mixProto.nextHopReaderId.inc()
+  let fut = readHopStream(conn)
+  mixProto.hopReaders[id] = fut
+  fut.addCallback(
+    proc(_: pointer) {.gcsafe, raises: [].} =
+      mixProto.hopReaders.del(id)
+  )
+
 proc startDial(
     mixProto: MixProtocol, pid: PeerId, addrs: seq[MultiAddress], codecs: seq[string]
 ): HopDial =
@@ -255,6 +284,7 @@ proc startDial(
         mixProto.backedOffUntil.del(pid)
         if mixProto.started:
           mixProto.connPool[pid] = dial.value
+          mixProto.spawnHopReader(dial.value)
   )
   dial
 
@@ -1756,6 +1786,12 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   mixProto.connPool.clear()
   if streams.len > 0:
     await noCancel allFutures(streams.mapIt(it.close()))
+
+  # A reader ends by itself only when the next hop closes its side of the stream.
+  let readers = toSeq(mixProto.hopReaders.values)
+  mixProto.hopReaders.clear()
+  if readers.len > 0:
+    await noCancel allFutures(readers.mapIt(it.cancelAndWait()))
 
   if not mixProto.poolSizeLoop.isNil:
     await mixProto.poolSizeLoop.cancelAndWait()
