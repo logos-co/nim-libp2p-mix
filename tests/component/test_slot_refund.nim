@@ -54,6 +54,17 @@ proc firstHop(nodes: seq[MixProtocol], surb: SURB): MixProtocol =
   let (peerId, _) = surb.hop.get().bytesToMultiAddr().expect("valid SURB hop")
   nodes.filterIt(it.switch.peerInfo.peerId == peerId)[0]
 
+proc readUntilEnd(conn: Connection) {.async: (raises: [CancelledError]).} =
+  ## Reads `conn` until it ends, as MixProtocol does for a hop stream that it
+  ## dials. Without a read, libp2p 2.5 leaves the protocol acknowledgement on
+  ## the stream, and the mplex connection then does not see its peer stop.
+  var buf: array[64, byte]
+  try:
+    while not conn.atEof:
+      discard await conn.readOnce(addr buf[0], buf.len)
+  except LPStreamError:
+    return
+
 proc requestSurb(
     nodes: seq[MixProtocol]
 ): Future[tuple[surb: SURB, conn: Connection]] {.async.} =
@@ -184,6 +195,7 @@ suite "Slot refund - forward":
     # Establish every possible second hop's cached stream directly. Random
     # warm-up messages can still be in flight when accounting is enabled.
     let exitPeer = nodes[4].switch.peerInfo.peerId
+    var readers: seq[Future[void]]
     for node in nodes[1 .. 3]:
       let conn = await node.switch.dial(
         exitPeer,
@@ -191,11 +203,13 @@ suite "Slot refund - forward":
         @[MixProtocolID],
       )
       node.connPool[exitPeer] = conn
+      readers.add(conn.readUntilEnd())
 
     let hops = nodes[1 .. 3].mapIt(it.attachCover())
     await nodes[4].switch.stop()
     checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
       nodes[1 .. 3].allIt(it.connPool[exitPeer].closed())
+    await allFutures(readers)
 
     await nodes.sendToExit()
     # Proof generation shows both relays received the packet; then wait for
@@ -266,7 +280,7 @@ type
     coverAtSend: bool
 
   FailingStream = ref object of Connection
-    ## A stream whose writes fail, as on a closed stream.
+    ## A stream whose writes and reads fail, as on a closed stream.
 
   FailingDialer = ref object of Dialer
     ## Opens a FailingStream for every dial, with no connection.
@@ -296,6 +310,11 @@ method precomputeCoverProofs(self: FakeSpamProtection): bool {.gcsafe, raises: [
 method write(
     self: FailingStream, msg: sink seq[byte]
 ): Future[void] {.async: (raises: [CancelledError, LPStreamError]).} =
+  raise newLPStreamClosedError()
+
+method readOnce(
+    self: FailingStream, pbytes: pointer, nbytes: int
+): Future[int] {.async: (raises: [CancelledError, LPStreamError]).} =
   raise newLPStreamClosedError()
 
 method dial(

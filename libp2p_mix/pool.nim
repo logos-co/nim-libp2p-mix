@@ -198,14 +198,17 @@ proc selectHopAddress(pool: MixNodePool, peerId: PeerId): Opt[HopAddress] =
   let lastDialedAddr = pool.peerStore[LastSeenOutboundBook][peerId]
   let storedAddrs = pool.peerStore[AddressBook][peerId]
   for relayed in [false, true]:
-    lastDialedAddr.withValue(lastDialed):
+    if lastDialedAddr.isSome:
+      let lastDialed = lastDialedAddr.get()
       if isCircuitRelayMA(lastDialed) == relayed:
-        pool.hopAddressBytes(peerId, lastDialed).withValue(addrBytes):
-          return Opt.some((lastDialed, addrBytes))
+        let addrBytes = pool.hopAddressBytes(peerId, lastDialed)
+        if addrBytes.isSome:
+          return Opt.some((lastDialed, addrBytes.get()))
     for maddr in storedAddrs:
       if isCircuitRelayMA(maddr) == relayed:
-        pool.hopAddressBytes(peerId, maddr).withValue(addrBytes):
-          return Opt.some((maddr, addrBytes))
+        let addrBytes = pool.hopAddressBytes(peerId, maddr)
+        if addrBytes.isSome:
+          return Opt.some((maddr, addrBytes.get()))
   Opt.none(HopAddress)
 
 proc getHop*(
