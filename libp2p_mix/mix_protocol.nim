@@ -1475,7 +1475,7 @@ proc sendSurbReply*(
   if not mixProto.started:
     return err("sendSurbReply: mix protocol is not running")
   let (peerId, multiAddr) = surb.hop.get().bytesToMultiAddr().valueOr:
-      return err("could not obtain multiaddress from hop: " & error)
+      return err("could not obtain multiaddress from hop: " & $error)
 
   # Reply messages don't require an application codec: routing is determined by the SURB.
   let message = buildMessage(move(msg), "").valueOr:
