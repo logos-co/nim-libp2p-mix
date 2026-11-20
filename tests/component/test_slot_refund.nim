@@ -266,7 +266,7 @@ type
     coverAtSend: bool
 
   FailingStream = ref object of Connection
-    ## A stream whose writes fail, as on a closed stream.
+    ## A stream whose writes and reads fail, as on a closed stream.
 
   FailingDialer = ref object of Dialer
     ## Opens a FailingStream for every dial, with no connection.
@@ -296,6 +296,11 @@ method precomputeCoverProofs(self: FakeSpamProtection): bool {.gcsafe, raises: [
 method write(
     self: FailingStream, msg: sink seq[byte]
 ): Future[void] {.async: (raises: [CancelledError, LPStreamError]).} =
+  raise newLPStreamClosedError()
+
+method readOnce(
+    self: FailingStream, pbytes: pointer, nbytes: int
+): Future[int] {.async: (raises: [CancelledError, LPStreamError]).} =
   raise newLPStreamClosedError()
 
 method dial(
