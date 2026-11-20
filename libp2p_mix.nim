@@ -72,7 +72,7 @@ export SpamProtectionDelayStrategy
 
 export mix_node
 
-export MixNodePool, publicHopAddressPolicy
+export MixNodePool, nodePool, publicHopAddressPolicy
 export add
 export remove
 export peerIds

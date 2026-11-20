@@ -23,3 +23,15 @@ static:
   doAssert declared(MixKeyRing)
   doAssert declared(acceptanceWindow)
   doAssert declared(setKeyHandler)
+
+  doAssert compiles do:
+    var mix: MixProtocol
+    var relay: MixPubInfo
+    mix.nodePool.add(relay)
+    discard mix.nodePool.remove(relay.peerId)
+  doAssert not compiles(
+    block:
+      var mix: MixProtocol
+      var replacement: MixNodePool
+      mix.nodePool = replacement
+  )
