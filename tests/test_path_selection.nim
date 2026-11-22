@@ -460,36 +460,45 @@ suite "Mix path selection integration":
     session = RecordingSelector(nodePool: mix.nodePool)
     mix.defaultPathSelector = shared
 
-  test "both send overloads pass session selectors and fix the destination last":
-    let pooled = waitFor mix.send(
-      MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte], session
-    )
-    let explicit = waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte], session)
-    check pooled.error == "test selector invoked"
-    check explicit.error == "test selector invoked"
-    require session.requests.len == 2
-    for i, destination in [nodes[3], nodes[4]]:
-      let request = session.requests[i]
-      check request.purpose == PathPurpose.Forward
-      check request.pathLength == DefaultPathLength
-      check request.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == destination
-      check request.constraints.excludedNodeIds == [nodes[0].peerId, destination.peerId].toHashSet
+  test "both send overloads pass the requested length and fix the destination last":
+    for length in MinPathLength .. MaxPathLength:
+      session.requests.setLen(0)
+      let pooled = waitFor mix.send(
+        MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte],
+        selector = session, pathLength = length,
+      )
+      let explicit = waitFor mix.send(
+        nodes[4], "/test/1.0.0", @[1.byte], selector = session, pathLength = length
+      )
+      check pooled.error == "test selector invoked"
+      check explicit.error == "test selector invoked"
+      require session.requests.len == 2
+      for i, destination in [nodes[3], nodes[4]]:
+        let request = session.requests[i]
+        check request.purpose == PathPurpose.Forward
+        check request.pathLength == length
+        check request.constraints.fixedHops.getOrDefault(length - 1) == destination
+        check request.constraints.excludedNodeIds == [nodes[0].peerId, destination.peerId].toHashSet
     check shared.requests.len == 0
     check mix.defaultPathSelector == shared
     check mix.nodePool.get(nodes[4].peerId).isNone
 
-  test "createSurb passes the session selector and fixes the current local endpoint":
+  test "createSurb passes the requested length and fixes the current local endpoint":
     let newAddr = MultiAddress.init("/ip4/127.0.0.1/tcp/9999").get()
     require mix.setLocalMultiAddr(newAddr).isOk
-    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId), session).error ==
-      "test selector invoked"
-    require session.requests.len == 1
-    let request = session.requests[0]
     var local = nodes[0]
     local.multiAddr = newAddr
-    check request.purpose == PathPurpose.Surb
-    check request.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == local
-    check request.constraints.excludedNodeIds == [local.peerId, nodes[4].peerId].toHashSet
+    for length in MinPathLength .. MaxPathLength:
+      session.requests.setLen(0)
+      check mix.createSurb(
+        MixDestination.exitNode(nodes[4].peerId), selector = session, pathLength = length
+      ).error == "test selector invoked"
+      require session.requests.len == 1
+      let request = session.requests[0]
+      check request.purpose == PathPurpose.Surb
+      check request.pathLength == length
+      check request.constraints.fixedHops.getOrDefault(length - 1) == local
+      check request.constraints.excludedNodeIds == [local.peerId, nodes[4].peerId].toHashSet
     check shared.requests.len == 0
     check mix.defaultPathSelector == shared
 
@@ -499,35 +508,70 @@ suite "Mix path selection integration":
     check (waitFor mix.buildCoverPacket(0)).error == "test selector invoked"
     check shared.requests.mapIt(it.purpose) ==
       @[PathPurpose.Forward, PathPurpose.Surb, PathPurpose.Cover]
+    for request in shared.requests:
+      check request.pathLength == DefaultPathLength
     let cover = shared.requests[^1]
     check cover.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == nodes[0]
     check cover.constraints.excludedNodeIds == [nodes[0].peerId].toHashSet
 
-  test "createSurb builds a reply block using a concrete session selector":
-    let state = SessionPathState.init(@[@[nodes[1].peerId], @[nodes[2].peerId]]).get()
-    let selector = SessionPathSelector.new(mix.nodePool, rng(), state).get()
-    let reply = mix.createSurb(MixDestination.exitNode(nodes[4].peerId), selector).get()
-    let firstHop = bytesToMultiAddr(reply.surb.hop.get()).get()
-    check firstHop[0] == nodes[2].peerId
+  test "createSurb builds three- and four-hop reply blocks using session sets":
+    for length in [DefaultPathLength, 4]:
+      let sets = nodes[1 ..< length].mapIt(@[it.peerId])
+      let state = SessionPathState.init(sets).get()
+      let selector = SessionPathSelector.new(mix.nodePool, rng(), state).get()
+      let reply = mix.createSurb(
+        MixDestination.exitNode(nodes[4].peerId), selector, pathLength = length
+      ).get()
+      let firstHop = bytesToMultiAddr(reply.surb.hop.get()).get()
+      check firstHop[0] == nodes[length - 1].peerId
     check shared.requests.len == 0
     check mix.defaultPathSelector == shared
 
-  test "legacy sends reuse the selector for SURBs and exclude the selected forward exit":
-    session.forwardPath = nodes[1 .. 3]
-    let sent = waitFor mix.anonymizeLocalProtocolSend(
-      newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
-      MixDestination.forwardToAddr(nodes[4].peerId, nodes[4].multiAddr), 1, session,
-    )
-    check sent.error == "Could not prepend SURBs: test selector invoked"
-    require session.requests.len == 2
-    let forward = session.requests[0]
-    check forward.purpose == PathPurpose.Forward
-    check forward.constraints.fixedHops.len == 0
-    check forward.constraints.excludedNodeIds == [nodes[0].peerId, nodes[4].peerId].toHashSet
-    let surb = session.requests[1]
-    check surb.purpose == PathPurpose.Surb
-    check surb.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == nodes[0]
-    check surb.constraints.excludedNodeIds ==
-      [nodes[0].peerId, nodes[3].peerId, nodes[4].peerId].toHashSet
+  test "unsupported lengths fail before sampling or registering reply credentials":
+    for length in [low(int), -1, 0, MinPathLength - 1, MaxPathLength + 1, high(int)]:
+      check (waitFor mix.send(
+        MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte],
+        selector = session, pathLength = length,
+      )).error == "unsupported path length"
+      check (waitFor mix.send(
+        nodes[4], "/test/1.0.0", @[1.byte], selector = session, pathLength = length
+      )).error == "unsupported path length"
+      check mix.createSurb(
+        MixDestination.exitNode(nodes[4].peerId), selector = session, pathLength = length
+      ).error == "unsupported path length"
+      check (waitFor mix.anonymizeLocalProtocolSend(
+        newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
+        MixDestination.exitNode(nodes[3].peerId), 1, session, pathLength = length,
+      )).error == "unsupported path length"
+    check session.requests.len == 0
     check shared.requests.len == 0
     check mix.surbCredsLen == 0
+
+  test "legacy sends pass the same length and selector to embedded SURBs":
+    let extra = MixNodeInfo.generateRandomMany(1, rng())[0].toMixPubInfo()
+    mix.nodePool.add(extra)
+    for length in [DefaultPathLength, 4]:
+      session.requests.setLen(0)
+      session.forwardPath = nodes[1 .. 3]
+      if length == 4:
+        session.forwardPath.add(extra)
+      let sent = waitFor mix.anonymizeLocalProtocolSend(
+        newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
+        MixDestination.forwardToAddr(nodes[4].peerId, nodes[4].multiAddr), 1, session,
+        pathLength = length,
+      )
+      check sent.error == "Could not prepend SURBs: test selector invoked"
+      require session.requests.len == 2
+      let forward = session.requests[0]
+      check forward.purpose == PathPurpose.Forward
+      check forward.pathLength == length
+      check forward.constraints.fixedHops.len == 0
+      check forward.constraints.excludedNodeIds == [nodes[0].peerId, nodes[4].peerId].toHashSet
+      let surb = session.requests[1]
+      check surb.purpose == PathPurpose.Surb
+      check surb.pathLength == length
+      check surb.constraints.fixedHops.getOrDefault(length - 1) == nodes[0]
+      check surb.constraints.excludedNodeIds ==
+        [nodes[0].peerId, session.forwardPath[^1].peerId, nodes[4].peerId].toHashSet
+      check mix.surbCredsLen == 0
+    check shared.requests.len == 0
