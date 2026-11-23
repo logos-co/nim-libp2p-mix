@@ -16,6 +16,22 @@ type SessionSelectorParams* = object
     ## Number of session candidate sets, separate from caller-fixed hops.
   candidatesPerHop*: int
 
+type SessionProfile* {.pure.} = enum
+  Lite
+  Standard
+  Strict
+
+func params*(profile: SessionProfile): SessionSelectorParams =
+  ## Presets only: construction initializes private state once per session.
+  ## Profiles do not change the default random selector used by Mix.
+  case profile
+  of SessionProfile.Lite:
+    SessionSelectorParams(pathLength: 3, hopCount: 1, candidatesPerHop: 5)
+  of SessionProfile.Standard:
+    SessionSelectorParams(pathLength: 3, hopCount: 2, candidatesPerHop: 5)
+  of SessionProfile.Strict:
+    SessionSelectorParams(pathLength: 4, hopCount: 3, candidatesPerHop: 3)
+
 type SessionPathState = object
   ## Sets are ordered from the initiator outward and stay fixed for the session.
   ## Each set controls one relay position, separate from caller-fixed hops.

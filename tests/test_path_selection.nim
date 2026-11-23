@@ -367,6 +367,32 @@ suite "Session selector construction":
                      else: "not enough usable mix nodes for session candidate sets"
       check SessionPathSelector.new(pool, rng(), params).error == expected
 
+suite "Session profiles":
+  test "presets construct selectors for forward and SURB paths with sufficient candidates":
+    let nodes = MixNodeInfo.generateRandomMany(11, rng()).mapIt(it.toMixPubInfo())
+    for (profile, length, hops, size) in [
+      (SessionProfile.Lite, 3, 1, 5),
+      (SessionProfile.Standard, 3, 2, 5),
+      (SessionProfile.Strict, 4, 3, 3),
+    ]:
+      let params = profile.params()
+      check (params.pathLength, params.hopCount, params.candidatesPerHop) ==
+        (length, hops, size)
+      let pool = MixNodePool.new(PeerStore.new())
+      let required = hops * size
+      pool.add(nodes[0 ..< required])
+      let selector = SessionPathSelector.new(pool, rng(), params).get()
+      check selector.pathLength == length
+      for purpose in [PathPurpose.Forward, PathPurpose.Surb]:
+        var request = PathRequest(purpose: purpose)
+        request.constraints.fixedHops[length - 1] = nodes[^1]
+        let path = selector.selectPath(request).get()
+        check path.len == length
+        check path[^1] == nodes[^1]
+      require pool.remove(nodes[0].peerId)
+      check SessionPathSelector.new(pool, rng(), params).error ==
+        "not enough usable mix nodes for session candidate sets"
+
 suite "Session path selection":
   var
     pool: MixNodePool
