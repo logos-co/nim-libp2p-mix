@@ -78,7 +78,7 @@ type
   MixProtocol* = ref object of LPProtocol
     mixNodeInfo: MixNodeInfo
     switch*: Switch
-    nodePool*: MixNodePool
+    relayPool: MixNodePool
     tagManager: TagManager
     exitLayer: ExitLayer
     rng: Rng
@@ -118,6 +118,10 @@ type
     ongoingLocalSends: Table[uint64, FutureBase]
       ## In-flight local sends, cancelled on stop.
     nextLocalSendId: uint64
+
+func nodePool*(mixProto: MixProtocol): MixNodePool =
+  ## Relays can be added and removed from the pool configured during initialization.
+  mixProto.relayPool
 
 proc registerMixDeliveryHandler*(
     mixProto: MixProtocol, service: string, handler: MixDeliveryHandler
@@ -1920,7 +1924,7 @@ proc init*(
   mixProto.hopDrainTimeout = HopStreamDrainTimeout
   mixProto.switch = switch
   mixProto.rng = switch.rng
-  mixProto.nodePool = MixNodePool.new(switch.peerStore, hopAddressPolicy, maxRecordAge)
+  mixProto.relayPool = MixNodePool.new(switch.peerStore, hopAddressPolicy, maxRecordAge)
   mixProto.tagManager = tagManager
   mixProto.keyRing = keyRing
   mixProto.surbStore = store
