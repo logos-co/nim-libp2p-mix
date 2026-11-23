@@ -291,8 +291,11 @@ proc removeClosedConnections(
       stale.add((peerId, conn))
   for (peerId, _) in stale:
     mixProto.connPool.del(peerId)
-  for (_, conn) in stale:
-    await mixProto.retireHopStream(conn)
+  let retiring = stale.mapIt(mixProto.retireHopStream(it.conn))
+  try:
+    await allFutures(retiring)
+  except CancelledError:
+    await noCancel allFutures(retiring.mapIt(it.cancelAndWait()))
 
 proc startDial(
     mixProto: MixProtocol, pid: PeerId, addrs: seq[MultiAddress], codecs: seq[string]
