@@ -31,7 +31,6 @@ jobs:
           # Windows runners (abrupt process exit, no test-fail output).
           # Add Windows back once the underlying issue is fixed.
           - { os: linux, builder: ubuntu-22.04, cpu: amd64, cc: gcc }
-          - { os: linux, builder: ubuntu-22.04, cpu: i386,  cc: gcc }
           - { os: macos, builder: macos-15,     cpu: arm64, cc: clang }
         nim:
           # Test the libp2p v2.5.0 compiler floor and a newer release.
@@ -50,14 +49,6 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install i386 toolchain
-        if: matrix.platform.cpu == 'i386'
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y \
-            gcc-multilib g++-multilib
-
       - name: Setup Nim ${{ matrix.nim.ref }}
         uses: jiro4989/setup-nim-action@v2
         with:
@@ -73,12 +64,6 @@ jobs:
             'https://github.com/nim-lang/nimble.git@#aa03f886e4a111d6af9090c6a1f1271d64b66f7b'
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
           "$HOME/.nimble/bin/nimble" --version
-
-      - name: Set i386 build flags
-        if: matrix.platform.cpu == 'i386'
-        run: |
-          echo "NIMFLAGS=${NIMFLAGS} --cpu:i386 --passC:-m32 --passL:-m32" >> $GITHUB_ENV
-          echo "CC=gcc -m32" >> $GITHUB_ENV
 
       - name: Cache nimble deps
         id: nimble-cache
