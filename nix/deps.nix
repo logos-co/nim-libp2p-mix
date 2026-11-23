@@ -5,8 +5,8 @@
 {
   bearssl = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-bearssl";
-    rev = "38a5622be728fb083f6fe55c124502995b2f4e3d";
-    sha256 = "1adk164l8xk3mdxcqfic9man7bmbl90bsvgkpfdyhif0v2ffy1lw";
+    rev = "6a98e65d6860971a4b5e7672a5c5ad8a737d5ef8";
+    sha256 = "1bdch7zxsvy88928vv7mqhnbm2i5z5c90i9djsl53xn0vblrgvzk";
     fetchSubmodules = true;
   };
 

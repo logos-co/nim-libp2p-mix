@@ -28,7 +28,7 @@ jobs:
           # Matches the "current" Nim in ci.yml's matrix. ci.yml also covers
           # the 2.2.6 floor on full unit/component tests; for examples we
           # just smoke-build against the version most contributors run.
-          nim-version: '2.2.10'
+          nim-version: '2.2.14'
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Cache nimble deps

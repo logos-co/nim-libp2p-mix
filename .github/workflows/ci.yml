@@ -36,10 +36,13 @@ jobs:
         nim:
           # Test the libp2p v2.5.0 compiler floor and a newer release.
           - { ref: '2.2.6',  mm: refc }
-          - { ref: '2.2.10', mm: refc }
+          - { ref: '2.2.14', mm: refc }
+          - { ref: '2.2.14', mm: orc }
 
-    name: ${{ matrix.platform.os }}-${{ matrix.platform.cpu }} (Nim ${{ matrix.nim.ref }})
+    name: ${{ matrix.platform.os }}-${{ matrix.platform.cpu }} (Nim ${{ matrix.nim.ref }}, ${{ matrix.nim.mm }})
     runs-on: ${{ matrix.platform.builder }}
+    env:
+      NIMFLAGS: "--mm:${{ matrix.nim.mm }}"
     defaults:
       run:
         shell: bash
@@ -62,7 +65,7 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upgrade Nimble on floor-Nim jobs
-        # Use the same Nimble resolver on both compiler versions.
+        # Upgrade the resolver bundled with the minimum supported compiler.
         # Pin the commit behind Nimble 0.22.2 to avoid a registry/tag lookup.
         if: matrix.nim.ref == '2.2.6'
         run: |
