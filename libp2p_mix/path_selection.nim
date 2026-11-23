@@ -27,8 +27,6 @@ type
   PathRequest* = object
     purpose*: PathPurpose
       ## Context for the strategy; callers supply purpose-specific constraints.
-    pathLength*: int
-      ## Total mix hops, including fixed hops. Must be specified explicitly.
     constraints*: PathConstraints
 
   MixPath* = seq[MixPubInfo]
@@ -40,20 +38,35 @@ type
 
   RandomPathSelector* = ref object of PathSelector
     rng: Rng
+    length: int
+
+method pathLength*(selector: PathSelector): int {.base, gcsafe, raises: [].} =
+  ## Read-only packet length. Concrete strategies must implement this getter.
+  raiseAssert "pathLength must be implemented by concrete path selector types"
+
+method pathLength*(selector: RandomPathSelector): int {.gcsafe, raises: [].} =
+  selector.length
+
+func validatePathLength*(pathLength: int): Result[void, string] =
+  if pathLength < MinPathLength or pathLength > MaxPathLength:
+    return err("unsupported path length")
+  ok()
 
 proc hasRoutingInfo(info: MixPubInfo): bool =
   info.mixPubKey != default(FieldElement) and
     multiAddrToBytes(info.peerId, info.multiAddr).isOk
 
-proc validatePathRequest*(request: PathRequest): Result[void, string] =
+proc validatePathRequest*(
+    request: PathRequest, pathLength: int
+): Result[void, string] =
   ## Validate before selecting any nodes. This checks request structure and
-  ## fixed-hop encoding requirements, not liveness or reputation eligibility.
-  if request.pathLength < MinPathLength or request.pathLength > MaxPathLength:
-    return err("unsupported path length")
+  ## fixed-hop encoding requirements against the selector-provided length,
+  ## not liveness or reputation eligibility.
+  ?validatePathLength(pathLength)
 
   var fixedIds: HashSet[PeerId]
   for position, info in request.constraints.fixedHops:
-    if position < 0 or position >= request.pathLength:
+    if position < 0 or position >= pathLength:
       return err("fixed hop index outside path")
     if info.peerId in fixedIds:
       return err("duplicate fixed hop identity")
@@ -72,16 +85,20 @@ method samplePath*(
   ## The request is not validated here.
   raiseAssert "samplePath must be implemented by concrete path selector types"
 
-proc new*(T: typedesc[RandomPathSelector], nodePool: MixNodePool, rng: Rng): T =
+proc new*(
+    T: typedesc[RandomPathSelector], nodePool: MixNodePool, rng: Rng,
+    pathLength: int = DefaultPathLength,
+): T =
   doAssert not rng.isNil, "path selection requires a CSPRNG"
-  T(nodePool: nodePool, rng: rng)
+  doAssert validatePathLength(pathLength).isOk, "unsupported path length"
+  T(nodePool: nodePool, rng: rng, length: pathLength)
 
 proc prepareFixedHops*(
-    request: PathRequest
+    request: PathRequest, pathLength: int
 ): tuple[path: MixPath, excludedIds: HashSet[PeerId]] =
   ## The request has already been validated by selectPath.
   ## Reserve every fixed identity before sampling any unfilled position.
-  result.path = newSeq[MixPubInfo](request.pathLength)
+  result.path = newSeq[MixPubInfo](pathLength)
   result.excludedIds = request.constraints.excludedNodeIds
   for position, info in request.constraints.fixedHops:
     result.path[position] = info
@@ -122,8 +139,9 @@ method samplePath*(
   if selector.rng.isNil:
     return err("missing CSPRNG")
 
-  var (path, excludedIds) = prepareFixedHops(request)
-  let count = request.pathLength - request.constraints.fixedHops.len
+  let pathLength = selector.pathLength
+  var (path, excludedIds) = prepareFixedHops(request, pathLength)
+  let count = pathLength - request.constraints.fixedHops.len
   if count == 0:
     return ok(path)
 
@@ -144,11 +162,12 @@ proc selectPath*(
   
   if selector.isNil or selector.nodePool.isNil:
     return err("missing selector or pool")
-  ?request.validatePathRequest()
+  let pathLength = selector.pathLength
+  ?request.validatePathRequest(pathLength)
 
   ## call the path selector and validate the returned path.
   let path = ?selector.samplePath(request)
-  if path.len != request.pathLength:
+  if path.len != pathLength:
     return err("selector returned wrong path length")
   var used: HashSet[PeerId]
   for position, info in path:

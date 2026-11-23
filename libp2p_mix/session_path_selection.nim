@@ -71,19 +71,25 @@ proc sampleSessionState*(
 type SessionPathSelector* = ref object of PathSelector
   state: SessionPathState
   rng: Rng
+  length: int
+
+method pathLength*(selector: SessionPathSelector): int {.gcsafe, raises: [].} =
+  selector.length
 
 proc new*(
     T: typedesc[SessionPathSelector], nodePool: MixNodePool, rng: Rng,
     state: SessionPathState,
+    pathLength: int = DefaultPathLength,
 ): Result[T, string] =
   ## One instance per logical session. Candidate sets cannot be replenished.
+  ?validatePathLength(pathLength)
   if nodePool.isNil:
     return err("missing mix node pool")
   if rng.isNil:
     return err("missing CSPRNG")
   if state.candidateSets.len == 0:
     return err("empty session path state")
-  ok(T(nodePool: nodePool, rng: rng, state: state))
+  ok(T(nodePool: nodePool, rng: rng, state: state, length: pathLength))
 
 method samplePath*(
     selector: SessionPathSelector, request: PathRequest
@@ -96,9 +102,9 @@ method samplePath*(
   if selector.state.candidateSets.len == 0:
     return err("empty session path state")
 
-  var (path, excludedIds) = prepareFixedHops(request)
+  var (path, excludedIds) = prepareFixedHops(request, selector.pathLength)
   var positions: seq[int]
-  for position in 0 ..< request.pathLength:
+  for position in 0 ..< path.len:
     if not request.constraints.fixedHops.hasKey(position):
       positions.add(position)
   let sessionHops = selector.state.candidateSets.len

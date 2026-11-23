@@ -37,15 +37,15 @@ type MockMixProtocol* = ref object of MixProtocol
 method buildSurb*(
     mock: MockMixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId,
     selector: PathSelector = nil,
-    pathLength: int = DefaultPathLength,
 ): Result[SurbBuild, string] {.gcsafe, raises: [].} =
   # No forced paths configured or all sets consumed: use the supplied/default selector.
   if mock.surbPeerSets.len == 0 or mock.surbCallIndex >= mock.surbPeerSets.len:
-    return procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId, selector, pathLength)
+    return procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId, selector)
 
   # The exit node is randomly chosen during forward path construction, so it
   # might be one of our candidates. Remove it.
   let candidates = mock.surbPeerSets[mock.surbCallIndex].filterIt(it != exitPeerId)
+  let pathLength = if selector.isNil: DefaultPathLength else: selector.pathLength
   doAssert pathLength >= MinPathLength and pathLength <= MaxPathLength
   doAssert candidates.len >= pathLength - 1
   let peers = candidates[0 ..< pathLength - 1]
@@ -62,7 +62,7 @@ method buildSurb*(
       removed.add((peerId, mixKeys[peerId]))
       discard mock.nodePool.remove(peerId)
 
-  let surb = procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId, selector, pathLength)
+  let surb = procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId, selector)
 
   for (peerId, mixPubKey) in removed:
     mixKeys[peerId] = mixPubKey

@@ -80,6 +80,8 @@ type
     switch*: Switch
     relayPool: MixNodePool
     defaultPathSelector*: PathSelector
+      ## Cover's shared selector. Sends and SURB creation with no selector
+      ## use a fresh default-length random selector instead.
     tagManager: TagManager
     exitLayer: ExitLayer
     rng: Rng
@@ -124,18 +126,15 @@ func nodePool*(mixProto: MixProtocol): MixNodePool =
   ## Relays can be added and removed from the pool configured during initialization.
   mixProto.relayPool
 
-proc selectPath(
-    mixProto: MixProtocol, request: PathRequest, selector: PathSelector = nil
-): Result[MixPath, string] {.gcsafe, raises: [].} =
-  ## Prefer a caller-owned selector without replacing the default.
-  ## Packet builders share this dispatch point while supplying their
-  ## own purpose-specific request.
-  let activeSelector =
-    if selector.isNil:
-      mixProto.defaultPathSelector
-    else:
-      selector
-  activeSelector.selectPath(request)
+proc resolvePathSelector(
+    mixProto: MixProtocol, selector: PathSelector
+): PathSelector =
+  ## Sends and SURB creation default to a fresh random selector.
+  ## The shared defaultPathSelector is reserved for cover traffic.
+  if selector.isNil:
+    RandomPathSelector.new(mixProto.nodePool, mixProto.rng)
+  else:
+    selector
 
 proc registerMixDeliveryHandler*(
     mixProto: MixProtocol, service: string, handler: MixDeliveryHandler
@@ -1078,20 +1077,19 @@ proc preparePath(
 method buildSurb*(
     mixProto: MixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId,
     selector: PathSelector = nil,
-    pathLength: int = DefaultPathLength,
 ): Result[SurbBuild, string] {.
     base, gcsafe, raises: []
 .} =
-  if pathLength < MinPathLength or pathLength > MaxPathLength:
-    return err("unsupported path length")
+  let activeSelector = mixProto.resolvePathSelector(selector)
+  let pathLength = activeSelector.pathLength
+  ?validatePathLength(pathLength)
   let request = PathRequest(
     purpose: PathPurpose.Surb,
-    pathLength: pathLength,
     constraints: ?mixProto.pathConstraints(
       PathPurpose.Surb, pathLength, destPeerId, exitPeerId
     ),
   )
-  let path = ?mixProto.selectPath(request, selector)
+  let path = ?activeSelector.selectPath(request)
   let (publicKeys, delays, hops) = ?mixProto.preparePath(path)
   let pathPeerIds = path[0 ..< path.high].mapIt(it.peerId)
   var created = ?createSURB(publicKeys, delays, hops, id, mixProto.rng)
@@ -1123,7 +1121,6 @@ proc buildSurbs(
     destPeerId: PeerId,
     exitPeerId: PeerId,
     selector: PathSelector,
-    pathLength: int,
 ): Result[tuple[surbs: seq[SURB], session: Opt[SurbSession]], string] =
   if numSurbs == 0:
     # Fire-and-forget send: no reply expected, so nothing to register.
@@ -1139,7 +1136,7 @@ proc buildSurbs(
     var id: SURBIdentifier
     mixProto.rng.generate(id)
 
-    var built = mixProto.buildSurb(id, destPeerId, exitPeerId, selector, pathLength).valueOr:
+    var built = mixProto.buildSurb(id, destPeerId, exitPeerId, selector).valueOr:
       # Release whatever this group already registered; a partially built
       # group can never receive a usable reply.
       session.release()
@@ -1170,10 +1167,9 @@ proc prepareMsgWithSurbs(
     destPeerId: PeerId,
     exitPeerId: PeerId,
     selector: PathSelector,
-    pathLength: int,
 ): Result[tuple[msg: seq[byte], session: Opt[SurbSession]], string] =
   let built = mixProto.buildSurbs(
-    incoming, numSurbs, destPeerId, exitPeerId, selector, pathLength
+    incoming, numSurbs, destPeerId, exitPeerId, selector
   ).valueOr:
     return err(error)
   let serialized = serializeMessageWithSURBs(msg, built.surbs).valueOr:
@@ -1347,18 +1343,26 @@ proc init*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
 
 proc createSurb*(
     mixProto: MixProtocol, destination: MixDestination, selector: PathSelector = nil,
-    pathLength: int = DefaultPathLength,
 ): Result[SurbBuild, string] =
   ## Create a reply block that returns to this Mix node. The destination is
   ## excluded from the independently selected return path. Use a caller-owned
-  ## selector for related sends and SURBs; nil uses the default.
-  ## pathLength counts all mix hops, including this node as the return endpoint.
+  ## selector for related sends and SURBs; nil creates a default-length random
+  ## selector. Its length includes this node as the return endpoint.
   if destination.kind != MixNode:
     return err("SURBs require exit == destination")
 
   var id: SURBIdentifier
   mixProto.rng.generate(id)
-  mixProto.buildSurb(id, destination.peerId, destination.peerId, selector, pathLength)
+  mixProto.buildSurb(id, destination.peerId, destination.peerId, selector)
+
+proc createSurb*(
+    mixProto: MixProtocol, destination: MixDestination, pathLength: int
+): Result[tuple[surb: SURB, credential: ReplyCredential], string] =
+  ## Convenience overload for a random return path of the requested length.
+  ?validatePathLength(pathLength)
+  mixProto.createSurb(
+    destination, RandomPathSelector.new(mixProto.nodePool, mixProto.rng, pathLength)
+  )
 
 proc sendLocal(
     mixProto: MixProtocol,
@@ -1370,15 +1374,15 @@ proc sendLocal(
     useLegacySurbEnvelope: bool,
     destinationInfo: Opt[MixPubInfo] = Opt.none(MixPubInfo),
     selector: PathSelector = nil,
-    pathLength: int = DefaultPathLength,
 ): Future[Result[Opt[SurbSession], string]] {.
     async: (raises: [CancelledError, LPStreamError])
 .} =
   ## On success returns a handle to the reply credentials registered for this
   ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
   ## promptly when its connection closes.
-  if pathLength < MinPathLength or pathLength > MaxPathLength:
-    return err("unsupported path length")
+  let activeSelector = mixProto.resolvePathSelector(selector)
+  let pathLength = activeSelector.pathLength
+  ?validatePathLength(pathLength)
   mix_messages_recvd.inc(labelValues = ["Entry"])
   let envelopeSize =
     if useLegacySurbEnvelope:
@@ -1417,12 +1421,11 @@ proc sendLocal(
       Opt.none(MixPubInfo)
   let request = PathRequest(
     purpose: PathPurpose.Forward,
-    pathLength: pathLength,
     constraints: ?mixProto.pathConstraints(
       PathPurpose.Forward, pathLength, destination.peerId, fixedExit = fixedExit
     ),
   )
-  let path = mixProto.selectPath(request, selector).valueOr:
+  let path = activeSelector.selectPath(request).valueOr:
     let reason =
       if error == "not enough usable mix nodes": "LOW_MIX_POOL" else: "PATH_SELECTION"
     mix_messages_error.inc(labelValues = ["Entry", reason])
@@ -1447,7 +1450,7 @@ proc sendLocal(
   var prepared =
     if useLegacySurbEnvelope:
       mixProto.prepareMsgWithSurbs(
-        incoming, move(msg), numSurbs, destination.peerId, exitPeerId, selector, pathLength
+        incoming, move(msg), numSurbs, destination.peerId, exitPeerId, activeSelector
       ).valueOr:
         return err(fmt"Could not prepend SURBs: {error}")
     else:
@@ -1582,16 +1585,33 @@ proc anonymizeLocalProtocolSend*(
     destination: MixDestination,
     numSurbs: uint8,
     selector: PathSelector = nil,
-    pathLength: int = DefaultPathLength,
 ): Future[Result[Opt[SurbSession], string]] {.
     async: (raises: [CancelledError, LPStreamError])
 .} =
   ## Legacy request/reply send. New message-oriented consumers should use
   ## `send`, supplying and owning their SURBs separately.
-  ## pathLength applies to both the forward packet and its newly created SURBs.
+  ## The same selector and its length apply to the forward packet and new SURBs.
+  ## nil creates a default-length random selector.
   await mixProto.sendInternal(
     incoming, move(msg), codec, destination, numSurbs, true,
-    selector = selector, pathLength = pathLength,
+    selector = selector,
+  )
+
+proc anonymizeLocalProtocolSend*(
+    mixProto: MixProtocol,
+    incoming: AsyncQueue[seq[byte]],
+    msg: sink seq[byte],
+    codec: string,
+    destination: MixDestination,
+    numSurbs: uint8,
+    pathLength: int,
+): Future[Result[Opt[SurbSession], string]] {.
+    async: (raises: [CancelledError, LPStreamError])
+.} =
+  ?validatePathLength(pathLength)
+  await mixProto.anonymizeLocalProtocolSend(
+    incoming, move(msg), codec, destination, numSurbs,
+    RandomPathSelector.new(mixProto.nodePool, mixProto.rng, pathLength),
   )
 
 proc send*(
@@ -1600,12 +1620,11 @@ proc send*(
     service: string,
     payload: sink seq[byte],
     selector: PathSelector = nil,
-    pathLength: int = DefaultPathLength,
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   ## Send one opaque payload to a service at a Mix destination. This operation
   ## creates no reply credentials and applies no legacy SURB envelope.
-  ## A supplied selector applies to this call, if nil then default is used.
-  ## pathLength counts all mix hops, including the destination exit.
+  ## A supplied selector owns the path length, including the destination exit.
+  ## nil creates a default-length random selector.
   if service.len == 0:
     return err("Mix service must not be empty")
 
@@ -1615,7 +1634,7 @@ proc send*(
   try:
     (await mixProto.sendInternal(
       nil, move(payload), service, destination, 0, false,
-      selector = selector, pathLength = pathLength,
+      selector = selector,
     )).isOkOr:
       return err(error)
   except LPStreamError as exc:
@@ -1629,7 +1648,6 @@ proc send*(
     service: string,
     payload: sink seq[byte],
     selector: PathSelector = nil,
-    pathLength: int = DefaultPathLength,
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   ## Use the supplied address for the final hop. With key rotation enabled,
   ## the supplied Mix public key must match a locally unexpired pool record
@@ -1651,13 +1669,34 @@ proc send*(
         false,
         Opt.some(destination),
         selector,
-        pathLength,
       )
     ).isOkOr:
       return err(error)
   except LPStreamError as exc:
     return err("could not send Mix service payload: " & exc.msg)
   ok()
+
+proc send*(
+    mixProto: MixProtocol, destination: MixDestination, service: string,
+    payload: sink seq[byte], pathLength: int,
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Convenience overload for a random path of the requested length.
+  ?validatePathLength(pathLength)
+  await mixProto.send(
+    destination, service, move(payload),
+    RandomPathSelector.new(mixProto.nodePool, mixProto.rng, pathLength),
+  )
+
+proc send*(
+    mixProto: MixProtocol, destination: MixPubInfo, service: string,
+    payload: sink seq[byte], pathLength: int,
+): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+  ## Convenience overload for a random path to an explicit exit.
+  ?validatePathLength(pathLength)
+  await mixProto.send(
+    destination, service, move(payload),
+    RandomPathSelector.new(mixProto.nodePool, mixProto.rng, pathLength),
+  )
 
 proc sendWithSurb*(
     mixProto: MixProtocol, surb: sink SURB, payload: sink seq[byte]
@@ -1684,12 +1723,14 @@ proc buildCoverPacket*(
   ## Build a cover Sphinx packet with a loop path (self = exit node),
   ## random payload. Use the shared default so a future strategy can apply
   ## pool eligibility/liveness policy without changing this builder.
+  if not mixProto.defaultPathSelector.isNil and
+      mixProto.defaultPathSelector.pathLength != DefaultPathLength:
+    return err("cover selector must use default path length")
   let request = PathRequest(
     purpose: PathPurpose.Cover,
-    pathLength: DefaultPathLength,
     constraints: ?mixProto.pathConstraints(PathPurpose.Cover, DefaultPathLength),
   )
-  let path = mixProto.selectPath(request).valueOr:
+  let path = mixProto.defaultPathSelector.selectPath(request).valueOr:
     return err(error)
   let (publicKeys, delays, hops) = mixProto.preparePath(path).valueOr:
     return err(error)
