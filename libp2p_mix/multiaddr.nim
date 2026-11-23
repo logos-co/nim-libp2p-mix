@@ -24,7 +24,7 @@ proc getBaseTransport*(
   if not (sma.len >= MinMultiAddrComponentLen and sma.len <= MaxMultiAddrComponentLen):
     return err("Invalid multiaddress format")
 
-  let isCircuitRelay = ?multiAddr.contains(multiCodec("p2p-circuit"))
+  let isCircuitRelay = ?multiAddr.contains(multiCodec("p2p-circuit")).mapErr(x => $x)
   let baseP2PEndIdx = if isCircuitRelay: 3 else: 1
 
   try:
@@ -43,7 +43,7 @@ proc multiAddrToBytes*(
   let baseAddr = ?getBaseTransport(multiAddr)
 
   # Only IPV4 is supported
-  let isCircuitRelay = ?ma.contains(multiCodec("p2p-circuit"))
+  let isCircuitRelay = ?ma.contains(multiCodec("p2p-circuit")).mapErr(x => $x)
 
   let isQuic = QUIC_V1_IP4.match(baseAddr)
   let isTCP = TCP_IP4.match(baseAddr)
@@ -52,7 +52,7 @@ proc multiAddrToBytes*(
     return err("Unsupported protocol")
 
   # 4 bytes for the IP
-  let ip = ?ma.getPart(multiCodec("ip4")).value().protoArgument()
+  let ip = ?ma.getPart(multiCodec("ip4")).value().protoArgument().mapErr(x => $x)
   res.add(ip)
 
   var port: string
@@ -68,8 +68,9 @@ proc multiAddrToBytes*(
   res.add(portNum.uint16.toBytesBE())
 
   if isCircuitRelay:
-    let relayIdPart = ?ma.getPart(multiCodec("p2p"))
-    let relayId = ?PeerId.init(?relayIdPart.protoArgument()).mapErr(x => $x)
+    let relayIdPart = ?ma.getPart(multiCodec("p2p")).mapErr(x => $x)
+    let relayIdBytes = ?relayIdPart.protoArgument().mapErr(x => $x)
+    let relayId = ?PeerId.init(relayIdBytes).mapErr(x => $x)
     if relayId.data.len != PeerIdByteLen:
       return err("unsupported PeerId key type, only Secp256k1 keys are supported")
     res.add(relayId.data)

@@ -297,3 +297,18 @@ proc outgoingMixStreams*(switch: Switch): seq[Connection] =
             not stream.closed:
           streams.add(stream)
   streams
+
+proc readUntilEnd*(conn: Connection) {.async: (raises: [CancelledError]).} =
+  ## Reads `conn` until it ends, as MixProtocol does for a hop stream that it
+  ## dials. Without a read, libp2p 2.5 leaves the protocol acknowledgement on
+  ## the stream, and the mplex connection then does not see its peer stop.
+  var buf: array[64, byte]
+  try:
+    while not conn.atEof:
+      discard await conn.readOnce(addr buf[0], buf.len)
+  except LPStreamEOFError:
+    # The base of the reset, closed, remote closed and connection down errors,
+    # which all mean that the stream has ended.
+    return
+  except LPStreamError as exc:
+    raiseAssert "reading a hop stream failed: " & exc.msg
