@@ -60,6 +60,7 @@ export generateProof
 export verifyProof
 
 # Key rotation exports
+export keyRotationEnabled
 export KeyRotationConfig
 export acceptanceWindow
 export MixKeyRing

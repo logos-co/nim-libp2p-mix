@@ -167,6 +167,10 @@ proc registerDestReadBehavior*(
 ) =
   mixProto.destReadBehaviors[codec] = behavior
 
+func keyRotationEnabled*(mixProto: MixProtocol): bool {.raises: [].} =
+  ## Whether this instance was configured with a key ring, even before startup.
+  mixProto.keyRing.isSome()
+
 proc ownMixPubKey(mixProto: MixProtocol): Result[FieldElement, string] {.raises: [].} =
   ## The public key for this node's own hop in a packet built now.
   let ring = mixProto.keyRing.valueOr:

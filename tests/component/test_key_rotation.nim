@@ -90,6 +90,17 @@ suite "Mix Protocol - Key Rotation":
     check nodes[0].localMixPubInfo().expect("local mix info").mixPubKey ==
       rings[0].currentPublicKey().expect("current key")
 
+  test "keyRotationEnabled reports the configured ring before startup":
+    let info = MixNodeInfo.generateRandom(4300, rng())
+    let switch = createSwitch(info.multiAddr, Opt.some(info.libp2pPrivKey))
+    let ring =
+      MixKeyRing.new(KeyRotationConfig.init().get(), rng(), replayTableCapacity = 16)
+    let withoutRing = MixProtocol.new(info, switch)
+    let withRing = MixProtocol.new(info, switch, keyRing = Opt.some(ring))
+    check:
+      not libp2p_mix.keyRotationEnabled(withoutRing)
+      withRing.keyRotationEnabled
+
   test "the local record is unavailable while the ring holds no key":
     let mixNodeInfo = MixNodeInfo.generateRandom(4300, rng())
     let node = MixProtocol.new(
