@@ -62,8 +62,12 @@ proc readUntilEnd(conn: Connection) {.async: (raises: [CancelledError]).} =
   try:
     while not conn.atEof:
       discard await conn.readOnce(addr buf[0], buf.len)
-  except LPStreamError:
+  except LPStreamEOFError:
+    # The base of the reset, closed, remote closed and connection down errors,
+    # which all mean that the stream has ended.
     return
+  except LPStreamError as exc:
+    raiseAssert "reading a hop stream failed: " & exc.msg
 
 proc requestSurb(
     nodes: seq[MixProtocol]
@@ -236,7 +240,7 @@ suite "Hop stream teardown":
     checkTrackers()
 
   asyncTest "an evicted hop stream whose next hop stays open loses its reader":
-    let (nodes, _) = setupCountingNodes(5)
+    let (nodes, spam) = setupCountingNodes(5)
     let exitPeer = nodes[4].switch.peerInfo.peerId
     let release = newAsyncEvent()
     nodes[4].handler = halfOpenHandler(release)
@@ -247,12 +251,18 @@ suite "Hop stream teardown":
     for node in nodes[1 .. 3]:
       node.hopDrainTimeout = 100.milliseconds
 
-    # Each send forwards to the exit from a random one of nodes[1 .. 3].
+    # Each send forwards to the exit from a random one of nodes[1 .. 3]. Both
+    # relays of a send generate a proof, and a relay's forward, with its retry
+    # and the retirement of a failed stream, ends before its handler does.
+    var sends = 0
     for _ in 0 ..< 50:
       if nodes[1 .. 3].allIt(exitPeer in it.connPool):
         break
       await nodes.sendToExit()
-      await sleepAsync(20.milliseconds)
+      sends.inc()
+      checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
+        spam[1 .. 3].mapIt(it.generateCount).foldl(a + b) == 2 * sends
+        nodes[1 .. 3].allIt(it.ongoingMixMessages.len == 0)
     check nodes[1 .. 3].allIt(exitPeer in it.connPool)
 
     let streams = nodes[1 .. 3].mapIt(it.connPool[exitPeer])
@@ -262,8 +272,11 @@ suite "Hop stream teardown":
       await stream.close()
 
     await nodes.sendToExit()
+    sends.inc()
     checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
-      readers.countIt(it.finished()) == 1
+      spam[1 .. 3].mapIt(it.generateCount).foldl(a + b) == 2 * sends
+      nodes[1 .. 3].allIt(it.ongoingMixMessages.len == 0)
+    check readers.countIt(it.finished()) == 1
     for i, node in nodes[1 .. 3]:
       let evicted = node.connPool.getOrDefault(exitPeer) != streams[i]
       check readers[i].finished() == evicted
