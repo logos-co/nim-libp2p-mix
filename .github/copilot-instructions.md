@@ -107,12 +107,12 @@ The repo also sets up import paths and includes `nimble.paths` when present (gen
 
 See `libp2p_mix.nimble` for authoritative constraints. Notable dependencies:
 
-- **libp2p** (`>= 1.15.3`)
+- **libp2p** (`>= 2.5.0`)
 - **chronos** (`>= 4.2.2`)
-- **chronicles** (`>= 0.11.0`)
+- **chronicles** (`>= 0.12.3`)
 - **stew** (`>= 0.4.2`)
 - **results**
-- **metrics**
+- **metrics** (`>= 0.2.2`)
 - **nimcrypto**, **bearssl**
 - **unittest2**
 
@@ -313,7 +313,7 @@ See `libp2p_mix.nimble` for authoritative constraints. Notable dependencies:
 
 ### Integration with libp2p Switch
 - `MixProtocol` is mounted on a libp2p `Switch`.
-- Ensure integration code remains compatible with the `libp2p >= 1.15.3` constraint.
+- Ensure integration code remains compatible with the `libp2p >= 2.5.0` constraint.
 - Keep “destination read behavior” registration (`registerDestReadBehavior`) safe and well-documented.
 
 ### Spam protection
