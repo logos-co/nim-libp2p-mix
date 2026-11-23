@@ -278,7 +278,7 @@ suite "Random selector constraint handling":
     request.constraints.fixedHops[0] = updated
     check selector.selectPath(request).get() == @[updated, nodes[1], nodes[2]]
 
-suite "Session candidate-set initialization":
+suite "Session selector construction":
   var
     pool: MixNodePool
     nodes: seq[MixPubInfo]
@@ -288,97 +288,106 @@ suite "Session candidate-set initialization":
     nodes = MixNodeInfo.generateRandomMany(8, rng()).mapIt(it.toMixPubInfo())
     pool.add(nodes)
 
-  test "explicit state preserves sets independently of caller edits and pool changes":
+  test "explicit sets are copied and resolve current metadata at selection time":
     var supplied = @[@[nodes[3].peerId], nodes[0 .. 2].mapIt(it.peerId)]
-    let originalText = $supplied
-    # Construction requires identities only, even when a node is unavailable.
     require pool.remove(nodes[3].peerId)
-    let state = SessionPathState.init(supplied).get()
-    check $state.candidateSets() == originalText
+    let selector = SessionPathSelector.new(pool, rng(), supplied).get()
     supplied[0][0] = nodes[7].peerId
     supplied[1][0].data[0] = supplied[1][0].data[0] xor 1.byte
-    var inspected = state.candidateSets()
-    inspected[0][0] = PeerId()
-    inspected[1][0].data[0] = inspected[1][0].data[0] xor 1.byte
-    inspected[1].setLen(0)
+    supplied[1].setLen(0)
+    var request = PathRequest(purpose: PathPurpose.Forward)
+    request.constraints.fixedHops[2] = nodes[7]
+    request.constraints.excludedNodeIds = [nodes[1].peerId, nodes[2].peerId].toHashSet
+    check selector.selectPath(request).error == "no usable candidates in session set for this request"
     var updated = nodes[3]
     updated.mixPubKey[0] = updated.mixPubKey[0] xor 1.byte
     pool.add(updated)
-    check $state.candidateSets() == originalText
+    check selector.selectPath(request).get() == @[updated, nodes[0], nodes[7]]
 
-  test "state rejects empty sets, too many positions and repeated identities":
+  test "explicit construction rejects invalid sets and sets that cannot fit the length":
     let a = nodes[0].peerId
     for sets in [newSeq[seq[PeerId]](), @[newSeq[PeerId]()],
                  @[@[a, a]], @[@[a], @[a]]]:
-      check SessionPathState.init(sets).isErr
+      check SessionPathSelector.new(pool, rng(), sets).isErr
     let tooMany = nodes[0 .. MaxPathLength].mapIt(@[it.peerId])
-    check SessionPathState.init(tooMany).error == "unsupported session hop count"
+    check SessionPathSelector.new(pool, rng(), tooMany).error == "unsupported session hop count"
+    check SessionPathSelector.new(pool, rng(), tooMany[0 .. 3]).error == "unsupported session hop count"
 
-  test "sampling resolved pool candidates creates disjoint sets without pool mutation":
-    let excluded = [nodes[0].peerId].toHashSet
-    var invalid = nodes[1]
-    invalid.mixPubKey = default(typeof(invalid.mixPubKey))
-    pool.add(invalid)
-    let candidates = resolveCandidates(pool, pool.peerIds(), excluded)
-    let state = sampleSessionState(candidates, rng(), 2, 3).get()
-    let sets = state.candidateSets()
-    require sets.len == 2
-    var selected: HashSet[PeerId]
-    for ids in sets:
-      check ids.len == 3
-      for peerId in ids:
-        check peerId notin selected
-        selected.incl(peerId)
-    check selected == nodes[2 .. nodes.high].mapIt(it.peerId).toHashSet
-    check pool.peerIds().toHashSet == nodes.mapIt(it.peerId).toHashSet
-
-  test "sampling trusted candidates cannot expand beyond the supplied input":
-    let trusted = nodes[0 .. 5].mapIt(it.peerId)
-    let candidates = resolveCandidates(pool, trusted, default(HashSet[PeerId]))
-    let state = sampleSessionState(candidates, rng(), 2, 3).get()
-    check state.candidateSets().concat().toHashSet == trusted.toHashSet
-    let restricted = resolveCandidates(pool, trusted, [trusted[0]].toHashSet)
-    check sampleSessionState(restricted, rng(), 2, 3).error ==
-      "not enough usable mix nodes for session candidate sets"
-    # Duplicate input must not bias sampling, even if enough unique nodes exist.
-    check sampleSessionState(candidates & @[candidates[0]], rng(), 2, 3).error ==
-      "duplicate session candidate identity"
+  test "pool initialization filters metadata and never expands its stored candidate set":
+    for node in nodes[3 .. nodes.high]:
+      var invalid = node
+      invalid.mixPubKey = default(typeof(invalid.mixPubKey))
+      pool.add(invalid)
+    var params = SessionSelectorParams(pathLength: 3, hopCount: 1, candidatesPerHop: 3)
+    let selector = SessionPathSelector.new(pool, rng(), params).get()
+    # Caller changes after construction cannot alter the selector's configuration.
+    params.pathLength = 4
+    params.hopCount = 2
+    check selector.pathLength == 3
+    var request = PathRequest(purpose: PathPurpose.Forward)
+    request.constraints.fixedHops[1] = nodes[6]
+    request.constraints.fixedHops[2] = nodes[7]
+    let originalIds = nodes[0 .. 2].mapIt(it.peerId).toHashSet
+    for node in nodes[0 .. 2]:
+      request.constraints.excludedNodeIds = originalIds
+      request.constraints.excludedNodeIds.excl(node.peerId)
+      check selector.selectPath(request).get() == @[node, nodes[6], nodes[7]]
     check pool.len == nodes.len
+    check SessionPathSelector.new(pool, rng(), SessionSelectorParams(
+      pathLength: 3, hopCount: 2, candidatesPerHop: 2
+    )).error == "not enough usable mix nodes for session candidate sets"
+    pool.add(nodes[3])
+    request.constraints.excludedNodeIds = originalIds
+    check selector.selectPath(request).error == "no usable candidates in session set for this request"
 
-  test "sampling rejects invalid counts, absent randomness and candidate shortage":
-    for count in [0, -1, MaxPathLength + 1]:
-      check sampleSessionState(nodes, rng(), count, 3).error ==
-        "unsupported session hop count"
-    for count in [0, -1]:
-      check sampleSessionState(nodes, rng(), 2, count).error ==
-        "session candidate count must be positive"
-    for count in [5, high(int)]:
-      check sampleSessionState(nodes, rng(), 2, count).error ==
-        "not enough usable mix nodes for session candidate sets"
-    check sampleSessionState(nodes, nil, 2, 3).error == "missing CSPRNG"
-    check sampleSessionState([], rng(), 2, 3).isErr
+  test "parameter construction validates inputs and creates disjoint session positions":
+    let valid = SessionSelectorParams(pathLength: 4, hopCount: 3, candidatesPerHop: 2)
+    let selector = SessionPathSelector.new(pool, rng(), valid).get()
+    check selector.pathLength == 4
+    var request = PathRequest(purpose: PathPurpose.Forward)
+    # No fixed endpoint here: all pool identities can be used during initialization.
+    check selector.selectPath(request).get().len == 4
+    request.purpose = PathPurpose.Surb
+    check selector.selectPath(request).get().len == 4
+    check SessionPathSelector.new(nil, rng(), valid).error == "missing mix node pool"
+    check SessionPathSelector.new(pool, nil, valid).error == "missing CSPRNG"
+    check SessionPathSelector.new(pool, rng(), SessionSelectorParams()).isErr
+    for length in [low(int), MinPathLength - 1, MaxPathLength + 1, high(int)]:
+      var params = valid
+      params.pathLength = length
+      check SessionPathSelector.new(pool, rng(), params).error == "unsupported path length"
+    for count in [-1, 0, valid.pathLength + 1]:
+      var params = valid
+      params.hopCount = count
+      check SessionPathSelector.new(pool, rng(), params).error == "unsupported session hop count"
+    for size in [-1, 0, 3, high(int)]:
+      var params = valid
+      params.candidatesPerHop = size
+      let expected = if size < 1: "session candidate count must be positive"
+                     else: "not enough usable mix nodes for session candidate sets"
+      check SessionPathSelector.new(pool, rng(), params).error == expected
 
 suite "Session path selection":
   var
     pool: MixNodePool
     nodes: seq[MixPubInfo]
-    state: SessionPathState
+    candidateSets: seq[seq[PeerId]]
     request: PathRequest
 
   setup:
     pool = MixNodePool.new(PeerStore.new())
     nodes = MixNodeInfo.generateRandomMany(MaxPathLength + 3, rng()).mapIt(it.toMixPubInfo())
     pool.add(nodes[0 ..< nodes.high])
-    state = SessionPathState.init(@[@[nodes[0].peerId], @[nodes[1].peerId]]).get()
+    candidateSets = @[@[nodes[0].peerId], @[nodes[1].peerId]]
     request = PathRequest(purpose: PathPurpose.Forward)
     request.constraints.fixedHops[2] = nodes[^1]
 
   test "sets stay nearest the initiator in forward and SURB paths at supported lengths":
     for count in 1 .. 2:
-      let sets = state.candidateSets()[0 ..< count]
+      let sets = candidateSets[0 ..< count]
       for length in MinPathLength .. MaxPathLength:
         let selector = SessionPathSelector.new(
-          pool, rng(), SessionPathState.init(sets).get(), pathLength = length
+          pool, rng(), sets, pathLength = length
         ).get()
         request.constraints.fixedHops.clear()
         request.constraints.fixedHops[length - 1] = nodes[^1]
@@ -391,10 +400,10 @@ suite "Session path selection":
             check path[position] == nodes[index]
 
   test "fixed hops and exclusions apply before choosing from session sets":
-    state = SessionPathState.init(@[
+    candidateSets = @[
       @[nodes[0].peerId, nodes[2].peerId], @[nodes[1].peerId, nodes[3].peerId]
-    ]).get()
-    let selector = SessionPathSelector.new(pool, rng(), state, pathLength = 4).get()
+    ]
+    let selector = SessionPathSelector.new(pool, rng(), candidateSets, pathLength = 4).get()
     request.constraints.fixedHops.clear()
     request.constraints.fixedHops[1] = nodes[0]
     request.constraints.fixedHops[3] = nodes[^1]
@@ -404,10 +413,10 @@ suite "Session path selection":
     check selector.selectPath(request).get() == @[nodes[3], nodes[0], nodes[2], nodes[^1]]
 
   test "unavailable session candidates fail only the request and recover without replacing sets":
-    state = SessionPathState.init(@[
+    candidateSets = @[
       @[nodes[0].peerId, nodes[2].peerId], @[nodes[1].peerId]
-    ]).get()
-    let selector = SessionPathSelector.new(pool, rng(), state).get()
+    ]
+    let selector = SessionPathSelector.new(pool, rng(), candidateSets).get()
     var invalid = nodes[0]
     invalid.mixPubKey = default(typeof(invalid.mixPubKey))
     pool.add(invalid)
@@ -427,14 +436,14 @@ suite "Session path selection":
     check selector.selectPath(request).get() == @[updated, nodes[1], nodes[^1]]
 
   test "invalid setup and incompatible requests fail without ending a valid session":
-    check SessionPathSelector.new(nil, rng(), state).isErr
-    check SessionPathSelector.new(pool, nil, state).isErr
-    check SessionPathSelector.new(pool, rng(), SessionPathState()).isErr
+    check SessionPathSelector.new(nil, rng(), candidateSets).isErr
+    check SessionPathSelector.new(pool, nil, candidateSets).isErr
+    check SessionPathSelector.new(pool, rng(), newSeq[seq[PeerId]]()).isErr
     for length in [low(int), MinPathLength - 1, MaxPathLength + 1, high(int)]:
-      check SessionPathSelector.new(pool, rng(), state, length).error == "unsupported path length"
+      check SessionPathSelector.new(pool, rng(), candidateSets, length).error == "unsupported path length"
       expect AssertionDefect:
         discard RandomPathSelector.new(pool, rng(), length)
-    let selector = SessionPathSelector.new(pool, rng(), state).get()
+    let selector = SessionPathSelector.new(pool, rng(), candidateSets).get()
     check selector.pathLength == DefaultPathLength
     check not compiles(selector.pathLength = 4)
     request.constraints.fixedHops[0] = nodes[3]
@@ -448,7 +457,7 @@ suite "Session path selection":
   test "shortage for unrestricted random hops does not replace sets or end the session":
     pool = MixNodePool.new(PeerStore.new())
     pool.add(nodes[0 .. 1])
-    let selector = SessionPathSelector.new(pool, rng(), state, pathLength = 4).get()
+    let selector = SessionPathSelector.new(pool, rng(), candidateSets, pathLength = 4).get()
     request.constraints.fixedHops.clear()
     request.constraints.fixedHops[3] = nodes[^1]
     check selector.selectPath(request).error == "not enough usable mix nodes"
@@ -582,8 +591,7 @@ suite "Mix path selection integration":
   test "createSurb builds three- and four-hop reply blocks using session sets":
     for length in [DefaultPathLength, 4]:
       let sets = nodes[1 ..< length].mapIt(@[it.peerId])
-      let state = SessionPathState.init(sets).get()
-      let selector = SessionPathSelector.new(mix.nodePool, rng(), state, pathLength = length).get()
+      let selector = SessionPathSelector.new(mix.nodePool, rng(), sets, pathLength = length).get()
       let reply = mix.createSurb(
         MixDestination.exitNode(nodes[4].peerId), selector
       ).get()

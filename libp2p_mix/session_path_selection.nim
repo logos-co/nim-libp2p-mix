@@ -9,12 +9,19 @@ import libp2p/peerid
 import libp2p/crypto/rng
 import ./[path_selection, mix_node, serialization, pool]
 
-type SessionPathState* = object
+type SessionSelectorParams* = object
+  ## All fields are required; these parameters are copied at construction.
+  pathLength*: int
+  hopCount*: int
+    ## Number of session candidate sets, separate from caller-fixed hops.
+  candidatesPerHop*: int
+
+type SessionPathState = object
   ## Sets are ordered from the initiator outward and stay fixed for the session.
   ## Each set controls one relay position, separate from caller-fixed hops.
   candidateSets: seq[seq[PeerId]]
 
-proc init*(
+proc init(
     T: typedesc[SessionPathState], candidateSets: openArray[seq[PeerId]]
 ): Result[T, string] =
   ## Validate structure and copy the supplied sets without regrouping them.
@@ -36,26 +43,10 @@ proc init*(
     state.candidateSets.add(copied)
   ok(state)
 
-proc candidateSets*(state: SessionPathState): seq[seq[PeerId]] =
-  ## Return a value copy for inspection.
-  state.candidateSets
-
-proc sampleSessionState*(
+proc sampleSessionState(
     candidates: openArray[MixPubInfo], rng: Rng, hopCount, candidatesPerHop: int
 ): Result[SessionPathState, string] =
-  ## Randomly form disjoint sets from already-filtered candidates. The caller
-  ## chooses the source (e.g. the whole pool or trusted identities).
-  if hopCount < 1 or hopCount > MaxPathLength:
-    return err("unsupported session hop count")
-  if candidatesPerHop < 1:
-    return err("session candidate count must be positive")
-  if rng.isNil:
-    return err("missing CSPRNG")
-  var seen: HashSet[PeerId]
-  for candidate in candidates:
-    if candidate.peerId in seen:
-      return err("duplicate session candidate identity")
-    seen.incl(candidate.peerId)
+  ## Inputs are validated by the constructor; resolved identities are distinct.
   # Check capacity before multiplication to avoid integer overflow.
   if candidatesPerHop > candidates.len div hopCount:
     return err("not enough usable mix nodes for session candidate sets")
@@ -76,19 +67,41 @@ type SessionPathSelector* = ref object of PathSelector
 method pathLength*(selector: SessionPathSelector): int {.gcsafe, raises: [].} =
   selector.length
 
-proc new*(
-    T: typedesc[SessionPathSelector], nodePool: MixNodePool, rng: Rng,
-    state: SessionPathState,
-    pathLength: int = DefaultPathLength,
-): Result[T, string] =
-  ## One instance per logical session. Candidate sets cannot be replenished.
+proc validateInputs(
+    nodePool: MixNodePool, rng: Rng, pathLength: int
+): Result[void, string] =
   ?validatePathLength(pathLength)
   if nodePool.isNil:
     return err("missing mix node pool")
   if rng.isNil:
     return err("missing CSPRNG")
-  if state.candidateSets.len == 0:
-    return err("empty session path state")
+  ok()
+
+proc new*(
+    T: typedesc[SessionPathSelector], nodePool: MixNodePool, rng: Rng,
+    params: SessionSelectorParams,
+): Result[T, string] =
+  ## Initialize once from currently usable pool nodes. State stays private
+  ## and fixed for this session; request failures never replenish its sets.
+  ?validateInputs(nodePool, rng, params.pathLength)
+  if params.hopCount < 1 or params.hopCount > params.pathLength:
+    return err("unsupported session hop count")
+  if params.candidatesPerHop < 1:
+    return err("session candidate count must be positive")
+  let candidates = resolveCandidates(nodePool, nodePool.peerIds(), default(HashSet[PeerId]))
+  let state = ?sampleSessionState(candidates, rng, params.hopCount, params.candidatesPerHop)
+  ok(T(nodePool: nodePool, rng: rng, state: state, length: params.pathLength))
+
+proc new*(
+    T: typedesc[SessionPathSelector], nodePool: MixNodePool, rng: Rng,
+    candidateSets: openArray[seq[PeerId]], pathLength: int = DefaultPathLength,
+): Result[T, string] =
+  ## Advanced construction: preserve supplied identities, grouping and order.
+  ## Metadata is resolved when selecting paths, so unavailable IDs are allowed.
+  ?validateInputs(nodePool, rng, pathLength)
+  let state = ?SessionPathState.init(candidateSets)
+  if state.candidateSets.len > pathLength:
+    return err("unsupported session hop count")
   ok(T(nodePool: nodePool, rng: rng, state: state, length: pathLength))
 
 method samplePath*(
