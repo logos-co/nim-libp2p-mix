@@ -50,7 +50,8 @@ tests/                    Unit tests
   └── tools/              Test helpers (vendored from nim-libp2p tests/tools/)
 
 examples/
-  └── mix_ping.nim        End-to-end demo: ping over a 10-node mix network
+  ├── mix_ping.nim        End-to-end demo: ping over a 10-node mix network
+  └── session_paths.nim   Profile-based sessions with forward and SURB round trips
 
 config.nims               Project-wide compiler config (--mm:refc, paths)
 tests/config.nims         Test-only defines (-d:metrics, libp2p subsystems)
@@ -115,6 +116,9 @@ let response = await conn.readLp(maxBytes)
 ```
 
 For a complete worked example, see [`examples/mix_ping.nim`](examples/mix_ping.nim).
+
+For caller-owned session selectors reused across `send` and `createSurb`, see
+the runnable [session path selection example](examples/session_paths.nim).
 
 ### Hop address policy
 
@@ -441,6 +445,17 @@ To build the binary without auto-cleanup:
 nim c -d:metrics -o:mix_ping examples/mix_ping.nim
 ./mix_ping
 ```
+
+To run two round trips for each session profile (Lite, Standard, and Strict):
+
+```bash
+nim c -r -d:metrics examples/session_paths.nim
+```
+
+This starts 12 local Mix nodes, reuses one selector per profile, and carries a
+fresh SURB in each request. It verifies each recovered reply and logs six
+`Session round trip completed` messages. Like the ping example, it uses local
+ports starting at 4242; run the examples separately.
 
 ### Cleaning
 

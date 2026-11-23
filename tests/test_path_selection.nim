@@ -10,7 +10,7 @@ import libp2p/crypto/secp
 import libp2p_mix
 import libp2p_mix/[serialization, tag_manager, surb_store, mix_protocol, multiaddr]
 import ./utils
-import ./tools/[unittest, crypto]
+import ./tools/[unittest, crypto, lifecycle]
 
 suite "Path request validation":
   var
@@ -671,3 +671,61 @@ suite "Mix path selection integration":
         [nodes[0].peerId, session.forwardPath[^1].peerId, nodes[4].peerId].toHashSet
       check mix.surbCredsLen == 0
     check shared.requests.len == 0
+
+suite "Session selector round trips":
+  asyncTeardown:
+    checkTrackers()
+
+  asyncTest "independent sessions reuse selectors for sends and SURBs and recover after pool changes":
+    let nodes = await setupMixNodes(6)
+    let sender = nodes[0]
+    let destination = nodes[^1]
+    let destinationInfo = destination.localMixPubInfo()
+    let target = MixDestination.exitNode(destinationInfo.peerId)
+    let relays = nodes[1 .. 4].mapIt(it.localMixPubInfo())
+    # Singleton sets make the two sessions' routes deterministic without
+    # exposing private state. The longer session does not depend on relays[0].
+    let first = SessionPathSelector.new(sender.nodePool, rng(), @[
+      @[relays[0].peerId], @[relays[1].peerId]
+    ]).get()
+    let second = SessionPathSelector.new(sender.nodePool, rng(), @[
+      @[relays[2].peerId], @[relays[1].peerId], @[relays[3].peerId]
+    ], pathLength = 4).get()
+    let coverSelector = sender.defaultPathSelector
+    let deliveries = newAsyncQueue[MixDelivery]()
+    let replies = newAsyncQueue[RawSurbReply]()
+    const service = "/session-path-test/1.0.0"
+    let deliveryHandler: MixDeliveryHandler = proc(
+        delivery: MixDelivery
+    ): Future[void] {.async: (raises: [CancelledError]).} =
+      await deliveries.put(delivery)
+    let replyHandler: RawSurbReplyHandler = proc(
+        reply: RawSurbReply
+    ): Future[RawSurbReplyDisposition] {.async: (raises: [CancelledError]).} =
+      await replies.put(reply)
+      return RawSurbReplyDisposition.Handled
+    destination.registerMixDeliveryHandler(service, deliveryHandler).expect("register delivery")
+    sender.registerRawSurbReplyHandler(replyHandler).expect("register replies")
+    startAndDeferStop(nodes)
+
+    proc roundTrip(selector: SessionPathSelector, payload: seq[byte]) {.async.} =
+      var created = sender.createSurb(target, selector = selector).get()
+      (await sender.send(destinationInfo, service, payload, selector = selector)).expect("send")
+      check (await deliveries.get().wait(2.seconds)).payload == payload
+      # In a real application its message envelope carries the SURB to the
+      # destination. This local fixture hands it directly to the responder.
+      (await destination.sendWithSurb(move(created.surb), payload)).expect("reply")
+      let reply = await replies.get().wait(2.seconds)
+      check recoverReply(created.credential, reply).get() == payload
+
+    await roundTrip(first, @[1.byte])
+    await roundTrip(second, @[2.byte])
+    require sender.nodePool.remove(relays[0].peerId)
+    check (await sender.send(destinationInfo, service, @[3.byte], selector = first)).error ==
+      "no usable candidates in session set for this request"
+    check sender.createSurb(target, selector = first).error ==
+      "no usable candidates in session set for this request"
+    await roundTrip(second, @[4.byte])
+    sender.nodePool.add(relays[0])
+    await roundTrip(first, @[5.byte])
+    check sender.defaultPathSelector == coverSelector
