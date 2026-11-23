@@ -221,6 +221,85 @@ suite "Slot refund - forward":
     check hops.mapIt(it.slotPool.nonCoverClaimed).foldl(a + b) == 2
     check spam[1 .. 3].mapIt(it.reclaimCount).foldl(a + b) == 0
 
+proc halfOpenHandler(release: AsyncEvent): LPProtoHandler =
+  ## Reads each stream to its end but keeps its own side open until `release`
+  ## fires.
+  return proc(conn: Connection, proto: string) {.async: (raises: [CancelledError]).} =
+    try:
+      await conn.readUntilEnd()
+      await release.wait()
+    finally:
+      await conn.close()
+
+suite "Hop stream teardown":
+  asyncTeardown:
+    checkTrackers()
+
+  asyncTest "an evicted hop stream whose next hop stays open loses its reader":
+    let (nodes, _) = setupCountingNodes(5)
+    let exitPeer = nodes[4].switch.peerInfo.peerId
+    let release = newAsyncEvent()
+    nodes[4].handler = halfOpenHandler(release)
+    await startNodes(nodes)
+    defer:
+      release.fire()
+      await stopNodes(nodes)
+    for node in nodes[1 .. 3]:
+      node.hopDrainTimeout = 100.milliseconds
+
+    # Each send forwards to the exit from a random one of nodes[1 .. 3].
+    for _ in 0 ..< 50:
+      if nodes[1 .. 3].allIt(exitPeer in it.connPool):
+        break
+      await nodes.sendToExit()
+      await sleepAsync(20.milliseconds)
+    check nodes[1 .. 3].allIt(exitPeer in it.connPool)
+
+    let streams = nodes[1 .. 3].mapIt(it.connPool[exitPeer])
+    let readers = nodes[1 .. 3].mapIt(it.hopReaders[it.connPool[exitPeer]])
+    # A closed stream fails the next write to it, and the failed write evicts it.
+    for stream in streams:
+      await stream.close()
+
+    await nodes.sendToExit()
+    checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
+      readers.countIt(it.finished()) == 1
+    for i, node in nodes[1 .. 3]:
+      let evicted = node.connPool.getOrDefault(exitPeer) != streams[i]
+      check readers[i].finished() == evicted
+
+  asyncTest "stop reads a hop stream until the next hop closes it":
+    let (nodes, _) = setupCountingNodes(5)
+    startAndDeferStop(nodes)
+    await nodes.sendToExit()
+    checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
+      nodes[0].hopReaders.len == 1
+    let reader = toSeq(nodes[0].hopReaders.values)[0]
+
+    await nodes[0].stop()
+    check:
+      reader.completed()
+      nodes[0].hopReaders.len == 0
+
+  asyncTest "stop cancels the reader of a hop stream whose next hop stays open":
+    let (nodes, _) = setupCountingNodes(5)
+    let release = newAsyncEvent()
+    for node in nodes[1 .. 3]:
+      node.handler = halfOpenHandler(release)
+    startAndDeferStop(nodes)
+    defer:
+      release.fire()
+    nodes[0].hopDrainTimeout = 100.milliseconds
+    await nodes.sendToExit()
+    checkUntilTimeoutCustom(5.seconds, 10.milliseconds):
+      nodes[0].hopReaders.len == 1
+    let reader = toSeq(nodes[0].hopReaders.values)[0]
+
+    check await nodes[0].stop().withTimeout(2.seconds)
+    check:
+      reader.cancelled()
+      nodes[0].hopReaders.len == 0
+
 suite "Slot refund - local send":
   asyncTeardown:
     checkTrackers()

@@ -34,6 +34,10 @@ const CoverTrafficCodec* = "/mix/cover/1.0.0"
 const DefaultHopBackoff* = chronos.minutes(1)
   ## How long a first hop that failed a dial is not selected as the first hop.
 
+const HopStreamDrainTimeout = chronos.seconds(5)
+  ## How long a closed hop stream is still read while the next hop closes its
+  ## side. It bounds how long `stop` waits for the hop streams.
+
 const PoolSizeUpdateInterval = chronos.seconds(10)
   ## The timer of `mix_pool_size` counts the usable pool members this often, which
   ## is shorter than the usual scrape interval of a metrics server.
@@ -94,10 +98,11 @@ type
       ## So a second dial of the peer at other addresses waits for the first dial.
       ## A forward and a reply dial the address that the sender of the packet gave.
       ## So a caller can wait for a dial of an address that it did not select.
-    hopReaders: Table[uint64, Future[void]]
-      ## The `readHopStream` future of each hop stream, cancelled on stop. Keyed
-      ## so removal on completion is O(1).
-    nextHopReaderId: uint64
+    hopReaders: Table[Connection, Future[void]]
+      ## The `readHopStream` future of each hop stream, keyed by the stream that
+      ## it reads, so that the reader of a stream can be found from the stream.
+    hopDrainTimeout: Duration
+      ## `HopStreamDrainTimeout`, kept in a field so that tests can shorten it.
     backedOffUntil: Table[PeerId, Moment]
       ## The moment until which a first hop that failed a dial is not the first hop.
     hopBackoff: Duration
@@ -231,20 +236,6 @@ proc backOffHop(mixProto: MixProtocol, peerId: PeerId, failure: ref DialFailedEr
     mixProto.backedOffUntil.del(backedOff)
   mixProto.backedOffUntil[peerId] = now + mixProto.hopBackoff
 
-proc removeClosedConnections(
-    mixProto: MixProtocol, failed: Connection
-) {.async: (raises: []).} =
-  ## Take `failed` and the streams of disconnected peers out of the pool and
-  ## close them.
-  var stale: seq[tuple[peerId: PeerId, conn: Connection]]
-  for peerId, conn in mixProto.connPool:
-    if conn == failed or not mixProto.switch.isConnected(peerId):
-      stale.add((peerId, conn))
-  for (peerId, _) in stale:
-    mixProto.connPool.del(peerId)
-  for (_, conn) in stale:
-    await conn.close()
-
 proc readHopStream(conn: Connection) {.async: (raises: [CancelledError]).} =
   ## Read `conn` until it ends, and discard what it carries.
   ## This node only writes to a hop stream. libp2p 2.5 can return the stream
@@ -254,6 +245,8 @@ proc readHopStream(conn: Connection) {.async: (raises: [CancelledError]).} =
   var buf: array[64, byte]
   try:
     while not conn.atEof:
+      # The byte count is not needed: `handleMixNodeConnection` on the next hop
+      # never writes, so the bytes are only libp2p's protocol acknowledgement.
       discard await conn.readOnce(addr buf[0], buf.len)
   except LPStreamError as e:
     trace "Hop stream ended", conn, err = e.msg
@@ -261,14 +254,45 @@ proc readHopStream(conn: Connection) {.async: (raises: [CancelledError]).} =
 proc spawnHopReader(mixProto: MixProtocol, conn: Connection) =
   ## Start `readHopStream` for `conn`, track its future in `hopReaders`, and
   ## remove it from there when it finishes.
-  let id = mixProto.nextHopReaderId
-  mixProto.nextHopReaderId.inc()
   let fut = readHopStream(conn)
-  mixProto.hopReaders[id] = fut
+  mixProto.hopReaders[conn] = fut
   fut.addCallback(
     proc(_: pointer) {.gcsafe, raises: [].} =
-      mixProto.hopReaders.del(id)
+      mixProto.hopReaders.del(conn)
   )
+
+proc retireHopStream(mixProto: MixProtocol, conn: Connection) {.async: (raises: []).} =
+  ## Close `conn`, read it until the next hop closes its side, and cancel the
+  ## reader if that takes longer than `hopDrainTimeout`.
+  ## `close` ends only this node's side of the stream. Whatever the next hop
+  ## sends after the reader is gone stays unread, and an mplex connection
+  ## delivers no other stream while a frame is unread.
+  if conn notin mixProto.hopReaders:
+    # A stream from a dial that completed during `stop` has no reader.
+    mixProto.spawnHopReader(conn)
+  let reader = mixProto.hopReaders.getOrDefault(conn)
+  await conn.close()
+  try:
+    discard await reader.withTimeout(mixProto.hopDrainTimeout)
+  except CancelledError:
+    # Cancelling `withTimeout` cancels the reader too, so the stream is
+    # retired early rather than left with a reader.
+    discard
+  await reader.cancelAndWait()
+
+proc removeClosedConnections(
+    mixProto: MixProtocol, failed: Connection
+) {.async: (raises: []).} =
+  ## Take `failed` and the streams of disconnected peers out of the pool and
+  ## retire them.
+  var stale: seq[tuple[peerId: PeerId, conn: Connection]]
+  for peerId, conn in mixProto.connPool:
+    if conn == failed or not mixProto.switch.isConnected(peerId):
+      stale.add((peerId, conn))
+  for (peerId, _) in stale:
+    mixProto.connPool.del(peerId)
+  for (_, conn) in stale:
+    await mixProto.retireHopStream(conn)
 
 proc startDial(
     mixProto: MixProtocol, pid: PeerId, addrs: seq[MultiAddress], codecs: seq[string]
@@ -1756,7 +1780,7 @@ method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
 
 method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   ## Stop the cover traffic, cancel the hop dials, the pending sends and the
-  ## in-flight handleMixMessages futures, close the hop streams, then stop the
+  ## in-flight handleMixMessages futures, retire the hop streams, then stop the
   ## `mix_pool_size` timer and the stores.
   if mixProto.coverTraffic.isSome:
     await mixProto.coverTraffic.get().stop()
@@ -1769,9 +1793,8 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   let dials = toSeq(mixProto.dialing.values).mapIt(it.dial)
   if dials.len > 0:
     await noCancel allFutures(dials.mapIt(it.cancelAndWait()))
-  for dial in dials:
-    if dial.completed():
-      await dial.value.close()
+  # A stream from a dial that completed during the stop is not in the pool.
+  let dialed = dials.filterIt(it.completed()).mapIt(it.value)
 
   # Cancelling makes each send and each handler delete its own entry.
   let pending =
@@ -1782,16 +1805,10 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   if pending.len > 0:
     await noCancel allFutures(pending.mapIt(it.cancelAndWait()))
 
-  let streams = toSeq(mixProto.connPool.values)
+  let streams = toSeq(mixProto.connPool.values) & dialed
   mixProto.connPool.clear()
   if streams.len > 0:
-    await noCancel allFutures(streams.mapIt(it.close()))
-
-  # A reader ends by itself only when the next hop closes its side of the stream.
-  let readers = toSeq(mixProto.hopReaders.values)
-  mixProto.hopReaders.clear()
-  if readers.len > 0:
-    await noCancel allFutures(readers.mapIt(it.cancelAndWait()))
+    await noCancel allFutures(streams.mapIt(mixProto.retireHopStream(it)))
 
   if not mixProto.poolSizeLoop.isNil:
     await mixProto.poolSizeLoop.cancelAndWait()
@@ -1893,6 +1910,7 @@ proc init*(
 
   mixProto.mixNodeInfo = mixNodeInfo
   mixProto.hopBackoff = hopBackoff
+  mixProto.hopDrainTimeout = HopStreamDrainTimeout
   mixProto.switch = switch
   mixProto.rng = switch.rng
   mixProto.nodePool = MixNodePool.new(switch.peerStore, hopAddressPolicy, maxRecordAge)
