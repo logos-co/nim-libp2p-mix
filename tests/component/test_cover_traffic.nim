@@ -18,6 +18,20 @@ import libp2p_mix/mix_metrics
 import ../tools/[lifecycle, unittest, crypto]
 import ../[utils, spam_protection_impl]
 
+type StuckCover = ref object of CoverTraffic
+  ## Cover traffic whose stop waits on `gate`, as one does on a proof that
+  ## ignores cancellation.
+  gate: Future[void]
+
+method start(ct: StuckCover) {.async: (raises: [CancelledError]).} =
+  discard
+
+method stop(ct: StuckCover) {.async: (raises: []).} =
+  try:
+    await ct.gate
+  except CatchableError:
+    discard
+
 suite "Cover Traffic - Integration":
   asyncTeardown:
     checkTrackers()
@@ -165,6 +179,113 @@ suite "Cover Traffic - Integration":
     sp.notifyEpochChange(42)
     check ct.slotPool.epoch == 42
     check ct.slotPool.availableSlots == 5
+
+  proc spamProtectedNode(): (MixProtocol, RateLimitSpamProtection) =
+    let mixNodeInfo = MixNodeInfo.generateRandomMany(1, rng())[0]
+    let switch =
+      createSwitch(mixNodeInfo.multiAddr, Opt.some(mixNodeInfo.libp2pPrivKey))
+    let sp = newRateLimitSpamProtection(100)
+    let node = MixProtocol.new(
+      mixNodeInfo,
+      switch,
+      spamProtection = Opt.some(SpamProtection(sp)),
+      delayStrategy = Opt.some(DelayStrategy(NoSamplingDelayStrategy.new(rng()))),
+    )
+    (node, sp)
+
+  proc newCover(slots: int): ConstantRateCoverTraffic =
+    ConstantRateCoverTraffic.new(totalSlots = slots, useInternalEpochTimer = false)
+
+  asyncTest "cover started before any epoch is announced takes the first one":
+    let (node, sp) = spamProtectedNode()
+    let ct = newCover(5)
+    await node.startCoverTraffic(ct)
+    check:
+      node.coverTraffic.get() == CoverTraffic(ct)
+      not node.coverTrafficPending()
+
+    sp.notifyEpochChange(7)
+    check ct.slotPool.epoch == 7
+
+  asyncTest "cover started mid-epoch starts at the next epoch boundary":
+    let (node, sp) = spamProtectedNode()
+    sp.notifyEpochChange(1)
+    let ct = newCover(5)
+    await node.startCoverTraffic(ct)
+    check:
+      node.coverTraffic.isNone()
+      node.coverTrafficPending()
+
+    # The same epoch again is no boundary.
+    sp.notifyEpochChange(1)
+    check node.coverTraffic.isNone()
+
+    sp.notifyEpochChange(2)
+    check:
+      node.coverTraffic.get() == CoverTraffic(ct)
+      not node.coverTrafficPending()
+      ct.slotPool.epoch == 2
+
+  asyncTest "a replacing cover takes over at the boundary, the running one keeps its pool until then":
+    let (node, sp) = spamProtectedNode()
+    let first = newCover(5)
+    await node.startCoverTraffic(first)
+    sp.notifyEpochChange(1)
+
+    let second = newCover(3)
+    await node.startCoverTraffic(second)
+    check:
+      node.coverTraffic.get() == CoverTraffic(first)
+      first.slotPool.claimSlot().success
+
+    sp.notifyEpochChange(2)
+    check:
+      node.coverTraffic.get() == CoverTraffic(second)
+      second.slotPool.epoch == 2
+      second.slotPool.availableSlots == 3
+
+    sp.notifyEpochChange(3)
+    check first.slotPool.epoch == 1
+
+  asyncTest "a stop drops cover waiting for the boundary":
+    let (node, sp) = spamProtectedNode()
+    sp.notifyEpochChange(1)
+    await node.startCoverTraffic(newCover(5))
+    await node.stopCoverTraffic()
+    check not node.coverTrafficPending()
+
+    sp.notifyEpochChange(2)
+    check node.coverTraffic.isNone()
+
+  asyncTest "a stop that does not end holds the node for a bounded time only":
+    let (node, _) = spamProtectedNode()
+    let ct = StuckCover(slotPool: SlotPool.new(5), gate: newFuture[void]())
+    await node.startCoverTraffic(ct)
+
+    let started = Moment.now()
+    await node.stopCoverTraffic()
+    let waited = Moment.now() - started
+    check:
+      node.coverTraffic.isNone()
+      waited >= 4.seconds
+      waited < 8.seconds
+    ct.gate.complete()
+
+  asyncTest "cover started on a running node without spam protection emits at once":
+    let nodes = await setupMixNodes(
+      5, delayStrategy = Opt.some(DelayStrategy(FixedDelayStrategy(delay: 0)))
+    )
+    startAndDeferStop(nodes)
+
+    # Interval (1 + L) * P / floor(f * R) = 4 * 1 s / 10 = 400 ms.
+    let ct = ConstantRateCoverTraffic.new(
+      totalSlots = 10, epochDuration = 1.seconds, coverRateFraction = 1.0
+    )
+    let receivedBefore = mix_cover_received.value()
+    await nodes[0].startCoverTraffic(ct)
+
+    checkUntilTimeout:
+      mix_cover_received.value() > receivedBefore
 
   asyncTest "no cover traffic configured — send works without slot claiming":
     let nodes = await setupMixNodes(5)
