@@ -196,10 +196,11 @@ proc new*(
     T: typedesc[MixKeyRing],
     config: KeyRotationConfig,
     rng: Rng,
-    replayTableCapacity: int,
+    replayTableCapacity: int = DefaultMaxTags,
 ): T =
   ## replayTableCapacity is the number of tags each key's replay table holds;
-  ## size it for the packets accepted over `config.acceptanceWindow`.
+  ## size it for the packets accepted over `config.acceptanceWindow`. A table
+  ## grows as tags arrive, so the capacity caps memory rather than reserving it.
   initRing(config, rng, replayTableCapacity)
 
 func config*(ring: MixKeyRing): KeyRotationConfig =
