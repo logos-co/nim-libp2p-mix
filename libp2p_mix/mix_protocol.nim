@@ -101,6 +101,9 @@ type
     spamProtection: Opt[SpamProtection]
     delayStrategy: DelayStrategy
     coverTraffic*: Opt[CoverTraffic]
+    pendingCover: Opt[CoverTraffic]
+      ## Replaces `coverTraffic` at the next epoch boundary; see `startCoverTraffic`.
+    spamEpoch: Opt[uint64] ## The last epoch spam protection announced.
     keyRing: Opt[MixKeyRing]
     ongoingMixMessages: Table[uint64, Future[void]]
       ## In-flight handleMixMessages futures, cancelled on stop. Keyed so
@@ -1715,6 +1718,82 @@ proc sendCoverPacket*(
     return err(error)
   return await mixProto.writeCoverPacket(peerId, multiAddr, proved.packet)
 
+const CoverStopTimeout = 5.seconds
+  ## How long a stop waits for cover traffic. A spam protection that ignores
+  ## cancellation can hold a pending cover proof, and with it the stop.
+
+proc wireCoverTraffic(mixProto: MixProtocol, ct: CoverTraffic) =
+  ct.setCoverPacketBuilder(
+    proc(
+        epoch: uint64
+    ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
+      return await mixProto.buildCoverPacket(epoch)
+  )
+  ct.setCoverProofGenerator(
+    proc(
+        packet: seq[byte], epoch: uint64
+    ): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
+      return await mixProto.generateAndAppendCoverProof(packet, Opt.some(epoch))
+  )
+  ct.setCoverPacketSender(
+    proc(
+        peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], _: uint64
+    ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
+      return await mixProto.writeCoverPacket(peerId, multiAddr, packet)
+  )
+  ct.setSendDelaySampler(
+    proc(): Delay {.gcsafe, raises: [].} =
+      mixProto.delayStrategy.generateForSender()
+  )
+  mixProto.spamProtection.withValue(sp):
+    ct.setProofTokenValidator(
+      proc(token: seq[byte]): bool {.gcsafe, raises: [].} =
+        sp.isProofTokenValid(token)
+    )
+    ct.setProofTokenReclaimer(
+      proc(token: seq[byte]) {.gcsafe, raises: [].} =
+        sp.reclaimProofToken(token)
+    )
+
+proc stopWithTimeout(ct: CoverTraffic) {.async: (raises: []).} =
+  ## Stops `ct`, waiting at most `CoverStopTimeout`. A stop that outlasts it
+  ## carries on in the background.
+  let stopping = ct.stop()
+  let timer = sleepAsync(CoverStopTimeout)
+  try:
+    discard await race(stopping, timer)
+  except CancelledError:
+    discard
+  if stopping.finished():
+    await timer.cancelAndWait()
+  else:
+    warn "Cover traffic did not stop in time, leaving it to finish",
+      timeout = CoverStopTimeout
+
+proc onSpamEpoch(mixProto: MixProtocol, epoch: uint64) =
+  ## At an epoch boundary, cover traffic waiting in `pendingCover` replaces the
+  ## running one. The first announcement is no boundary: it comes mid-epoch.
+  let boundary = mixProto.spamEpoch.isSome() and mixProto.spamEpoch.get() != epoch
+  mixProto.spamEpoch = Opt.some(epoch)
+  if boundary and mixProto.pendingCover.isSome():
+    let next = mixProto.pendingCover.get()
+    mixProto.pendingCover = Opt.none(CoverTraffic)
+    mixProto.coverTraffic.withValue(previous):
+      asyncSpawn previous.stopWithTimeout()
+    mixProto.coverTraffic = Opt.some(next)
+    next.onEpochChange(epoch)
+    if mixProto.started:
+      proc startNext() {.async: (raises: []).} =
+        try:
+          await next.start()
+        except CancelledError:
+          discard
+
+      asyncSpawn startNext()
+    return
+  mixProto.coverTraffic.withValue(ct):
+    ct.onEpochChange(epoch)
+
 method start*(mixProto: MixProtocol) {.async: (raises: [CancelledError]).} =
   await procCall LPProtocol(mixProto).start()
   if mixProto.keyRing.isSome():
@@ -1731,7 +1810,7 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
   ## in-flight handleMixMessages futures, close the hop streams, then stop the
   ## `mix_pool_size` timer and the stores.
   mixProto.coverTraffic.withValue(ct):
-    await ct.stop()
+    await ct.stopWithTimeout()
   mixProto.started = false
 
   # The dials go first. A send that waits on its first dial then ends on its
@@ -1769,6 +1848,38 @@ method stop*(mixProto: MixProtocol) {.async: (raises: []).} =
 
   await mixProto.surbStore.stop()
   mixProto.surbStore.clear()
+
+proc stopCoverTraffic*(mixProto: MixProtocol) {.async: (raises: []).} =
+  ## Stops cover traffic, including any waiting for the next epoch. Sends,
+  ## replies and forwards then claim no slots.
+  mixProto.pendingCover = Opt.none(CoverTraffic)
+  let ct = mixProto.coverTraffic.valueOr:
+    return
+  mixProto.coverTraffic = Opt.none(CoverTraffic)
+  await ct.stopWithTimeout()
+
+proc startCoverTraffic*(
+    mixProto: MixProtocol, ct: CoverTraffic
+) {.async: (raises: [CancelledError]).} =
+  ## Makes `ct` this node's cover traffic, running whenever the node runs.
+  ##
+  ## Once spam protection has announced an epoch, that epoch may hold proofs no
+  ## slot counted, so `ct` starts at the next epoch boundary and any running
+  ## cover keeps its pool until then. Before that, `ct` starts at once.
+  ##
+  ## With spam protection, `ct` must not run its own epoch timer.
+  mixProto.wireCoverTraffic(ct)
+  if mixProto.spamProtection.isSome() and mixProto.spamEpoch.isSome():
+    mixProto.pendingCover = Opt.some(ct)
+    return
+  await mixProto.stopCoverTraffic()
+  mixProto.coverTraffic = Opt.some(ct)
+  if mixProto.started:
+    await ct.start()
+
+func coverTrafficPending*(mixProto: MixProtocol): bool =
+  ## True while cover traffic waits for the next epoch boundary.
+  mixProto.pendingCover.isSome()
 
 proc init*(
     mixProto: MixProtocol,
@@ -1875,46 +1986,14 @@ proc init*(
     else:
       DelayStrategy(ExponentialDelayStrategy.new(rng = switch.rng))
 
-  mixProto.coverTraffic = coverTraffic
   coverTraffic.withValue(ct):
-    ct.setCoverPacketBuilder(
-      proc(
-          epoch: uint64
-      ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
-        return await mixProto.buildCoverPacket(epoch)
+    mixProto.wireCoverTraffic(ct)
+    mixProto.coverTraffic = Opt.some(ct)
+  spamProtection.withValue(sp):
+    sp.registerOnEpochChange(
+      proc(epoch: uint64) {.gcsafe, raises: [].} =
+        mixProto.onSpamEpoch(epoch)
     )
-    ct.setCoverProofGenerator(
-      proc(
-          packet: seq[byte], epoch: uint64
-      ): Future[Result[CoverProofResult, string]] {.async: (raises: [CancelledError]).} =
-        return await mixProto.generateAndAppendCoverProof(packet, Opt.some(epoch))
-    )
-    ct.setCoverPacketSender(
-      proc(
-          peerId: PeerId, multiAddr: MultiAddress, packet: seq[byte], _: uint64
-      ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
-        return await mixProto.writeCoverPacket(peerId, multiAddr, packet)
-    )
-    ct.setSendDelaySampler(
-      proc(): Delay {.gcsafe, raises: [].} =
-        mixProto.delayStrategy.generateForSender()
-    )
-    # Note: useInternalEpochTimer must be set to false when SpamProtection is
-    # present, as SpamProtection provides epoch change notifications via
-    # notifyEpochChange. Having both active would cause double epoch advances.
-    spamProtection.withValue(sp):
-      sp.registerOnEpochChange(
-        proc(epoch: uint64) {.gcsafe, raises: [].} =
-          ct.onEpochChange(epoch)
-      )
-      ct.setProofTokenValidator(
-        proc(token: seq[byte]): bool {.gcsafe, raises: [].} =
-          sp.isProofTokenValid(token)
-      )
-      ct.setProofTokenReclaimer(
-        proc(token: seq[byte]) {.gcsafe, raises: [].} =
-          sp.reclaimProofToken(token)
-      )
 
   let onReplyDialer = proc(
       surb: SURB, message: seq[byte]
