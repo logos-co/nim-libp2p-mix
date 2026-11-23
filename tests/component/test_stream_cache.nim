@@ -3,16 +3,28 @@
 
 {.used.}
 
-import std/sequtils
+import std/[importutils, sequtils, tables]
 import chronos, results
-import libp2p/[switch, peerid, multiaddress]
+import libp2p/[protocols/protocol, switch, peerid, multiaddress]
 import libp2p_mix
 import
   libp2p_mix/[mix_protocol, mix_node, cover_traffic, delay_strategy, spam_protection]
 import ../tools/[lifecycle, unittest, crypto]
 import ../[utils, spam_protection_impl]
 
+privateAccess(MixProtocol)
+
 const ReplyParams = MixParameters(expectReply: Opt.some(true), numSurbs: Opt.some(1'u8))
+
+proc halfOpenHandler(release: AsyncEvent): LPProtoHandler =
+  ## Reads each stream to its end but keeps its own side open until `release`
+  ## fires.
+  return proc(conn: Connection, proto: string) {.async: (raises: [CancelledError]).} =
+    try:
+      await conn.readUntilEnd()
+      await release.wait()
+    finally:
+      await conn.close()
 
 proc exchange(
     sender: MixProtocol, destination: MixDestination, codec: string, value: byte
@@ -110,8 +122,38 @@ suite "Hop stream cache":
 
     await exchange(sender, nodes[^1].toMixDestination(), echoProto.codec, 7)
     check outgoingMixStreams(sender.switch).len > 0
+    let readers = toSeq(sender.hopReaders.values)
+    check readers.len > 0
     await sender.stop()
-    check outgoingMixStreams(sender.switch).len == 0
+    check:
+      outgoingMixStreams(sender.switch).len == 0
+      # The next hop closes its side after this node's close, so each reader
+      # ends by itself rather than being cancelled.
+      readers.allIt(it.completed())
+      sender.hopReaders.len == 0
+
+  asyncTest "an evicted hop stream whose next hop stays open loses its reader":
+    let nodes = await setupMixNodes(2)
+    let release = newAsyncEvent()
+    nodes[1].handler = halfOpenHandler(release)
+    startAndDeferStop(nodes)
+    defer:
+      release.fire()
+    let sender = nodes[0]
+    sender.hopDrainTimeout = 100.milliseconds
+    let hopPeerId = nodes[1].switch.peerInfo.peerId
+    let hopAddr = nodes[1].switch.peerInfo.addrs[0]
+
+    check (await sender.sendCoverPacket(hopPeerId, hopAddr, @[1.byte])).isOk
+    let stream = sender.connPool[hopPeerId]
+    let reader = sender.hopReaders[stream]
+    # A closed stream fails the next write to it, and the failed write evicts it.
+    await stream.close()
+
+    check (await sender.sendCoverPacket(hopPeerId, hopAddr, @[2.byte])).isOk
+    check:
+      sender.connPool[hopPeerId] != stream
+      reader.cancelled()
 
   asyncTest "protocol stop fails a send that waits on a dial and refunds its slot and proof":
     # A node that counts the proofs it reclaims, with a slot pool whose epochs
