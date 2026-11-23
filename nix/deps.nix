@@ -54,8 +54,8 @@
 
   libp2p = pkgs.fetchgit {
     url = "https://github.com/vacp2p/nim-libp2p";
-    rev = "5295293b0643f2d24e41fe57c18b5ffa4fe7ca13";
-    sha256 = "1s8icyz7zfd9pz9fkf1hq2v52kabhd8g26ldalqkywywrm0a8ipf";
+    rev = "ab8e5e613b2d6c70287a8333e891c8529ed90740";
+    sha256 = "0wd1miifd3nb6ymh1lzaw3g7iaasn91hzp2nrzcwpnfkpwzdcc97";
     fetchSubmodules = true;
   };
 
@@ -152,8 +152,8 @@
 
   zlib = pkgs.fetchgit {
     url = "https://github.com/status-im/nim-zlib";
-    rev = "7b1d6ed291df9fddcbb5cf16c1968c2b8c6e5a90";
-    sha256 = "045x3x4dazg5zsgb2h3qwns6pyzidgxl1m4qmi800qx3ffkalkdy";
+    rev = "a355be4e549a99b08220b1bb85cd797892868b6b";
+    sha256 = "0ns9rwh10g9rbrf8iy0qhbkcmw9rkaxwy27b5m4ad4ixz7w5zcy1";
     fetchSubmodules = true;
   };
 
