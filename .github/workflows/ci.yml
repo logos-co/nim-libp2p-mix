@@ -97,3 +97,10 @@ jobs:
 
       - name: Run component tests
         run: make testComponent NIMBLE_FLAGS="$NIMBLE_FLAGS"
+
+      - name: Run unit and component tests (mplex)
+        if: matrix.platform.os == 'linux' && matrix.platform.cpu == 'amd64' && matrix.nim.ref == '2.2.14' && matrix.nim.mm == 'refc'
+        run: |
+          export NIMFLAGS="${NIMFLAGS} -d:mix_test_muxer=mplex"
+          make test NIMBLE_FLAGS="$NIMBLE_FLAGS"
+          make testComponent NIMBLE_FLAGS="$NIMBLE_FLAGS"
