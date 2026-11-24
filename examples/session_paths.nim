@@ -44,7 +44,7 @@ proc sessionPathsSimulation() {.async: (raises: [Exception]).} =
 
   let sender = nodes[0]
   let responder = nodes[^1]
-  let destination = MixDestination.exitNode(responder.localMixPubInfo().peerId)
+  let destination = MixDestination.exitNode(responder.localMixPubInfo().expect("local mix info").peerId)
   let deliveries = newAsyncQueue[MixDelivery]()
   let replies = newAsyncQueue[RawSurbReply]()
   # This example has one outstanding request at a time. An application with
@@ -78,10 +78,11 @@ proc sessionPathsSimulation() {.async: (raises: [Exception]).} =
 
     for message in 1 .. 2:
       let payload = @[byte(ord(profile)), byte(message)]
-      let created = sender.createSurb(destination, selector = selector).expect("create SURB")
+      var built = sender.createSurb(destination, selector = selector)
+      let created = move(built.expect("create SURB"))
       expectedReply = Opt.some(created.credential.identifier)
       # Only the SURB crosses the network; the credential stays with the sender.
-      let envelope = serializeSurb(created.surb) & payload
+      let envelope = serializeSurb(created.surb).expect("serialize SURB") & payload
       (await sender.send(destination, Service, envelope, selector = selector)).expect("send")
 
       # The responder receives the SURB through the forward packet, rather than

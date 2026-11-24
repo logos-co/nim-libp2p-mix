@@ -18,8 +18,8 @@ type
     Cover
 
   PathConstraints* = object
-    excludedNodeIds*: HashSet[PeerId]
-      ## Exclusions apply to sampled hops, not explicitly fixed hops.
+    excludedNodeIds*: Table[int, HashSet[PeerId]]
+      ## Identities forbidden at each zero-based position in packet traversal order.
     fixedHops*: Table[int, MixPubInfo]
       ## Zero-based positions in packet traversal order. Explicit endpoints
       ## need not belong to the relay pool.
@@ -52,6 +52,26 @@ func validatePathLength*(pathLength: int): Result[void, string] =
     return err("unsupported path length")
   ok()
 
+proc excludeNodesAt*(
+    constraints: var PathConstraints, position: int, ids: openArray[PeerId]
+) =
+  for id in ids:
+    constraints.excludedNodeIds.mgetOrPut(position, initHashSet[PeerId]()).incl(id)
+
+proc excludeNodes*(
+    constraints: var PathConstraints, pathLength: int, ids: openArray[PeerId]
+) =
+  ## Set fixed hops first; these exclusions apply to all sampled positions.
+  for position in 0 ..< pathLength:
+    if not constraints.fixedHops.hasKey(position):
+      constraints.excludeNodesAt(position, ids)
+
+proc excludedAt*(
+    constraints: PathConstraints, position: int, reservedIds: HashSet[PeerId]
+): HashSet[PeerId] =
+  ## Combine position constraints with fixed and already selected identities.
+  reservedIds + constraints.excludedNodeIds.getOrDefault(position)
+
 proc hasRoutingInfo(info: MixPubInfo): bool =
   info.mixPubKey != default(FieldElement) and
     multiAddrToBytes(info.peerId, info.multiAddr).isOk
@@ -64,6 +84,10 @@ proc validatePathRequest*(
   ## not liveness or reputation eligibility.
   ?validatePathLength(pathLength)
 
+  for position in request.constraints.excludedNodeIds.keys:
+    if position < 0 or position >= pathLength:
+      return err("excluded hop index outside path")
+
   var fixedIds: HashSet[PeerId]
   for position, info in request.constraints.fixedHops:
     if position < 0 or position >= pathLength:
@@ -72,13 +96,15 @@ proc validatePathRequest*(
       return err("duplicate fixed hop identity")
     if not hasRoutingInfo(info):
       return err("unusable fixed hop")
+    if info.peerId in request.constraints.excludedNodeIds.getOrDefault(position):
+      return err("fixed hop is excluded at its position")
     fixedIds.incl(info.peerId)
   ok()
 
 method samplePath*(
     selector: PathSelector, request: PathRequest
 ): Result[MixPath, string] {.base, gcsafe, raises: [].} =
-  ## Here is where the path selection strategy does it's job: 
+  ## Here is where the path selection strategy does it's job:
   ## - Apply path request constraints
   ## - Fill-in the rest of the mix nodes in the path based on the strategy and the current pool state
   ## - return an error if it is not possible to fulfil the request
@@ -99,7 +125,6 @@ proc prepareFixedHops*(
   ## The request has already been validated by selectPath.
   ## Reserve every fixed identity before sampling any unfilled position.
   result.path = newSeq[MixPubInfo](pathLength)
-  result.excludedIds = request.constraints.excludedNodeIds
   for position, info in request.constraints.fixedHops:
     result.path[position] = info
     result.excludedIds.incl(info.peerId)
@@ -141,25 +166,22 @@ method samplePath*(
 
   let pathLength = selector.pathLength
   var (path, excludedIds) = prepareFixedHops(request, pathLength)
-  let count = pathLength - request.constraints.fixedHops.len
-  if count == 0:
-    return ok(path)
-
-  let candidates = resolveCandidates(
-    selector.nodePool, selector.nodePool.peerIds(), excludedIds
-  )
-  let sampled = ?pickRandomNodes(selector.rng, candidates, count)
-  var next = 0
+  let candidateIds = selector.nodePool.peerIds()
   for position in 0 ..< path.len:
     if not request.constraints.fixedHops.hasKey(position):
-      path[position] = sampled[next]
-      inc next
+      let candidates = resolveCandidates(
+        selector.nodePool, candidateIds,
+        request.constraints.excludedAt(position, excludedIds),
+      )
+      let node = (?pickRandomNodes(selector.rng, candidates, 1))[0]
+      path[position] = node
+      excludedIds.incl(node.peerId)
   ok(path)
 
 proc selectPath*(
     selector: PathSelector, request: PathRequest
 ): Result[MixPath, string] {.gcsafe, raises: [].} =
-  
+
   if selector.isNil or selector.nodePool.isNil:
     return err("missing selector or pool")
   let pathLength = selector.pathLength
@@ -178,7 +200,7 @@ proc selectPath*(
       if info != request.constraints.fixedHops.getOrDefault(position):
         return err("selector changed a fixed hop")
     else:
-      if info.peerId in request.constraints.excludedNodeIds:
+      if info.peerId in request.constraints.excludedNodeIds.getOrDefault(position):
         return err("selector returned an excluded node")
       let current = selector.nodePool.get(info.peerId).valueOr:
         return err("selector returned a node without usable pool information")

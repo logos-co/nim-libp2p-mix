@@ -453,7 +453,7 @@ suite "Mix Protocol - Node Failures":
     )
     check:
       sent.isErr
-      sent.error.startsWith("Not enough mix nodes for a send (available=2,")
+      sent.error == "not enough usable mix nodes"
 
   asyncTest "a send that runs out of usable members counts LOW_MIX_POOL":
     ## The sender's pool holds two usable members and one with no hop address, but a
@@ -511,7 +511,7 @@ suite "Mix Protocol - Node Failures":
     )
     check:
       surb.isErr
-      surb.error.startsWith("Not enough mix nodes for a reply path")
+      surb.error == "not enough usable mix nodes"
       errorCount("Entry/SURB", "LOW_MIX_POOL") == lowPoolBefore + 1
 
   asyncTest "a cover path that runs out of usable members counts LOW_MIX_POOL":
@@ -607,7 +607,7 @@ suite "Mix Protocol - Node Failures":
       await conn.writeLp("test message".toBytes())
     except LPStreamError as exc:
       failure = exc.msg
-    check "Ran out of usable mix nodes" in failure
+    check "not enough usable mix nodes" in failure
 
   proc exitSendFailure(nodes: seq[MixProtocol]): Future[string] {.async.} =
     ## Sends from the first node to the second node as the exit, and returns
@@ -687,7 +687,7 @@ suite "Mix Protocol - Node Failures":
     )
     check:
       sent.isErr
-      sent.error.startsWith("Not enough mix nodes for a send (available=1,")
+      sent.error == "not enough usable mix nodes"
       errorCount("Entry", "LOW_MIX_POOL") == lowPoolBefore + 1
 
   asyncTest "a send to an exit with no address that the policy accepts fails at once":

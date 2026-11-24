@@ -137,7 +137,7 @@ suite "Hop backoff":
     )
     check:
       sent.isErr
-      "Ran out of usable mix nodes" in sent.error
+      "not enough usable mix nodes" in sent.error
 
     # The cover path picks its first node with the same filter, and once the exit
     # is out of the pool all of its candidates are backed off.
@@ -146,7 +146,7 @@ suite "Hop backoff":
     let cover = await nodes[0].buildCoverPacket(0)
     check:
       cover.isErr
-      "Ran out of usable mix nodes" in cover.error
+      "not enough usable mix nodes" in cover.error
       errorCount("Cover", "LOW_MIX_POOL") == lowPoolBefore + 1
 
   asyncTest "a hop whose backoff ended is selected again":

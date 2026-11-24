@@ -125,11 +125,21 @@ suite "SURB Store":
       (privateKey, publicKey) = generateKeyPair().expect("key pair")
       hop = Hop.init(newSeq[byte](AddrSize))
     var created =
-      createSURB([publicKey], [NoDelay], [hop], id, rng()).expectMove("SURB")
+      createSURB(
+        [publicKey, publicKey, publicKey], [NoDelay, NoDelay, NoDelay],
+        [hop, hop, hop], id, rng(),
+      ).expectMove("SURB")
     var message = newSeq[byte](MessageSize)
     message[0] = 42
     var tags = TagManager.new(autoStart = false)
-    let packet = processSphinxPacket(useSURB(created.surb, message), privateKey, tags)
+    var sphinxPacket = useSURB(created.surb, message)
+    for _ in 0 ..< 2:
+      let intermediate = processSphinxPacket(sphinxPacket, privateKey, tags)
+        .expect("process intermediate hop")
+      require intermediate.status == Intermediate
+      sphinxPacket = SphinxPacket.deserialize(intermediate.serializedSphinxPacket)
+        .expect("decode intermediate packet")
+    let packet = processSphinxPacket(sphinxPacket, privateKey, tags)
       .expect("process reply")
     require packet.status == Reply
     let reply = RawSurbReply(identifier: id, encryptedPayload: packet.delta_prime)

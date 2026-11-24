@@ -82,9 +82,9 @@ suite "Sphinx Tests":
       var (message, privateKeys, publicKeys, delays, hops, _) = createDummyData(length)
       for i in 0 ..< message.len:
         message[i] = byte(i mod 251)
-      let created = createSURB(publicKeys, delays, hops, randomI(), rng()).get()
-      check created.surb.serializeSurb().len == SurbSize
-      let surb = deserializeSurb(created.surb.serializeSurb()).get()
+      let created = createSURB(publicKeys, delays, hops, randomI(), rng()).expectMove("create SURB")
+      check created.surb.serializeSurb().get().len == SurbSize
+      let surb = deserializeSurb(created.surb.serializeSurb().get()).get()
       var packet = useSURB(surb, message)
       for position in 0 ..< length:
         check packet.serialize().len == PacketSize
@@ -107,7 +107,7 @@ suite "Sphinx Tests":
         for sample in 0 .. 1:
           var packet =
             if isReply:
-              useSURB(createSURB(publicKeys, delays, hops, randomI(), rng()).get().surb, message)
+              useSURB(createSURB(publicKeys, delays, hops, randomI(), rng()).expectMove("create SURB").surb, message)
             else:
               wrapInSphinxPacket(message, publicKeys, delays, hops, dest).get()
           for position in 0 ..< length - 1:

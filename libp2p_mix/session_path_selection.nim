@@ -143,19 +143,24 @@ method samplePath*(
     positions.reverse()
 
   for index, ids in selector.state.candidateSets:
-    let candidates = resolveCandidates(selector.nodePool, ids, excludedIds)
+    let candidates = resolveCandidates(
+      selector.nodePool, ids,
+      request.constraints.excludedAt(positions[index], excludedIds),
+    )
     if candidates.len == 0:
       return err("no usable candidates in session set for this request")
     let node = (?pickRandomNodes(selector.rng, candidates, 1))[0]
     path[positions[index]] = node
     excludedIds.incl(node.peerId)
 
-  let randomHops = positions.len - sessionHops
-  if randomHops > 0:
+  let candidateIds = selector.nodePool.peerIds()
+  for index in sessionHops ..< positions.len:
+    let position = positions[index]
     let candidates = resolveCandidates(
-      selector.nodePool, selector.nodePool.peerIds(), excludedIds
+      selector.nodePool, candidateIds,
+      request.constraints.excludedAt(position, excludedIds),
     )
-    let sampled = ?pickRandomNodes(selector.rng, candidates, randomHops)
-    for index, node in sampled:
-      path[positions[sessionHops + index]] = node
+    let node = (?pickRandomNodes(selector.rng, candidates, 1))[0]
+    path[position] = node
+    excludedIds.incl(node.peerId)
   ok(path)

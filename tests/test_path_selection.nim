@@ -9,7 +9,7 @@ import libp2p/[multiaddress, peerstore, peerid]
 import libp2p/crypto/secp
 import libp2p_mix
 import libp2p_mix/[serialization, tag_manager, surb_store, mix_protocol, multiaddr]
-import libp2p_mix/[cover_traffic, sphinx]
+import libp2p_mix/[cover_traffic, sphinx, key_rotation]
 import ./utils
 import ./tools/[unittest, crypto, lifecycle]
 
@@ -35,7 +35,7 @@ suite "Path request validation":
     for purpose in PathPurpose:
       request.purpose = purpose
       request.constraints.fixedHops[pathLength - 1] = nodes[0]
-      request.constraints.excludedNodeIds.incl(nodes[0].peerId)
+      request.constraints.excludeNodes(DefaultPathLength, [nodes[0].peerId])
       check request.validatePathRequest(pathLength).isOk
 
   test "every position may be fixed when identities are distinct":
@@ -58,6 +58,15 @@ suite "Path request validation":
       require outcome.isErr
       check outcome.error == "fixed hop index outside path"
       request.constraints.fixedHops.clear()
+
+  test "positional exclusions reject invalid indices and conflicting fixed hops":
+    for position in [-1, pathLength]:
+      request.constraints.excludeNodesAt(position, [nodes[0].peerId])
+      check request.validatePathRequest(pathLength).error == "excluded hop index outside path"
+      request.constraints.excludedNodeIds.clear()
+    request.constraints.fixedHops[0] = nodes[0]
+    request.constraints.excludeNodesAt(0, [nodes[0].peerId])
+    check request.validatePathRequest(pathLength).error == "fixed hop is excluded at its position"
 
   test "fixed hops cannot repeat an identity even with different metadata":
     var duplicate = nodes[0]
@@ -148,8 +157,8 @@ suite "Path selector boundary":
 
   test "unusable pool entries are rejected without deleting them":
     request.constraints.fixedHops[2] = nodes[0]
-    request.constraints.excludedNodeIds.incl(nodes[0].peerId)
-    request.constraints.excludedNodeIds.incl(nodes[1].peerId)
+    request.constraints.excludeNodes(DefaultPathLength, [nodes[0].peerId])
+    request.constraints.excludeNodes(DefaultPathLength, [nodes[1].peerId])
     var invalid = nodes[2]
     invalid.mixPubKey = default(typeof(invalid.mixPubKey))
     pool.add(invalid)
@@ -163,7 +172,6 @@ suite "Path selector boundary":
     selector.nodePool = MixNodePool.new(PeerStore.new())
     for position, node in selector.path:
       request.constraints.fixedHops[position] = node
-      request.constraints.excludedNodeIds.incl(node.peerId)
     check selector.selectPath(request).get() == selector.path
     check selector.nodePool.len == 0
 
@@ -181,7 +189,7 @@ suite "Path selector boundary":
       selector.path = path
       check selector.selectPath(request).isErr
     selector.path = nodes[0 .. 2]
-    request.constraints.excludedNodeIds.incl(nodes[0].peerId)
+    request.constraints.excludeNodes(DefaultPathLength, [nodes[0].peerId])
     check selector.selectPath(request).isErr
 
   test "fixed positions and their metadata must be preserved":
@@ -237,6 +245,30 @@ suite "Path selector boundary":
     check selector.selectPath(request).error == selector.failure
 
 suite "Random selector constraint handling":
+  test "random and session selectors apply first-position exclusions without losing candidates":
+    let pool = MixNodePool.new(PeerStore.new())
+    let nodes = MixNodeInfo.generateRandomMany(3, rng()).mapIt(it.toMixPubInfo())
+    pool.add(nodes)
+    let session = SessionPathSelector.new(
+      pool, rng(), @[@[nodes[0].peerId, nodes[1].peerId]]
+    ).get()
+    let random = RandomPathSelector.new(pool, rng())
+    for selector in [PathSelector(random), PathSelector(session)]:
+      var request = PathRequest(purpose: PathPurpose.Forward)
+      request.constraints.fixedHops[2] = nodes[2]
+      request.constraints.excludeNodesAt(0, [nodes[0].peerId])
+      # The blocked first hop remains available at the second position.
+      check selector.selectPath(request).get() == @[nodes[1], nodes[0], nodes[2]]
+      request.constraints.excludeNodesAt(0, [nodes[1].peerId])
+      check selector.selectPath(request).isErr
+      request.constraints.excludedNodeIds[0].excl(nodes[0].peerId)
+      check selector.selectPath(request).get() == @[nodes[0], nodes[1], nodes[2]]
+
+    var request = PathRequest(purpose: PathPurpose.Forward)
+    request.constraints.excludeNodesAt(0, [nodes[0].peerId])
+    let custom = SuppliedPathSelector(nodePool: pool, path: nodes)
+    check custom.selectPath(request).error == "selector returned an excluded node"
+
   test "fixed identities and exclusions are reserved before sampling":
     let pool = MixNodePool.new(PeerStore.new())
     let nodes = MixNodeInfo.generateRandomMany(6, rng()).mapIt(it.toMixPubInfo())
@@ -247,14 +279,14 @@ suite "Random selector constraint handling":
     var request = PathRequest(purpose: PathPurpose.Forward)
     request.constraints.fixedHops[1] = nodes[3]
     request.constraints.fixedHops[3] = nodes[4] # Explicit endpoint outside the pool.
-    request.constraints.excludedNodeIds.incl(nodes[2].peerId)
+    request.constraints.excludeNodes(4, [nodes[2].peerId])
 
     let path = RandomPathSelector.new(pool, rng(), pathLength = 4).selectPath(request).get()
     check path[1] == nodes[3]
     check path[3] == nodes[4]
     check [path[0].peerId, path[2].peerId].toHashSet ==
       [nodes[0].peerId, nodes[1].peerId].toHashSet
-    check request.constraints.excludedNodeIds == [nodes[2].peerId].toHashSet
+    check request.constraints.excludedNodeIds.getOrDefault(0) == [nodes[2].peerId].toHashSet
     check pool.peerIds().toHashSet ==
       [nodes[0].peerId, nodes[1].peerId, nodes[2].peerId,
        nodes[3].peerId, nodes[5].peerId].toHashSet
@@ -298,7 +330,7 @@ suite "Session selector construction":
     supplied[1].setLen(0)
     var request = PathRequest(purpose: PathPurpose.Forward)
     request.constraints.fixedHops[2] = nodes[7]
-    request.constraints.excludedNodeIds = [nodes[1].peerId, nodes[2].peerId].toHashSet
+    request.constraints.excludeNodes(DefaultPathLength, [nodes[1].peerId, nodes[2].peerId])
     check selector.selectPath(request).error == "no usable candidates in session set for this request"
     var updated = nodes[3]
     updated.mixPubKey[0] = updated.mixPubKey[0] xor 1.byte
@@ -330,15 +362,15 @@ suite "Session selector construction":
     request.constraints.fixedHops[2] = nodes[7]
     let originalIds = nodes[0 .. 2].mapIt(it.peerId).toHashSet
     for node in nodes[0 .. 2]:
-      request.constraints.excludedNodeIds = originalIds
-      request.constraints.excludedNodeIds.excl(node.peerId)
+      request.constraints.excludedNodeIds[0] = originalIds
+      request.constraints.excludedNodeIds[0].excl(node.peerId)
       check selector.selectPath(request).get() == @[node, nodes[6], nodes[7]]
     check pool.len == nodes.len
     check SessionPathSelector.new(pool, rng(), SessionSelectorParams(
       pathLength: 3, hopCount: 2, candidatesPerHop: 2
     )).error == "not enough usable mix nodes for session candidate sets"
     pool.add(nodes[3])
-    request.constraints.excludedNodeIds = originalIds
+    request.constraints.excludedNodeIds[0] = originalIds
     check selector.selectPath(request).error == "no usable candidates in session set for this request"
 
   test "parameter construction validates inputs and creates disjoint session positions":
@@ -434,7 +466,7 @@ suite "Session path selection":
     request.constraints.fixedHops.clear()
     request.constraints.fixedHops[1] = nodes[0]
     request.constraints.fixedHops[3] = nodes[^1]
-    request.constraints.excludedNodeIds = [nodes[0].peerId, nodes[1].peerId].toHashSet
+    request.constraints.excludeNodes(4, [nodes[0].peerId, nodes[1].peerId])
     check selector.selectPath(request).get() == @[nodes[2], nodes[0], nodes[3], nodes[^1]]
     request.purpose = PathPurpose.Surb
     check selector.selectPath(request).get() == @[nodes[3], nodes[0], nodes[2], nodes[^1]]
@@ -457,7 +489,7 @@ suite "Session path selection":
     check selector.selectPath(request).get() == @[updated, nodes[1], nodes[^1]]
     check pool.len == nodes.len - 1
     # Retry the same selector and candidate sets when request exclusions change.
-    request.constraints.excludedNodeIds = [nodes[0].peerId, nodes[2].peerId].toHashSet
+    request.constraints.excludeNodes(DefaultPathLength, [nodes[0].peerId, nodes[2].peerId])
     check selector.selectPath(request).error == "no usable candidates in session set for this request"
     request.constraints.excludedNodeIds.clear()
     check selector.selectPath(request).get() == @[updated, nodes[1], nodes[^1]]
@@ -510,6 +542,15 @@ method samplePath(
     return ok(selector.forwardPath)
   err("test selector invoked")
 
+proc hasExclusions(request: PathRequest, length: int, ids: openArray[PeerId]): bool =
+  for position in 0 ..< length:
+    let expected =
+      if request.constraints.fixedHops.hasKey(position): initHashSet[PeerId]()
+      else: ids.toHashSet()
+    if request.constraints.excludedNodeIds.getOrDefault(position) != expected:
+      return false
+  true
+
 suite "Mix path selection integration":
   var
     mix: MixProtocol
@@ -533,6 +574,10 @@ suite "Mix path selection integration":
     shared = RecordingSelector(nodePool: mix.nodePool)
     session = RecordingSelector(nodePool: mix.nodePool)
     mix.coverPathSelector = shared
+    waitFor mix.start()
+
+  teardown:
+    waitFor mix.stop()
 
   test "both send overloads fix the destination at the selector's last hop":
     for length in MinPathLength .. MaxPathLength:
@@ -551,7 +596,7 @@ suite "Mix path selection integration":
         let request = session.requests[i]
         check request.purpose == PathPurpose.Forward
         check request.constraints.fixedHops.getOrDefault(length - 1) == destination
-        check request.constraints.excludedNodeIds == [nodes[0].peerId, destination.peerId].toHashSet
+        check request.hasExclusions(length, [nodes[0].peerId, destination.peerId])
     check shared.requests.len == 0
     check mix.coverPathSelector == shared
     check mix.nodePool.get(nodes[4].peerId).isNone
@@ -570,7 +615,7 @@ suite "Mix path selection integration":
       let request = session.requests[0]
       check request.purpose == PathPurpose.Surb
       check request.constraints.fixedHops.getOrDefault(length - 1) == local
-      check request.constraints.excludedNodeIds == [local.peerId, nodes[4].peerId].toHashSet
+      check request.hasExclusions(length, [local.peerId, nodes[4].peerId])
     check shared.requests.len == 0
     check mix.coverPathSelector == shared
 
@@ -600,7 +645,7 @@ suite "Mix path selection integration":
     let cover = shared.requests[0]
     check cover.purpose == PathPurpose.Cover
     check cover.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == nodes[0]
-    check cover.constraints.excludedNodeIds == [nodes[0].peerId].toHashSet
+    check cover.hasExclusions(DefaultPathLength, [nodes[0].peerId])
     # A custom selector must match the cover configuration (three by default).
     shared = RecordingSelector(nodePool: mix.nodePool, length: 4)
     mix.coverPathSelector = shared
@@ -666,7 +711,7 @@ suite "Mix path selection integration":
       let selector = SessionPathSelector.new(mix.nodePool, rng(), sets, pathLength = length).get()
       let reply = mix.createSurb(
         MixDestination.exitNode(nodes[4].peerId), selector
-      ).get()
+      ).expectMove("create SURB")
       let firstHop = bytesToMultiAddr(reply.surb.hop.get()).get()
       check firstHop[0] == nodes[length - 1].peerId
     check shared.requests.len == 0
@@ -709,14 +754,61 @@ suite "Mix path selection integration":
       let forward = session.requests[0]
       check forward.purpose == PathPurpose.Forward
       check forward.constraints.fixedHops.len == 0
-      check forward.constraints.excludedNodeIds == [nodes[0].peerId, nodes[4].peerId].toHashSet
+      check forward.hasExclusions(length, [nodes[0].peerId, nodes[4].peerId])
       let surb = session.requests[1]
       check surb.purpose == PathPurpose.Surb
       check surb.constraints.fixedHops.getOrDefault(length - 1) == nodes[0]
-      check surb.constraints.excludedNodeIds ==
-        [nodes[0].peerId, session.forwardPath[^1].peerId, nodes[4].peerId].toHashSet
+      check surb.hasExclusions(length,
+        [nodes[0].peerId, session.forwardPath[^1].peerId, nodes[4].peerId])
       check mix.surbCredsLen == 0
     check shared.requests.len == 0
+
+suite "Session paths with key rotation":
+  test "selected SURB paths preserve rotation deadlines and use current keys":
+    for length in [MinPathLength, MaxPathLength]:
+      let originals = MixNodeInfo.generateRandomMany(length, rng())
+      let config = KeyRotationConfig.init().get()
+      var rings: seq[MixKeyRing]
+      var infos: seq[MixPubInfo]
+      for node in originals:
+        let ring = MixKeyRing.new(config, rng(), replayTableCapacity = 32)
+        ring.update()
+        rings.add(ring)
+        var info = node.toMixPubInfo()
+        info.mixPubKey = ring.currentPublicKey().get()
+        infos.add(info)
+      defer:
+        for ring in rings:
+          waitFor ring.stop()
+      let mix = MixProtocol.new(
+        originals[0], createSwitch(originals[0].multiAddr, Opt.some(originals[0].libp2pPrivKey)),
+        tagManager = TagManager.new(autoStart = false),
+        surbStore = SurbStore.new(autoStart = false), keyRing = Opt.some(rings[0]),
+      )
+      mix.nodePool.add(infos[1 ..^ 1])
+      let sets = infos[1 ..^ 1].mapIt(@[it.peerId])
+      let selector = SessionPathSelector.new(mix.nodePool, rng(), sets, length).get()
+      let destination = MixDestination.exitNode(PeerId.random(rng()).get())
+      let built = mix.createSurb(destination, selector).expectMove("create rotating SURB")
+      let staleAt = mix.nodePool.staleAt(infos[1 ..^ 1].mapIt(it.peerId)).get()
+      check built.dispatchBefore.get() == staleAt
+      check built.credentialsExpireAt.get() == staleAt + config.surbLifetime
+      check built.replyHoldTime.get() == config.surbHoldTime
+      check built.replyTransitAllowance.get() == config.surbLifetime - config.surbHoldTime
+      let message = newSeq[byte](MessageSize)
+      var packet = useSURB(built.surb, message)
+      # SURBs traverse initiator-relative session sets in reverse, then return home.
+      for position in 0 ..< length:
+        let index = length - 1 - position
+        var matched = matchKey(packet, rings[index].candidates()).get()
+        let processed = processSphinxPacket(packet, matched).get()
+        if index == 0:
+          require processed.status == Reply
+          let reply = RawSurbReply(identifier: processed.id, encryptedPayload: processed.delta_prime)
+          check recoverSphinxReply(built.credential, reply).get() == message
+        else:
+          require processed.status == Intermediate
+          packet = SphinxPacket.deserialize(processed.serializedSphinxPacket).get()
 
 suite "Configured cover paths":
   test "cover configuration builds loops of the configured length and rejects mismatched selectors":
@@ -772,9 +864,9 @@ suite "Session selector round trips":
     let nodes = await setupMixNodes(6)
     let sender = nodes[0]
     let destination = nodes[^1]
-    let destinationInfo = destination.localMixPubInfo()
+    let destinationInfo = destination.localMixPubInfo().get()
     let target = MixDestination.exitNode(destinationInfo.peerId)
-    let relays = nodes[1 .. 4].mapIt(it.localMixPubInfo())
+    let relays = nodes[1 .. 4].mapIt(it.localMixPubInfo().get())
     # Singleton sets make the two sessions' routes deterministic without
     # exposing private state. The longer session does not depend on relays[0].
     let first = SessionPathSelector.new(sender.nodePool, rng(), @[
@@ -801,7 +893,7 @@ suite "Session selector round trips":
     startAndDeferStop(nodes)
 
     proc roundTrip(selector: SessionPathSelector, payload: seq[byte]) {.async.} =
-      var created = sender.createSurb(target, selector = selector).get()
+      var created = sender.createSurb(target, selector = selector).expectMove("create SURB")
       (await sender.send(destinationInfo, service, payload, selector = selector)).expect("send")
       check (await deliveries.get().wait(2.seconds)).payload == payload
       # In a real application its message envelope carries the SURB to the
