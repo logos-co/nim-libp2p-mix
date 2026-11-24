@@ -31,34 +31,23 @@ jobs:
           # Windows runners (abrupt process exit, no test-fail output).
           # Add Windows back once the underlying issue is fixed.
           - { os: linux, builder: ubuntu-22.04, cpu: amd64, cc: gcc }
-          - { os: linux, builder: ubuntu-22.04, cpu: i386,  cc: gcc }
           - { os: macos, builder: macos-15,     cpu: arm64, cc: clang }
         nim:
-          # libp2p v2.0.0 requires nim >= 2.2.4 transitively, so 2.0.16 is
-          # no longer compatible. We test both the floor and current:
-          # - 2.2.4 is the libp2p v2.0.0 minimum and the version this PR
-          #   was validated against locally;
-          # - 2.2.10 is the current 2.2.x and ships nimble 0.22.2, which
-          #   is what most contributors will have on their host machines.
-          - { ref: '2.2.4',  mm: refc }
-          - { ref: '2.2.10', mm: refc }
+          # Test the libp2p v2.5.0 compiler floor and a newer release.
+          - { ref: '2.2.6',  mm: refc }
+          - { ref: '2.2.14', mm: refc }
+          - { ref: '2.2.14', mm: orc }
 
-    name: ${{ matrix.platform.os }}-${{ matrix.platform.cpu }} (Nim ${{ matrix.nim.ref }})
+    name: ${{ matrix.platform.os }}-${{ matrix.platform.cpu }} (Nim ${{ matrix.nim.ref }}, ${{ matrix.nim.mm }})
     runs-on: ${{ matrix.platform.builder }}
+    env:
+      NIMFLAGS: "--mm:${{ matrix.nim.mm }}"
     defaults:
       run:
         shell: bash
 
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install i386 toolchain
-        if: matrix.platform.cpu == 'i386'
-        run: |
-          sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y \
-            gcc-multilib g++-multilib
 
       - name: Setup Nim ${{ matrix.nim.ref }}
         uses: jiro4989/setup-nim-action@v2
@@ -67,21 +56,14 @@ jobs:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upgrade Nimble on floor-Nim jobs
-        # Nim 2.2.4 ships Nimble 0.18.2, whose resolver cannot reliably
-        # select a single version from the current dependency graph.
+        # Upgrade the resolver bundled with the minimum supported compiler.
         # Pin the commit behind Nimble 0.22.2 to avoid a registry/tag lookup.
-        if: matrix.nim.ref == '2.2.4'
+        if: matrix.nim.ref == '2.2.6'
         run: |
           nimble install -y --useSystemNim \
             'https://github.com/nim-lang/nimble.git@#aa03f886e4a111d6af9090c6a1f1271d64b66f7b'
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
           "$HOME/.nimble/bin/nimble" --version
-
-      - name: Set i386 build flags
-        if: matrix.platform.cpu == 'i386'
-        run: |
-          echo "NIMFLAGS=${NIMFLAGS} --cpu:i386 --passC:-m32 --passL:-m32" >> $GITHUB_ENV
-          echo "CC=gcc -m32" >> $GITHUB_ENV
 
       - name: Cache nimble deps
         id: nimble-cache

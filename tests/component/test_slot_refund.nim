@@ -847,7 +847,8 @@ suite "Slot refund - message API lifecycle":
   asyncTeardown:
     checkTrackers()
 
-  for stopProtocol in [false, true]:
+  for scenario in [false, true]:
+    let stopProtocol = scenario
     asyncTest "service send ends and refunds unwritten proof, stop=" & $stopProtocol:
       let (nodes, spam, delays) = setupNodes(5)
       startAndDeferStop(nodes)
@@ -870,7 +871,8 @@ suite "Slot refund - message API lifecycle":
         nodes[0].surbCredsLen == 0
         nodes[0].ongoingLocalSends.len == 0
 
-  for stopProtocol in [false, true]:
+  for scenario in [false, true]:
+    let stopProtocol = scenario
     asyncTest "caller-owned SURB send ends and refunds unwritten proof, stop=" &
       $stopProtocol:
       let (nodes, spam, delays) = setupNodes(5)

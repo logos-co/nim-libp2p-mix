@@ -60,7 +60,7 @@ jq -c '
   | to_entries
   | sort_by(.key)[]
   | select(.value.downloadMethod == "git")
-  # Filter out `nim` itself: nix builds use `pkgs.nim-2_2` from the system,
+  # Filter out `nim` itself: nix builds use `pkgs.nim` from the system,
   # not a fetched Nim source. Including it in deps.nix is redundant and
   # bloats the dependency closure.
   | select(.key != "nim")
