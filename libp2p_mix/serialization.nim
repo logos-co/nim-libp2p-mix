@@ -8,7 +8,7 @@ const
   k* = 16 # Security parameter
   MinPathLength* = 3
   DefaultPathLength* = 3
-  MaxPathLength* = 6 # r in the Mix specification
+  MaxPathLength* = 5 # r in the Mix specification
   t* = 6 # t.k - combined length of next hop address and delay
   AlphaSize* = 32 # Group element
   BetaSize* = ((MaxPathLength * (t + 1)) + 1) * k # bytes
