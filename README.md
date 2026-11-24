@@ -309,7 +309,7 @@ escape. Exit-is-destination dispatch is available without a compile-time flag.
 ## Building & running
 
 > You can set up the project and run the tests in either a native or Nix shell.
-> The Nix shell pins Nim v2.2.12 and Nimble v0.22.2. CI tests Nim v2.2.6 (`refc`) and
+> The Nix shell pins Nim v2.2.12 and Nimble v0.22.3. CI tests Nim v2.2.6 (`refc`) and
 > v2.2.14 (`refc` and `orc`). A native shell can use a newer supported
 > toolchain.
 
@@ -465,7 +465,7 @@ nix develop          # drops you into a shell with nim 2.2 + nimble
 nix build            # type-checks libp2p_mix.nim against locked deps
 ```
 
-The development shell uses Nimble v0.22.2 because the v0.18.2 release in
+The development shell uses Nimble v0.22.3 because the v0.18.2 release in
 nixos-25.05 cannot reliably resolve the current dependency graph from a cold
 cache.
 
