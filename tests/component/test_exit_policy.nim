@@ -11,7 +11,7 @@ import libp2p/protocols/protocol
 import libp2p/stream/connection
 import libp2p_mix
 import libp2p_mix/[mix_protocol, cover_traffic]
-import ../tools/[crypto, unittest]
+import ../tools/[crypto, muxer, unittest]
 
 type
   Counter = ref object
@@ -36,7 +36,7 @@ proc makeSwitch(info: MixNodeInfo, rng: Rng): Switch =
     .withPrivateKey(PrivateKey(scheme: Secp256k1, skkey: info.libp2pPrivKey))
     .withAddress(MultiAddress.init("/ip4/127.0.0.1/tcp/0").tryGet())
     .withTcpTransport()
-    .withMplex()
+    .withTestMuxer()
     .withNoise()
     .build()
 

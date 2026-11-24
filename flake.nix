@@ -36,13 +36,13 @@
         let
           pkgs = import nixpkgs { inherit system; };
           # Keep the resolver aligned with CI.
-          nimble_0_22_2 = pkgs.nimble.overrideAttrs (_: {
-            version = "0.22.2";
-            nimFlags = [ "--define:git_revision_override=aa03f886e4a111d6af9090c6a1f1271d64b66f7b" ];
+          nimble_0_22_3 = pkgs.nimble.overrideAttrs (_: {
+            version = "0.22.3";
+            nimFlags = [ "--define:git_revision_override=42ef70c2102a942c46f13eb76872326edd525cec" ];
             src = pkgs.fetchgit {
               url = "https://github.com/nim-lang/nimble.git";
-              rev = "aa03f886e4a111d6af9090c6a1f1271d64b66f7b";
-              sha256 = "1i2hs52vc7ig3z7dj2w4czqkhsiyv991mw20xyfd615q7ll0k09y";
+              rev = "42ef70c2102a942c46f13eb76872326edd525cec";
+              sha256 = "1q3mpv0b5a0hhvdfn2c1f03hjbdwfam894vym14i3dm23qin2i5z";
               fetchSubmodules = true;
             };
           });
@@ -51,7 +51,7 @@
             NIMBLE_NIM = "${pkgs.nim.nim}/nim/bin/nim";
             nativeBuildInputs = [
               pkgs.nim
-              nimble_0_22_2
+              nimble_0_22_3
               pkgs.git
               pkgs.jq
               pkgs.makeWrapper

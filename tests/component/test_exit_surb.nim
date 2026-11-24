@@ -9,7 +9,7 @@ import libp2p/[builders, switch]
 import libp2p/protocols/protocol
 import libp2p/stream/connection
 import libp2p_mix/[exit_layer, exit_connection, multiaddr, serialization]
-import ../tools/unittest
+import ../tools/[muxer, unittest]
 import ../utils
 
 const SurbHoldCodec = "/mix/test/surb-hold"
@@ -92,7 +92,8 @@ suite "Exit SURB ownership":
       let (claim, writeResponse) = scenario
       var replies = 0
       var response: seq[byte]
-      let sw = SwitchBuilder.new().withTcpTransport().withMplex().withNoise().build()
+      let sw =
+        SwitchBuilder.new().withTcpTransport().withTestMuxer().withNoise().build()
       let layer = ExitLayer.init(
         sw,
         proc(surb: SURB, message: seq[byte]) {.async: (raises: [CancelledError]).} =
@@ -127,7 +128,7 @@ suite "Exit SURB ownership":
   asyncTest "handler cancellation propagates":
     const Codec = "/mix/test/cancellation"
     let
-      sw = SwitchBuilder.new().withTcpTransport().withMplex().withNoise().build()
+      sw = SwitchBuilder.new().withTcpTransport().withTestMuxer().withNoise().build()
       handlerStarted = newAsyncEvent()
       handlerGate = newAsyncEvent()
       layer = ExitLayer.init(
@@ -163,7 +164,7 @@ suite "Exit SURB ownership":
       handlerCancelled
       messageFut.cancelled()
   asyncTest "cancelling an exit reply cancels and awaits every pending send":
-    let sw = SwitchBuilder.new().withTcpTransport().withMplex().withNoise().build()
+    let sw = SwitchBuilder.new().withTcpTransport().withTestMuxer().withNoise().build()
     defer:
       await sw.stop()
     var pending, cancelled: int

@@ -57,11 +57,12 @@ jobs:
 
       - name: Upgrade Nimble on floor-Nim jobs
         # Upgrade the resolver bundled with the minimum supported compiler.
-        # Pin the commit behind Nimble 0.22.2 to avoid a registry/tag lookup.
+        # Pin the commit behind Nimble 0.22.3 to avoid a registry/tag lookup.
+        # 0.22.2 exits 0 when a task fails.
         if: matrix.nim.ref == '2.2.6'
         run: |
           nimble install -y --useSystemNim \
-            'https://github.com/nim-lang/nimble.git@#aa03f886e4a111d6af9090c6a1f1271d64b66f7b'
+            'https://github.com/nim-lang/nimble.git@#42ef70c2102a942c46f13eb76872326edd525cec'
           echo "$HOME/.nimble/bin" >> "$GITHUB_PATH"
           "$HOME/.nimble/bin/nimble" --version
 
@@ -97,3 +98,10 @@ jobs:
 
       - name: Run component tests
         run: make testComponent NIMBLE_FLAGS="$NIMBLE_FLAGS"
+
+      - name: Run unit and component tests (mplex)
+        if: matrix.platform.os == 'linux' && matrix.platform.cpu == 'amd64' && matrix.nim.ref == '2.2.14' && matrix.nim.mm == 'refc'
+        run: |
+          export NIMFLAGS="${NIMFLAGS} -d:mix_test_muxer=mplex"
+          make test NIMBLE_FLAGS="$NIMBLE_FLAGS"
+          make testComponent NIMBLE_FLAGS="$NIMBLE_FLAGS"

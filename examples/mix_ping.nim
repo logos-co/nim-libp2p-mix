@@ -34,6 +34,7 @@ proc createSwitch(
     .withPrivateKey(privKey)
     .withAddress(multiAddr)
     .withTcpTransport()
+    .withYamux()
     .withMplex()
     .withNoise()
     .build()

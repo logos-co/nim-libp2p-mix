@@ -15,7 +15,7 @@ import libp2p_mix/curve25519
 import libp2p_mix/delay_strategy
 import libp2p_mix/mix_metrics
 
-import ./tools/crypto
+import ./tools/[crypto, muxer]
 import ./[mock_mix, spam_protection_impl]
 
 proc createSwitch*(
@@ -31,7 +31,7 @@ proc createSwitch*(
     .withPrivateKey(privKey)
     .withAddress(multiAddr)
     .withTcpTransport()
-    .withMplex()
+    .withTestMuxer()
     .withNoise()
     .build()
 

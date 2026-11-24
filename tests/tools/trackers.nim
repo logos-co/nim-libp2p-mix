@@ -14,12 +14,13 @@ const
   StreamTransportTrackerName = "stream.transport"
   StreamServerTrackerName = "stream.server"
   DgramTransportTrackerName = "datagram.transport"
+  YamuxStreamTrackerName = "YamuxStream" # not exported by libp2p
 
 const AllTrackerNames* = [
   LPStreamTrackerName, ConnectionTrackerName, LPChannelTrackerName,
-  SecureConnTrackerName, BufferStreamTrackerName, TcpTransportTrackerName,
-  StreamTransportTrackerName, StreamServerTrackerName, DgramTransportTrackerName,
-  ChronosStreamTrackerName,
+  YamuxStreamTrackerName, SecureConnTrackerName, BufferStreamTrackerName,
+  TcpTransportTrackerName, StreamTransportTrackerName, StreamServerTrackerName,
+  DgramTransportTrackerName, ChronosStreamTrackerName,
 ]
 
 template checkTracker*(name: string) =
