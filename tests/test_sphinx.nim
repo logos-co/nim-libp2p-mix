@@ -7,6 +7,7 @@ import random, results
 import chronos
 import libp2p/crypto/crypto
 import libp2p_mix/[curve25519, key_rotation, serialization, sphinx, tag_manager, delay]
+from libp2p_mix/crypto import aes_ctr, kdf
 import ./tools/[unittest, crypto]
 
 # Helper function to pad/truncate message
@@ -37,6 +38,17 @@ proc createDummyData(length: int = DefaultPathLength): (
 
 template randomI(): SURBIdentifier =
   rng().generate(SURBIdentifier)
+
+proc decryptBetaAtExit(packet: SphinxPacket, privateKey: FieldElement): seq[byte] =
+  # Inspect what the terminal node can see, without exposing production helpers.
+  let (header, _) = packet.get()
+  let (alpha, beta, _) = header.get()
+  let secret = fieldElementToBytes(
+    multiplyPointWithScalars(bytesToAlphaFieldElement(alpha).get(), [privateKey])
+  )
+  proc headerKey(label: string): seq[byte] =
+    kdf(@(label.toOpenArrayByte(0, label.high)) & secret)
+  aes_ctr(headerKey("aes_key"), headerKey("iv"), beta)
 
 # Unit tests for sphinx.nim
 suite "Sphinx Tests":
@@ -86,6 +98,39 @@ suite "Sphinx Tests":
         else:
           require processed.status == Intermediate
           packet = SphinxPacket.deserialize(processed.serializedSphinxPacket).get()
+
+  test "terminal headers keep a fixed marker and randomize unused capacity":
+    for length in MinPathLength .. MaxPathLength:
+      let (message, privateKeys, publicKeys, delays, hops, dest) = createDummyData(length)
+      for isReply in [false, true]:
+        var previousPadding: seq[byte]
+        for sample in 0 .. 1:
+          var packet =
+            if isReply:
+              useSURB(createSURB(publicKeys, delays, hops, randomI(), rng()).get().surb, message)
+            else:
+              wrapInSphinxPacket(message, publicKeys, delays, hops, dest).get()
+          for position in 0 ..< length - 1:
+            let processed = processSphinxPacket(packet, privateKeys[position], tm).get()
+            require processed.status == Intermediate
+            packet = SphinxPacket.deserialize(processed.serializedSphinxPacket).get()
+
+          let beta = decryptBetaAtExit(packet, privateKeys[^1])
+          let markerStart = AddrSize + DelaySize + SurbIdLen
+          let paddingStart = markerStart + k
+          let fillerStart = BetaSize - (length - 1) * (t + 1) * k
+          check beta.len == BetaSize
+          check beta[markerStart ..< paddingStart] == newSeq[byte](k)
+          if length == MaxPathLength:
+            check paddingStart == fillerStart
+          else:
+            let padding = beta[paddingStart ..< fillerStart]
+            check padding != newSeq[byte](padding.len)
+            if sample > 0:
+              check padding != previousPadding
+            previousPadding = padding
+          let terminal = processSphinxPacket(packet, privateKeys[^1], tm).get()
+          check terminal.status == (if isReply: Reply else: Exit)
 
   test "construction rejects unsupported lengths and mismatched arrays":
     for length in [0, 1, 2, MaxPathLength + 1]:

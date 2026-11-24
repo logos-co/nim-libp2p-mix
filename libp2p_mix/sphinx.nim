@@ -148,6 +148,7 @@ proc computeBetaGamma(
     delay: openArray[Delay],
     destHop: Hop,
     id: SURBIdentifier,
+    rng: Rng = nil,
 ): Result[tuple[beta: seq[byte], gamma: seq[byte]], string] =
   ## Calculates the following elements:
   ## - Beta: The nested encrypted routing information. It encodes the next hop address, the forwarding delay, integrity check Gamma for the next hop, and the Beta for subsequent hops.
@@ -177,7 +178,15 @@ proc computeBetaGamma(
       let destBytes = destHop.serialize()
       let delayBytes = delay[i].toBytes()
       let paddingLength = (((t + 1) * (MaxPathLength - sLen)) + 1) * k
-      let destPadding = destBytes & delayBytes & @id & newSeq[byte](paddingLength)
+      var padding = newSeq[byte](paddingLength)
+      # Keep the fixed k-byte terminal marker. Randomize unused hop capacity
+      # so the exit cannot locate the filler boundary by counting zero bytes.
+      if paddingLength > k:
+        let paddingRng = if rng.isNil: newRng() else: rng
+        if paddingRng.isNil:
+          return err("Failed to create Rng with system randomness")
+        paddingRng.generate(padding.toOpenArray(k, padding.high))
+      let destPadding = destBytes & delayBytes & @id & padding
 
       let aes = aes_ctr(beta_aes_key, beta_iv, destPadding)
 
@@ -272,7 +281,7 @@ proc createSURB*(
       burnMem(hopSecret)
 
   # Compute beta and gamma
-  let (beta_0, gamma_0) = computeBetaGamma(s, hops, delay, Hop(), id).valueOr:
+  let (beta_0, gamma_0) = computeBetaGamma(s, hops, delay, Hop(), id, rng).valueOr:
     return err("Error in beta and gamma generation: " & error)
 
   # Generate key
@@ -473,9 +482,8 @@ proc peelLayer(
   let zeroPadding = newSeq[byte]((t + 1) * k)
   let B = aes_ctr(beta_aes_key, beta_iv, beta & zeroPadding)
 
-  # Every terminal header has at least k zero padding bytes, even at L = MaxPathLength.
-  # The receiver does not know L; checking the default three-hop padding would
-  # misclassify longer paths as intermediate packets.
+  # Every terminal header has a fixed k-byte zero marker. Any remaining
+  # unused hop capacity is random padding; the receiver does not know L.
   if B.isZeros((t + 1) * k, ((t + 2) * k) - 1):
     let hop = Hop.deserialize(B[0 .. AddrSize - 1]).valueOr:
       return err(error)
