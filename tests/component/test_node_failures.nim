@@ -7,15 +7,8 @@ import chronos, metrics, results, stew/byteutils, sequtils, strutils, tables
 
 import chronos, results, stew/byteutils, sequtils
 import
-  libp2p/[
-    protocols/ping,
-    peerid,
-    multiaddress,
-    switch,
-    builders,
-    crypto/crypto,
-    crypto/secp,
-  ]
+  libp2p/
+    [protocols/ping, peerid, multiaddress, switch, builders, crypto/crypto, crypto/secp]
 import libp2p_mix
 import libp2p_mix/mix_metrics
 import libp2p_mix/mix_protocol
@@ -714,9 +707,11 @@ suite "Mix Protocol - Node Failures":
     nodes[1].switch.mount(nrProto)
     startAndDeferStop(nodes)
 
-    let conn = sender.toConnection(
-      MixDestination.exitNode(nodes[1].switch.peerInfo.peerId), nrProto.codec
-    ).get()
+    let conn = sender
+      .toConnection(
+        MixDestination.exitNode(nodes[1].switch.peerInfo.peerId), nrProto.codec
+      )
+      .get()
     let payload = "test message".toBytes()
     await conn.writeLp(payload)
     check (await nrProto.receivedMessages.get().wait(5.seconds)).data == payload

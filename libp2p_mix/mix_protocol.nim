@@ -128,14 +128,9 @@ func nodePool*(mixProto: MixProtocol): MixNodePool =
   ## Relays can be added and removed from the pool configured during initialization.
   mixProto.relayPool
 
-proc resolvePathSelector(
-    mixProto: MixProtocol, selector: PathSelector
-): PathSelector =
+proc resolvePathSelector(mixProto: MixProtocol, selector: PathSelector): PathSelector =
   ## Explicit selectors override the shared default for normal traffic.
-  if selector.isNil:
-    mixProto.defaultPathSelector
-  else:
-    selector
+  if selector.isNil: mixProto.defaultPathSelector else: selector
 
 proc registerMixDeliveryHandler*(
     mixProto: MixProtocol, service: string, handler: MixDeliveryHandler
@@ -988,8 +983,11 @@ type SurbBuild* = object
     ## Rotation spec §7), none without a key ring
 
 proc pathConstraints(
-    mixProto: MixProtocol, purpose: PathPurpose, pathLength: int,
-    destination: PeerId = PeerId(), exitPeerId: PeerId = PeerId(),
+    mixProto: MixProtocol,
+    purpose: PathPurpose,
+    pathLength: int,
+    destination: PeerId = PeerId(),
+    exitPeerId: PeerId = PeerId(),
     fixedExit: Opt[MixPubInfo] = Opt.none(MixPubInfo),
 ): Result[PathConstraints, string] =
   ## Translate packet purpose, endpoints and local dial backoff into constraints.
@@ -1013,7 +1011,9 @@ proc pathConstraints(
 
 proc preparePath(
     mixProto: MixProtocol, path: MixPath
-): Result[tuple[publicKeys: seq[FieldElement], delays: seq[Delay], hops: seq[Hop]], string] =
+): Result[
+    tuple[publicKeys: seq[FieldElement], delays: seq[Delay], hops: seq[Hop]], string
+] =
   var
     publicKeys: seq[FieldElement]
     delays: seq[Delay]
@@ -1031,11 +1031,12 @@ proc preparePath(
   ok((publicKeys, delays, hops))
 
 method buildSurb*(
-    mixProto: MixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId,
+    mixProto: MixProtocol,
+    id: SURBIdentifier,
+    destPeerId: PeerId,
+    exitPeerId: PeerId,
     selector: PathSelector = nil,
-): Result[SurbBuild, string] {.
-    base, gcsafe, raises: []
-.} =
+): Result[SurbBuild, string] {.base, gcsafe, raises: [].} =
   let activeSelector = mixProto.resolvePathSelector(selector)
   if activeSelector.isNil:
     return err("missing selector or pool")
@@ -1043,9 +1044,8 @@ method buildSurb*(
   ?validatePathLength(pathLength)
   let request = PathRequest(
     purpose: PathPurpose.Surb,
-    constraints: ?mixProto.pathConstraints(
-      PathPurpose.Surb, pathLength, destPeerId, exitPeerId
-    ),
+    constraints:
+      ?mixProto.pathConstraints(PathPurpose.Surb, pathLength, destPeerId, exitPeerId),
   )
   let path = activeSelector.selectPath(request).valueOr:
     mix_messages_error.inc(labelValues = ["Entry/SURB", "LOW_MIX_POOL"])
@@ -1128,9 +1128,7 @@ proc prepareMsgWithSurbs(
     exitPeerId: PeerId,
     selector: PathSelector,
 ): Result[tuple[msg: seq[byte], session: Opt[SurbSession]], string] =
-  let built = mixProto.buildSurbs(
-    incoming, numSurbs, destPeerId, exitPeerId, selector
-  ).valueOr:
+  let built = mixProto.buildSurbs(incoming, numSurbs, destPeerId, exitPeerId, selector).valueOr:
     return err(error)
   let serialized = serializeMessageWithSURBs(msg, built.surbs).valueOr:
     built.session.get(nil).release()
@@ -1302,7 +1300,7 @@ proc init*(T: typedesc[MixDestination], p: PeerId, address: MultiAddress): T =
   MixDestination.forwardToAddr(p, address)
 
 proc createSurb*(
-    mixProto: MixProtocol, destination: MixDestination, selector: PathSelector = nil,
+    mixProto: MixProtocol, destination: MixDestination, selector: PathSelector = nil
 ): Result[SurbBuild, string] =
   ## Create a reply block that returns to this Mix node. The destination is
   ## excluded from the independently selected return path. Use a caller-owned
@@ -1377,12 +1375,15 @@ proc sendLocal(
     if destinationInfo.isSome:
       let mixHop = mixProto.nodePool.getHop(destinationInfo.get()).valueOr:
         mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
-        return err("Explicit Mix destination has no usable address or current key record")
+        return
+          err("Explicit Mix destination has no usable address or current key record")
       Opt.some(mixHop.info)
     elif destination.kind == MixNode:
       let mixHop = mixProto.nodePool.getHop(destination.peerId).valueOr:
         mix_messages_error.inc(labelValues = ["Entry", "INVALID_DEST"])
-        return err("Destination is not a mix node with a usable address and a current record")
+        return err(
+          "Destination is not a mix node with a usable address and a current record"
+        )
       Opt.some(mixHop.info)
     else:
       Opt.none(MixPubInfo)
@@ -1560,8 +1561,7 @@ proc anonymizeLocalProtocolSend*(
   ## The same selector and its length apply to the forward packet and new SURBs.
   ## nil uses defaultPathSelector.
   await mixProto.sendInternal(
-    incoming, move(msg), codec, destination, numSurbs, true,
-    selector = selector,
+    incoming, move(msg), codec, destination, numSurbs, true, selector = selector
   )
 
 proc anonymizeLocalProtocolSend*(
@@ -1577,7 +1577,11 @@ proc anonymizeLocalProtocolSend*(
 .} =
   ?validatePathLength(pathLength)
   await mixProto.anonymizeLocalProtocolSend(
-    incoming, move(msg), codec, destination, numSurbs,
+    incoming,
+    move(msg),
+    codec,
+    destination,
+    numSurbs,
     RandomPathSelector.new(mixProto.nodePool, mixProto.rng, pathLength),
   )
 
@@ -1599,10 +1603,11 @@ proc send*(
     return err("Mix service delivery requires exit == destination")
 
   try:
-    (await mixProto.sendInternal(
-      nil, move(payload), service, destination, 0, false,
-      selector = selector,
-    )).isOkOr:
+    (
+      await mixProto.sendInternal(
+        nil, move(payload), service, destination, 0, false, selector = selector
+      )
+    ).isOkOr:
       return err(error)
   except LPStreamError as exc:
     return err("could not send Mix service payload: " & exc.msg)
@@ -1644,24 +1649,34 @@ proc send*(
   ok()
 
 proc send*(
-    mixProto: MixProtocol, destination: MixDestination, service: string,
-    payload: sink seq[byte], pathLength: int,
+    mixProto: MixProtocol,
+    destination: MixDestination,
+    service: string,
+    payload: sink seq[byte],
+    pathLength: int,
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   ## Convenience overload for a random path of the requested length.
   ?validatePathLength(pathLength)
   await mixProto.send(
-    destination, service, move(payload),
+    destination,
+    service,
+    move(payload),
     RandomPathSelector.new(mixProto.nodePool, mixProto.rng, pathLength),
   )
 
 proc send*(
-    mixProto: MixProtocol, destination: MixPubInfo, service: string,
-    payload: sink seq[byte], pathLength: int,
+    mixProto: MixProtocol,
+    destination: MixPubInfo,
+    service: string,
+    payload: sink seq[byte],
+    pathLength: int,
 ): Future[Result[void, string]] {.async: (raises: [CancelledError]).} =
   ## Convenience overload for a random path to an explicit exit.
   ?validatePathLength(pathLength)
   await mixProto.send(
-    destination, service, move(payload),
+    destination,
+    service,
+    move(payload),
     RandomPathSelector.new(mixProto.nodePool, mixProto.rng, pathLength),
   )
 
@@ -1941,9 +1956,8 @@ proc init*(
   var coverPathLength = DefaultPathLength
   if coverTraffic.isSome:
     coverPathLength = coverTraffic.get().pathLength
-  mixProto.coverPathSelector = RandomPathSelector.new(
-    mixProto.nodePool, mixProto.rng, coverPathLength
-  )
+  mixProto.coverPathSelector =
+    RandomPathSelector.new(mixProto.nodePool, mixProto.rng, coverPathLength)
   mixProto.tagManager = tagManager
   mixProto.keyRing = keyRing
   mixProto.surbStore = store

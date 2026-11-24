@@ -13,7 +13,8 @@ proc validatePathInputs(
     publicKeys: openArray[FieldElement], delay: openArray[Delay], hops: openArray[Hop]
 ): Result[void, string] =
   if publicKeys.len < MinPathLength or publicKeys.len > MaxPathLength:
-    return err("path length must be between " & $MinPathLength & " and " & $MaxPathLength)
+    return
+      err("path length must be between " & $MinPathLength & " and " & $MaxPathLength)
   if delay.len != publicKeys.len or hops.len != publicKeys.len:
     return err("path keys, delays, and hops must have equal lengths")
   ok()
@@ -136,8 +137,7 @@ proc computeFillerStrings(s: seq[seq[byte]]): Result[seq[byte], string] =
       zeroPadding = newSeq[byte](fillerLength)
 
     filler = aes_ctr_start_index(
-      aes_key, iv, filler & zeroPadding,
-      (((t + 1) * (MaxPathLength - i)) + t + 2) * k,
+      aes_key, iv, filler & zeroPadding, (((t + 1) * (MaxPathLength - i)) + t + 2) * k
     )
 
   return ok(filler)
@@ -182,7 +182,11 @@ proc computeBetaGamma(
       # Keep the fixed k-byte terminal marker. Randomize unused hop capacity
       # so the exit cannot locate the filler boundary by counting zero bytes.
       if paddingLength > k:
-        let paddingRng = if rng.isNil: newRng() else: rng
+        let paddingRng =
+          if rng.isNil:
+            newRng()
+          else:
+            rng
         if paddingRng.isNil:
           return err("Failed to create Rng with system randomness")
         paddingRng.generate(padding.toOpenArray(k, padding.high))
@@ -193,7 +197,9 @@ proc computeBetaGamma(
       beta = aes & filler
     else:
       let routingInfo = RoutingInfo.init(
-        hops[i + 1], delay[i], gamma,
+        hops[i + 1],
+        delay[i],
+        gamma,
         beta[0 .. (((MaxPathLength * (t + 1)) - t) * k) - 1],
       )
 

@@ -124,23 +124,28 @@ suite "SURB Store":
       id = makeId(1)
       (privateKey, publicKey) = generateKeyPair().expect("key pair")
       hop = Hop.init(newSeq[byte](AddrSize))
-    var created =
-      createSURB(
-        [publicKey, publicKey, publicKey], [NoDelay, NoDelay, NoDelay],
-        [hop, hop, hop], id, rng(),
-      ).expectMove("SURB")
+    var created = createSURB(
+        [publicKey, publicKey, publicKey],
+        [NoDelay, NoDelay, NoDelay],
+        [hop, hop, hop],
+        id,
+        rng(),
+      )
+      .expectMove("SURB")
     var message = newSeq[byte](MessageSize)
     message[0] = 42
     var tags = TagManager.new(autoStart = false)
     var sphinxPacket = useSURB(created.surb, message)
     for _ in 0 ..< 2:
-      let intermediate = processSphinxPacket(sphinxPacket, privateKey, tags)
-        .expect("process intermediate hop")
+      let intermediate = processSphinxPacket(sphinxPacket, privateKey, tags).expect(
+          "process intermediate hop"
+        )
       require intermediate.status == Intermediate
-      sphinxPacket = SphinxPacket.deserialize(intermediate.serializedSphinxPacket)
+      sphinxPacket = SphinxPacket
+        .deserialize(intermediate.serializedSphinxPacket)
         .expect("decode intermediate packet")
-    let packet = processSphinxPacket(sphinxPacket, privateKey, tags)
-      .expect("process reply")
+    let packet =
+      processSphinxPacket(sphinxPacket, privateKey, tags).expect("process reply")
     require packet.status == Reply
     let reply = RawSurbReply(identifier: id, encryptedPayload: packet.delta_prime)
     var creds = ConnCreds(credential: move(created.credential))

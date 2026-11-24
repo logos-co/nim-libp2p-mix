@@ -44,7 +44,8 @@ proc sessionPathsSimulation() {.async: (raises: [Exception]).} =
 
   let sender = nodes[0]
   let responder = nodes[^1]
-  let destination = MixDestination.exitNode(responder.localMixPubInfo().expect("local mix info").peerId)
+  let destination =
+    MixDestination.exitNode(responder.localMixPubInfo().expect("local mix info").peerId)
   let deliveries = newAsyncQueue[MixDelivery]()
   let replies = newAsyncQueue[RawSurbReply]()
   # This example has one outstanding request at a time. An application with
@@ -63,7 +64,9 @@ proc sessionPathsSimulation() {.async: (raises: [Exception]).} =
     await replies.put(reply)
     return RawSurbReplyDisposition.Handled
 
-  responder.registerMixDeliveryHandler(Service, deliveryHandler).expect("register service")
+  responder.registerMixDeliveryHandler(Service, deliveryHandler).expect(
+    "register service"
+  )
   sender.registerRawSurbReplyHandler(replyHandler).expect("register reply handler")
   await nodes.mapIt(it.switch.start()).allFutures()
   await nodes.mapIt(it.start()).allFutures()
@@ -72,9 +75,9 @@ proc sessionPathsSimulation() {.async: (raises: [Exception]).} =
     # Initialize once per logical session, before creating any reply blocks.
     # Standard needs ten distinct usable pool nodes; this pool contains eleven.
     # Request constraints exclude the destination from sampled relay positions.
-    let selector = SessionPathSelector.new(
-      sender.nodePool, rng, profile.params()
-    ).expect("initialize session selector")
+    let selector = SessionPathSelector
+      .new(sender.nodePool, rng, profile.params())
+      .expect("initialize session selector")
 
     for message in 1 .. 2:
       let payload = @[byte(ord(profile)), byte(message)]
@@ -83,13 +86,17 @@ proc sessionPathsSimulation() {.async: (raises: [Exception]).} =
       expectedReply = Opt.some(created.credential.identifier)
       # Only the SURB crosses the network; the credential stays with the sender.
       let envelope = serializeSurb(created.surb).expect("serialize SURB") & payload
-      (await sender.send(destination, Service, envelope, selector = selector)).expect("send")
+      (await sender.send(destination, Service, envelope, selector = selector)).expect(
+        "send"
+      )
 
       # The responder receives the SURB through the forward packet, rather than
       # sharing the sender's local SURB object or selection state.
       let delivery = await deliveries.get().wait(10.seconds)
       doAssert delivery.payload.len >= SurbSize, "truncated request envelope"
-      var surb = deserializeSurb(delivery.payload.toOpenArray(0, SurbSize - 1)).expect("decode SURB")
+      var surb = deserializeSurb(delivery.payload.toOpenArray(0, SurbSize - 1)).expect(
+          "decode SURB"
+        )
       let receivedPayload = delivery.payload[SurbSize ..^ 1]
       doAssert receivedPayload == payload, "forward payload mismatch"
       # No selector is needed here: the SURB already contains the return route.

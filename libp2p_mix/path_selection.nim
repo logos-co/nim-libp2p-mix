@@ -76,9 +76,7 @@ proc hasRoutingInfo(info: MixPubInfo): bool =
   info.mixPubKey != default(FieldElement) and
     multiAddrToBytes(info.peerId, info.multiAddr).isOk
 
-proc validatePathRequest*(
-    request: PathRequest, pathLength: int
-): Result[void, string] =
+proc validatePathRequest*(request: PathRequest, pathLength: int): Result[void, string] =
   ## Validate before selecting any nodes. This checks request structure and
   ## fixed-hop encoding requirements against the selector-provided length,
   ## not liveness or reputation eligibility.
@@ -112,7 +110,9 @@ method samplePath*(
   raiseAssert "samplePath must be implemented by concrete path selector types"
 
 proc new*(
-    T: typedesc[RandomPathSelector], nodePool: MixNodePool, rng: Rng,
+    T: typedesc[RandomPathSelector],
+    nodePool: MixNodePool,
+    rng: Rng,
     pathLength: int = DefaultPathLength,
 ): T =
   doAssert not rng.isNil, "path selection requires a CSPRNG"
@@ -170,7 +170,8 @@ method samplePath*(
   for position in 0 ..< path.len:
     if not request.constraints.fixedHops.hasKey(position):
       let candidates = resolveCandidates(
-        selector.nodePool, candidateIds,
+        selector.nodePool,
+        candidateIds,
         request.constraints.excludedAt(position, excludedIds),
       )
       let node = (?pickRandomNodes(selector.rng, candidates, 1))[0]
@@ -181,7 +182,6 @@ method samplePath*(
 proc selectPath*(
     selector: PathSelector, request: PathRequest
 ): Result[MixPath, string] {.gcsafe, raises: [].} =
-
   if selector.isNil or selector.nodePool.isNil:
     return err("missing selector or pool")
   let pathLength = selector.pathLength

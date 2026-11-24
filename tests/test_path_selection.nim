@@ -20,7 +20,8 @@ suite "Path request validation":
     pathLength: int
 
   setup:
-    nodes = MixNodeInfo.generateRandomMany(MaxPathLength, rng()).mapIt(it.toMixPubInfo())
+    nodes =
+      MixNodeInfo.generateRandomMany(MaxPathLength, rng()).mapIt(it.toMixPubInfo())
     request = PathRequest(purpose: PathPurpose.Forward)
     pathLength = DefaultPathLength
 
@@ -62,11 +63,13 @@ suite "Path request validation":
   test "positional exclusions reject invalid indices and conflicting fixed hops":
     for position in [-1, pathLength]:
       request.constraints.excludeNodesAt(position, [nodes[0].peerId])
-      check request.validatePathRequest(pathLength).error == "excluded hop index outside path"
+      check request.validatePathRequest(pathLength).error ==
+        "excluded hop index outside path"
       request.constraints.excludedNodeIds.clear()
     request.constraints.fixedHops[0] = nodes[0]
     request.constraints.excludeNodesAt(0, [nodes[0].peerId])
-    check request.validatePathRequest(pathLength).error == "fixed hop is excluded at its position"
+    check request.validatePathRequest(pathLength).error ==
+      "fixed hop is excluded at its position"
 
   test "fixed hops cannot repeat an identity even with different metadata":
     var duplicate = nodes[0]
@@ -134,14 +137,17 @@ suite "Path selector boundary":
 
   setup:
     pool = MixNodePool.new(PeerStore.new())
-    nodes = MixNodeInfo.generateRandomMany(MaxPathLength + 1, rng()).mapIt(it.toMixPubInfo())
+    nodes =
+      MixNodeInfo.generateRandomMany(MaxPathLength + 1, rng()).mapIt(it.toMixPubInfo())
     pool.add(nodes[0 ..< MaxPathLength])
-    selector = SuppliedPathSelector(nodePool: pool, path: nodes[0 ..< DefaultPathLength])
+    selector =
+      SuppliedPathSelector(nodePool: pool, path: nodes[0 ..< DefaultPathLength])
     request = PathRequest(purpose: PathPurpose.Forward)
 
   test "valid paths pass through for every supported length":
     for length in MinPathLength .. MaxPathLength:
-      selector = SuppliedPathSelector(nodePool: pool, path: nodes[0 ..< length], length: length)
+      selector =
+        SuppliedPathSelector(nodePool: pool, path: nodes[0 ..< length], length: length)
       check selector.selectPath(request).get() == selector.path
 
   test "the same request follows each selector's fixed length":
@@ -184,8 +190,9 @@ suite "Path selector boundary":
     check selector.calls == 0
 
   test "wrong lengths, repeated identities and nodes outside the pool are rejected":
-    for path in [nodes[0 .. 1], @[nodes[0], nodes[0], nodes[1]],
-                 @[nodes[0], nodes[1], nodes[^1]]]:
+    for path in [
+      nodes[0 .. 1], @[nodes[0], nodes[0], nodes[1]], @[nodes[0], nodes[1], nodes[^1]]
+    ]:
       selector.path = path
       check selector.selectPath(request).isErr
     selector.path = nodes[0 .. 2]
@@ -249,9 +256,8 @@ suite "Random selector constraint handling":
     let pool = MixNodePool.new(PeerStore.new())
     let nodes = MixNodeInfo.generateRandomMany(3, rng()).mapIt(it.toMixPubInfo())
     pool.add(nodes)
-    let session = SessionPathSelector.new(
-      pool, rng(), @[@[nodes[0].peerId, nodes[1].peerId]]
-    ).get()
+    let session =
+      SessionPathSelector.new(pool, rng(), @[@[nodes[0].peerId, nodes[1].peerId]]).get()
     let random = RandomPathSelector.new(pool, rng())
     for selector in [PathSelector(random), PathSelector(session)]:
       var request = PathRequest(purpose: PathPurpose.Forward)
@@ -281,15 +287,21 @@ suite "Random selector constraint handling":
     request.constraints.fixedHops[3] = nodes[4] # Explicit endpoint outside the pool.
     request.constraints.excludeNodes(4, [nodes[2].peerId])
 
-    let path = RandomPathSelector.new(pool, rng(), pathLength = 4).selectPath(request).get()
+    let path =
+      RandomPathSelector.new(pool, rng(), pathLength = 4).selectPath(request).get()
     check path[1] == nodes[3]
     check path[3] == nodes[4]
     check [path[0].peerId, path[2].peerId].toHashSet ==
       [nodes[0].peerId, nodes[1].peerId].toHashSet
-    check request.constraints.excludedNodeIds.getOrDefault(0) == [nodes[2].peerId].toHashSet
-    check pool.peerIds().toHashSet ==
-      [nodes[0].peerId, nodes[1].peerId, nodes[2].peerId,
-       nodes[3].peerId, nodes[5].peerId].toHashSet
+    check request.constraints.excludedNodeIds.getOrDefault(0) ==
+      [nodes[2].peerId].toHashSet
+    check pool.peerIds().toHashSet == [
+      nodes[0].peerId,
+      nodes[1].peerId,
+      nodes[2].peerId,
+      nodes[3].peerId,
+      nodes[5].peerId,
+    ].toHashSet
 
   test "candidate resolution observes pool changes and fails without enough usable nodes":
     let pool = MixNodePool.new(PeerStore.new())
@@ -330,8 +342,11 @@ suite "Session selector construction":
     supplied[1].setLen(0)
     var request = PathRequest(purpose: PathPurpose.Forward)
     request.constraints.fixedHops[2] = nodes[7]
-    request.constraints.excludeNodes(DefaultPathLength, [nodes[1].peerId, nodes[2].peerId])
-    check selector.selectPath(request).error == "no usable candidates in session set for this request"
+    request.constraints.excludeNodes(
+      DefaultPathLength, [nodes[1].peerId, nodes[2].peerId]
+    )
+    check selector.selectPath(request).error ==
+      "no usable candidates in session set for this request"
     var updated = nodes[3]
     updated.mixPubKey[0] = updated.mixPubKey[0] xor 1.byte
     pool.add(updated)
@@ -339,12 +354,13 @@ suite "Session selector construction":
 
   test "explicit construction rejects invalid sets and sets that cannot fit the length":
     let a = nodes[0].peerId
-    for sets in [newSeq[seq[PeerId]](), @[newSeq[PeerId]()],
-                 @[@[a, a]], @[@[a], @[a]]]:
+    for sets in [newSeq[seq[PeerId]](), @[newSeq[PeerId]()], @[@[a, a]], @[@[a], @[a]]]:
       check SessionPathSelector.new(pool, rng(), sets).isErr
     let tooMany = nodes[0 .. MaxPathLength].mapIt(@[it.peerId])
-    check SessionPathSelector.new(pool, rng(), tooMany).error == "unsupported session hop count"
-    check SessionPathSelector.new(pool, rng(), tooMany[0 .. 3]).error == "unsupported session hop count"
+    check SessionPathSelector.new(pool, rng(), tooMany).error ==
+      "unsupported session hop count"
+    check SessionPathSelector.new(pool, rng(), tooMany[0 .. 3]).error ==
+      "unsupported session hop count"
 
   test "pool initialization filters metadata and never expands its stored candidate set":
     for node in nodes[3 .. nodes.high]:
@@ -366,12 +382,15 @@ suite "Session selector construction":
       request.constraints.excludedNodeIds[0].excl(node.peerId)
       check selector.selectPath(request).get() == @[node, nodes[6], nodes[7]]
     check pool.len == nodes.len
-    check SessionPathSelector.new(pool, rng(), SessionSelectorParams(
-      pathLength: 3, hopCount: 2, candidatesPerHop: 2
-    )).error == "not enough usable mix nodes for session candidate sets"
+    check SessionPathSelector.new(
+      pool,
+      rng(),
+      SessionSelectorParams(pathLength: 3, hopCount: 2, candidatesPerHop: 2),
+    ).error == "not enough usable mix nodes for session candidate sets"
     pool.add(nodes[3])
     request.constraints.excludedNodeIds[0] = originalIds
-    check selector.selectPath(request).error == "no usable candidates in session set for this request"
+    check selector.selectPath(request).error ==
+      "no usable candidates in session set for this request"
 
   test "parameter construction validates inputs and creates disjoint session positions":
     let valid = SessionSelectorParams(pathLength: 4, hopCount: 3, candidatesPerHop: 2)
@@ -388,16 +407,21 @@ suite "Session selector construction":
     for length in [low(int), MinPathLength - 1, MaxPathLength + 1, high(int)]:
       var params = valid
       params.pathLength = length
-      check SessionPathSelector.new(pool, rng(), params).error == "unsupported path length"
+      check SessionPathSelector.new(pool, rng(), params).error ==
+        "unsupported path length"
     for count in [-1, 0, valid.pathLength + 1]:
       var params = valid
       params.hopCount = count
-      check SessionPathSelector.new(pool, rng(), params).error == "unsupported session hop count"
+      check SessionPathSelector.new(pool, rng(), params).error ==
+        "unsupported session hop count"
     for size in [-1, 0, 3, high(int)]:
       var params = valid
       params.candidatesPerHop = size
-      let expected = if size < 1: "session candidate count must be positive"
-                     else: "not enough usable mix nodes for session candidate sets"
+      let expected =
+        if size < 1:
+          "session candidate count must be positive"
+        else:
+          "not enough usable mix nodes for session candidate sets"
       check SessionPathSelector.new(pool, rng(), params).error == expected
 
 suite "Session profiles":
@@ -435,7 +459,8 @@ suite "Session path selection":
 
   setup:
     pool = MixNodePool.new(PeerStore.new())
-    nodes = MixNodeInfo.generateRandomMany(MaxPathLength + 3, rng()).mapIt(it.toMixPubInfo())
+    nodes =
+      MixNodeInfo.generateRandomMany(MaxPathLength + 3, rng()).mapIt(it.toMixPubInfo())
     pool.add(nodes[0 ..< nodes.high])
     candidateSets = @[@[nodes[0].peerId], @[nodes[1].peerId]]
     request = PathRequest(purpose: PathPurpose.Forward)
@@ -445,9 +470,8 @@ suite "Session path selection":
     for count in 1 .. 2:
       let sets = candidateSets[0 ..< count]
       for length in MinPathLength .. MaxPathLength:
-        let selector = SessionPathSelector.new(
-          pool, rng(), sets, pathLength = length
-        ).get()
+        let selector =
+          SessionPathSelector.new(pool, rng(), sets, pathLength = length).get()
         request.constraints.fixedHops.clear()
         request.constraints.fixedHops[length - 1] = nodes[^1]
         for purpose in [PathPurpose.Forward, PathPurpose.Surb]:
@@ -455,26 +479,30 @@ suite "Session path selection":
           let path = selector.selectPath(request).get()
           check path[^1] == nodes[^1]
           for index in 0 ..< count:
-            let position = if purpose == PathPurpose.Forward: index else: length - 2 - index
+            let position =
+              if purpose == PathPurpose.Forward:
+                index
+              else:
+                length - 2 - index
             check path[position] == nodes[index]
 
   test "fixed hops and exclusions apply before choosing from session sets":
-    candidateSets = @[
-      @[nodes[0].peerId, nodes[2].peerId], @[nodes[1].peerId, nodes[3].peerId]
-    ]
-    let selector = SessionPathSelector.new(pool, rng(), candidateSets, pathLength = 4).get()
+    candidateSets =
+      @[@[nodes[0].peerId, nodes[2].peerId], @[nodes[1].peerId, nodes[3].peerId]]
+    let selector =
+      SessionPathSelector.new(pool, rng(), candidateSets, pathLength = 4).get()
     request.constraints.fixedHops.clear()
     request.constraints.fixedHops[1] = nodes[0]
     request.constraints.fixedHops[3] = nodes[^1]
     request.constraints.excludeNodes(4, [nodes[0].peerId, nodes[1].peerId])
-    check selector.selectPath(request).get() == @[nodes[2], nodes[0], nodes[3], nodes[^1]]
+    check selector.selectPath(request).get() ==
+      @[nodes[2], nodes[0], nodes[3], nodes[^1]]
     request.purpose = PathPurpose.Surb
-    check selector.selectPath(request).get() == @[nodes[3], nodes[0], nodes[2], nodes[^1]]
+    check selector.selectPath(request).get() ==
+      @[nodes[3], nodes[0], nodes[2], nodes[^1]]
 
   test "unavailable session candidates fail only the request and recover without replacing sets":
-    candidateSets = @[
-      @[nodes[0].peerId, nodes[2].peerId], @[nodes[1].peerId]
-    ]
+    candidateSets = @[@[nodes[0].peerId, nodes[2].peerId], @[nodes[1].peerId]]
     let selector = SessionPathSelector.new(pool, rng(), candidateSets).get()
     var invalid = nodes[0]
     invalid.mixPubKey = default(typeof(invalid.mixPubKey))
@@ -484,13 +512,17 @@ suite "Session path selection":
     pool.add(updated)
     check selector.selectPath(request).get()[0] == updated
     require pool.remove(nodes[2].peerId)
-    check selector.selectPath(request).error == "no usable candidates in session set for this request"
+    check selector.selectPath(request).error ==
+      "no usable candidates in session set for this request"
     pool.add(updated)
     check selector.selectPath(request).get() == @[updated, nodes[1], nodes[^1]]
     check pool.len == nodes.len - 1
     # Retry the same selector and candidate sets when request exclusions change.
-    request.constraints.excludeNodes(DefaultPathLength, [nodes[0].peerId, nodes[2].peerId])
-    check selector.selectPath(request).error == "no usable candidates in session set for this request"
+    request.constraints.excludeNodes(
+      DefaultPathLength, [nodes[0].peerId, nodes[2].peerId]
+    )
+    check selector.selectPath(request).error ==
+      "no usable candidates in session set for this request"
     request.constraints.excludedNodeIds.clear()
     check selector.selectPath(request).get() == @[updated, nodes[1], nodes[^1]]
 
@@ -499,30 +531,35 @@ suite "Session path selection":
     check SessionPathSelector.new(pool, nil, candidateSets).isErr
     check SessionPathSelector.new(pool, rng(), newSeq[seq[PeerId]]()).isErr
     for length in [low(int), MinPathLength - 1, MaxPathLength + 1, high(int)]:
-      check SessionPathSelector.new(pool, rng(), candidateSets, length).error == "unsupported path length"
+      check SessionPathSelector.new(pool, rng(), candidateSets, length).error ==
+        "unsupported path length"
       expect AssertionDefect:
         discard RandomPathSelector.new(pool, rng(), length)
     let selector = SessionPathSelector.new(pool, rng(), candidateSets).get()
     check selector.pathLength == DefaultPathLength
     check not compiles(selector.pathLength = 4)
     request.constraints.fixedHops[0] = nodes[3]
-    check selector.selectPath(request).error == "not enough unfilled positions for session candidate sets"
+    check selector.selectPath(request).error ==
+      "not enough unfilled positions for session candidate sets"
     request.constraints.fixedHops.del(0)
     request.purpose = PathPurpose.Cover
-    check selector.selectPath(request).error == "session selector does not support cover paths"
+    check selector.selectPath(request).error ==
+      "session selector does not support cover paths"
     request.purpose = PathPurpose.Forward
     check selector.selectPath(request).isOk
 
   test "shortage for unrestricted random hops does not replace sets or end the session":
     pool = MixNodePool.new(PeerStore.new())
     pool.add(nodes[0 .. 1])
-    let selector = SessionPathSelector.new(pool, rng(), candidateSets, pathLength = 4).get()
+    let selector =
+      SessionPathSelector.new(pool, rng(), candidateSets, pathLength = 4).get()
     request.constraints.fixedHops.clear()
     request.constraints.fixedHops[3] = nodes[^1]
     check selector.selectPath(request).error == "not enough usable mix nodes"
     check pool.len == 2
     pool.add(nodes[2])
-    check selector.selectPath(request).get() == @[nodes[0], nodes[1], nodes[2], nodes[^1]]
+    check selector.selectPath(request).get() ==
+      @[nodes[0], nodes[1], nodes[2], nodes[^1]]
 
 # Save the requests received from Mix so tests can inspect their constraints.
 # Return a deliberate error to stop execution before network transmission.
@@ -545,8 +582,10 @@ method samplePath(
 proc hasExclusions(request: PathRequest, length: int, ids: openArray[PeerId]): bool =
   for position in 0 ..< length:
     let expected =
-      if request.constraints.fixedHops.hasKey(position): initHashSet[PeerId]()
-      else: ids.toHashSet()
+      if request.constraints.fixedHops.hasKey(position):
+        initHashSet[PeerId]()
+      else:
+        ids.toHashSet()
     if request.constraints.excludedNodeIds.getOrDefault(position) != expected:
       return false
   true
@@ -561,7 +600,8 @@ suite "Mix path selection integration":
     let infos = MixNodeInfo.generateRandomMany(5, rng())
     nodes = infos.mapIt(it.toMixPubInfo())
     mix = MixProtocol.new(
-      infos[0], createSwitch(infos[0].multiAddr, Opt.some(infos[0].libp2pPrivKey)),
+      infos[0],
+      createSwitch(infos[0].multiAddr, Opt.some(infos[0].libp2pPrivKey)),
       tagManager = TagManager.new(autoStart = false),
       surbStore = SurbStore.new(autoStart = false),
     )
@@ -583,12 +623,13 @@ suite "Mix path selection integration":
     for length in MinPathLength .. MaxPathLength:
       session = RecordingSelector(nodePool: mix.nodePool, length: length)
       let pooled = waitFor mix.send(
-        MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte],
+        MixDestination.exitNode(nodes[3].peerId),
+        "/test/1.0.0",
+        @[1.byte],
         selector = session,
       )
-      let explicit = waitFor mix.send(
-        nodes[4], "/test/1.0.0", @[1.byte], selector = session
-      )
+      let explicit =
+        waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte], selector = session)
       check pooled.error == "test selector invoked"
       check explicit.error == "test selector invoked"
       require session.requests.len == 2
@@ -608,9 +649,8 @@ suite "Mix path selection integration":
     local.multiAddr = newAddr
     for length in MinPathLength .. MaxPathLength:
       session = RecordingSelector(nodePool: mix.nodePool, length: length)
-      check mix.createSurb(
-        MixDestination.exitNode(nodes[4].peerId), selector = session
-      ).error == "test selector invoked"
+      check mix.createSurb(MixDestination.exitNode(nodes[4].peerId), selector = session).error ==
+        "test selector invoked"
       require session.requests.len == 1
       let request = session.requests[0]
       check request.purpose == PathPurpose.Surb
@@ -634,9 +674,14 @@ suite "Mix path selection integration":
       "not enough usable mix nodes"
     check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte], pathLength = 4)).error ==
       "not enough usable mix nodes"
-    check (waitFor mix.send(
-      MixDestination.exitNode(nodes[2].peerId), "/test/1.0.0", @[1.byte], pathLength = 4
-    )).error == "not enough usable mix nodes"
+    check (
+      waitFor mix.send(
+        MixDestination.exitNode(nodes[2].peerId),
+        "/test/1.0.0",
+        @[1.byte],
+        pathLength = 4,
+      )
+    ).error == "not enough usable mix nodes"
     mix.nodePool.add(nodes[3])
     check mix.createSurb(MixDestination.exitNode(nodes[4].peerId), pathLength = 4).isOk
     check shared.requests.len == 0
@@ -656,15 +701,24 @@ suite "Mix path selection integration":
   test "omitted selectors reuse the normal default while explicit choices override it":
     let normal = RecordingSelector(nodePool: mix.nodePool, length: 4)
     mix.defaultPathSelector = normal
-    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte])).error == "test selector invoked"
-    check (waitFor mix.send(
-      MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte]
-    )).error == "test selector invoked"
-    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId)).error == "test selector invoked"
-    check (waitFor mix.anonymizeLocalProtocolSend(
-      newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
-      MixDestination.exitNode(nodes[3].peerId), 0,
-    )).error == "test selector invoked"
+    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte])).error ==
+      "test selector invoked"
+    check (
+      waitFor mix.send(
+        MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte]
+      )
+    ).error == "test selector invoked"
+    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId)).error ==
+      "test selector invoked"
+    check (
+      waitFor mix.anonymizeLocalProtocolSend(
+        newAsyncQueue[seq[byte]](),
+        @[1.byte],
+        "/test/1.0.0",
+        MixDestination.exitNode(nodes[3].peerId),
+        0,
+      )
+    ).error == "test selector invoked"
     require normal.requests.len == 4
     for request in normal.requests:
       check request.constraints.fixedHops.hasKey(3)
@@ -682,36 +736,61 @@ suite "Mix path selection integration":
       require mix.nodePool.remove(node.peerId)
     check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte], pathLength = 3)).error ==
       "not enough usable mix nodes"
-    check (waitFor mix.send(
-      MixDestination.exitNode(nodes[0].peerId), "/test/1.0.0", @[1.byte], pathLength = 3
-    )).error == "not enough usable mix nodes"
+    check (
+      waitFor mix.send(
+        MixDestination.exitNode(nodes[0].peerId),
+        "/test/1.0.0",
+        @[1.byte],
+        pathLength = 3,
+      )
+    ).error == "not enough usable mix nodes"
     check mix.createSurb(MixDestination.exitNode(nodes[4].peerId), pathLength = 3).error ==
       "not enough usable mix nodes"
     check normal.requests.len == 4
     check mix.defaultPathSelector == normal
     check mix.coverPathSelector == shared
     mix.defaultPathSelector = nil
-    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte])).error == "missing selector or pool"
-    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId)).error == "missing selector or pool"
+    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte])).error ==
+      "missing selector or pool"
+    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId)).error ==
+      "missing selector or pool"
 
   test "selector and explicit length cannot be supplied together":
-    check not compiles(mix.send(nodes[4], "/test/1.0.0", @[1.byte], session, pathLength = 4))
-    check not compiles(mix.send(
-      MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte], session, pathLength = 4
-    ))
-    check not compiles(mix.createSurb(MixDestination.exitNode(nodes[4].peerId), session, pathLength = 4))
-    check not compiles(mix.anonymizeLocalProtocolSend(
-      newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
-      MixDestination.exitNode(nodes[3].peerId), 1, session, pathLength = 4
-    ))
+    check not compiles(
+      mix.send(nodes[4], "/test/1.0.0", @[1.byte], session, pathLength = 4)
+    )
+    check not compiles(
+      mix.send(
+        MixDestination.exitNode(nodes[3].peerId),
+        "/test/1.0.0",
+        @[1.byte],
+        session,
+        pathLength = 4,
+      )
+    )
+    check not compiles(
+      mix.createSurb(MixDestination.exitNode(nodes[4].peerId), session, pathLength = 4)
+    )
+    check not compiles(
+      mix.anonymizeLocalProtocolSend(
+        newAsyncQueue[seq[byte]](),
+        @[1.byte],
+        "/test/1.0.0",
+        MixDestination.exitNode(nodes[3].peerId),
+        1,
+        session,
+        pathLength = 4,
+      )
+    )
 
   test "createSurb builds three- and four-hop reply blocks using session sets":
     for length in [DefaultPathLength, 4]:
       let sets = nodes[1 ..< length].mapIt(@[it.peerId])
-      let selector = SessionPathSelector.new(mix.nodePool, rng(), sets, pathLength = length).get()
-      let reply = mix.createSurb(
-        MixDestination.exitNode(nodes[4].peerId), selector
-      ).expectMove("create SURB")
+      let selector =
+        SessionPathSelector.new(mix.nodePool, rng(), sets, pathLength = length).get()
+      let reply = mix
+        .createSurb(MixDestination.exitNode(nodes[4].peerId), selector)
+        .expectMove("create SURB")
       let firstHop = bytesToMultiAddr(reply.surb.hop.get()).get()
       check firstHop[0] == nodes[length - 1].peerId
     check shared.requests.len == 0
@@ -719,20 +798,29 @@ suite "Mix path selection integration":
 
   test "unsupported lengths fail before sampling or registering reply credentials":
     for length in [low(int), -1, 0, MinPathLength - 1, MaxPathLength + 1, high(int)]:
-      check (waitFor mix.send(
-        MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte],
-        pathLength = length,
-      )).error == "unsupported path length"
-      check (waitFor mix.send(
-        nodes[4], "/test/1.0.0", @[1.byte], pathLength = length
-      )).error == "unsupported path length"
+      check (
+        waitFor mix.send(
+          MixDestination.exitNode(nodes[3].peerId),
+          "/test/1.0.0",
+          @[1.byte],
+          pathLength = length,
+        )
+      ).error == "unsupported path length"
+      check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte], pathLength = length)).error ==
+        "unsupported path length"
       check mix.createSurb(
         MixDestination.exitNode(nodes[4].peerId), pathLength = length
       ).error == "unsupported path length"
-      check (waitFor mix.anonymizeLocalProtocolSend(
-        newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
-        MixDestination.exitNode(nodes[3].peerId), 1, pathLength = length,
-      )).error == "unsupported path length"
+      check (
+        waitFor mix.anonymizeLocalProtocolSend(
+          newAsyncQueue[seq[byte]](),
+          @[1.byte],
+          "/test/1.0.0",
+          MixDestination.exitNode(nodes[3].peerId),
+          1,
+          pathLength = length,
+        )
+      ).error == "unsupported path length"
     check session.requests.len == 0
     check shared.requests.len == 0
     check mix.surbCredsLen == 0
@@ -746,8 +834,12 @@ suite "Mix path selection integration":
       if length == 4:
         session.forwardPath.add(extra)
       let sent = waitFor mix.anonymizeLocalProtocolSend(
-        newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
-        MixDestination.forwardToAddr(nodes[4].peerId, nodes[4].multiAddr), 1, session,
+        newAsyncQueue[seq[byte]](),
+        @[1.byte],
+        "/test/1.0.0",
+        MixDestination.forwardToAddr(nodes[4].peerId, nodes[4].multiAddr),
+        1,
+        session,
       )
       check sent.error == "Could not prepend SURBs: test selector invoked"
       require session.requests.len == 2
@@ -758,8 +850,9 @@ suite "Mix path selection integration":
       let surb = session.requests[1]
       check surb.purpose == PathPurpose.Surb
       check surb.constraints.fixedHops.getOrDefault(length - 1) == nodes[0]
-      check surb.hasExclusions(length,
-        [nodes[0].peerId, session.forwardPath[^1].peerId, nodes[4].peerId])
+      check surb.hasExclusions(
+        length, [nodes[0].peerId, session.forwardPath[^1].peerId, nodes[4].peerId]
+      )
       check mix.surbCredsLen == 0
     check shared.requests.len == 0
 
@@ -781,20 +874,24 @@ suite "Session paths with key rotation":
         for ring in rings:
           waitFor ring.stop()
       let mix = MixProtocol.new(
-        originals[0], createSwitch(originals[0].multiAddr, Opt.some(originals[0].libp2pPrivKey)),
+        originals[0],
+        createSwitch(originals[0].multiAddr, Opt.some(originals[0].libp2pPrivKey)),
         tagManager = TagManager.new(autoStart = false),
-        surbStore = SurbStore.new(autoStart = false), keyRing = Opt.some(rings[0]),
+        surbStore = SurbStore.new(autoStart = false),
+        keyRing = Opt.some(rings[0]),
       )
       mix.nodePool.add(infos[1 ..^ 1])
       let sets = infos[1 ..^ 1].mapIt(@[it.peerId])
       let selector = SessionPathSelector.new(mix.nodePool, rng(), sets, length).get()
       let destination = MixDestination.exitNode(PeerId.random(rng()).get())
-      let built = mix.createSurb(destination, selector).expectMove("create rotating SURB")
+      let built =
+        mix.createSurb(destination, selector).expectMove("create rotating SURB")
       let staleAt = mix.nodePool.staleAt(infos[1 ..^ 1].mapIt(it.peerId)).get()
       check built.dispatchBefore.get() == staleAt
       check built.credentialsExpireAt.get() == staleAt + config.surbLifetime
       check built.replyHoldTime.get() == config.surbHoldTime
-      check built.replyTransitAllowance.get() == config.surbLifetime - config.surbHoldTime
+      check built.replyTransitAllowance.get() ==
+        config.surbLifetime - config.surbHoldTime
       let message = newSeq[byte](MessageSize)
       var packet = useSURB(built.surb, message)
       # SURBs traverse initiator-relative session sets in reverse, then return home.
@@ -804,7 +901,9 @@ suite "Session paths with key rotation":
         let processed = processSphinxPacket(packet, matched).get()
         if index == 0:
           require processed.status == Reply
-          let reply = RawSurbReply(identifier: processed.id, encryptedPayload: processed.delta_prime)
+          let reply = RawSurbReply(
+            identifier: processed.id, encryptedPayload: processed.delta_prime
+          )
           check recoverSphinxReply(built.credential, reply).get() == message
         else:
           require processed.status == Intermediate
@@ -816,7 +915,8 @@ suite "Configured cover paths":
       let infos = MixNodeInfo.generateRandomMany(length, rng())
       let ct = ConstantRateCoverTraffic.new(pathLength = length)
       let mix = MixProtocol.new(
-        infos[0], createSwitch(infos[0].multiAddr, Opt.some(infos[0].libp2pPrivKey)),
+        infos[0],
+        createSwitch(infos[0].multiAddr, Opt.some(infos[0].libp2pPrivKey)),
         tagManager = TagManager.new(autoStart = false),
         surbStore = SurbStore.new(autoStart = false),
         coverTraffic = Opt.some(CoverTraffic(ct)),
@@ -869,12 +969,17 @@ suite "Session selector round trips":
     let relays = nodes[1 .. 4].mapIt(it.localMixPubInfo().get())
     # Singleton sets make the two sessions' routes deterministic without
     # exposing private state. The longer session does not depend on relays[0].
-    let first = SessionPathSelector.new(sender.nodePool, rng(), @[
-      @[relays[0].peerId], @[relays[1].peerId]
-    ]).get()
-    let second = SessionPathSelector.new(sender.nodePool, rng(), @[
-      @[relays[2].peerId], @[relays[1].peerId], @[relays[3].peerId]
-    ], pathLength = 4).get()
+    let first = SessionPathSelector
+      .new(sender.nodePool, rng(), @[@[relays[0].peerId], @[relays[1].peerId]])
+      .get()
+    let second = SessionPathSelector
+      .new(
+        sender.nodePool,
+        rng(),
+        @[@[relays[2].peerId], @[relays[1].peerId], @[relays[3].peerId]],
+        pathLength = 4,
+      )
+      .get()
     let coverSelector = sender.coverPathSelector
     let deliveries = newAsyncQueue[MixDelivery]()
     let replies = newAsyncQueue[RawSurbReply]()
@@ -888,13 +993,18 @@ suite "Session selector round trips":
     ): Future[RawSurbReplyDisposition] {.async: (raises: [CancelledError]).} =
       await replies.put(reply)
       return RawSurbReplyDisposition.Handled
-    destination.registerMixDeliveryHandler(service, deliveryHandler).expect("register delivery")
+    destination.registerMixDeliveryHandler(service, deliveryHandler).expect(
+      "register delivery"
+    )
     sender.registerRawSurbReplyHandler(replyHandler).expect("register replies")
     startAndDeferStop(nodes)
 
     proc roundTrip(selector: SessionPathSelector, payload: seq[byte]) {.async.} =
-      var created = sender.createSurb(target, selector = selector).expectMove("create SURB")
-      (await sender.send(destinationInfo, service, payload, selector = selector)).expect("send")
+      var created =
+        sender.createSurb(target, selector = selector).expectMove("create SURB")
+      (await sender.send(destinationInfo, service, payload, selector = selector)).expect(
+        "send"
+      )
       check (await deliveries.get().wait(2.seconds)).payload == payload
       # In a real application its message envelope carries the SURB to the
       # destination. This local fixture hands it directly to the responder.

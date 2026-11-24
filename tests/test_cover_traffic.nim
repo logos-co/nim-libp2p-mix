@@ -191,8 +191,10 @@ suite "ConstantRateCoverTraffic cover_rate_fraction":
     check ConstantRateCoverTraffic.new().pathLength == DefaultPathLength
     for length in MinPathLength .. MaxPathLength:
       let ct = ConstantRateCoverTraffic.new(
-        totalSlots = 1000, epochDuration = 1000.seconds,
-        coverRateFraction = 1.0, pathLength = length,
+        totalSlots = 1000,
+        epochDuration = 1000.seconds,
+        coverRateFraction = 1.0,
+        pathLength = length,
       )
       check CoverTraffic(ct).pathLength == length
       check ct.emissionInterval == (1 + length).seconds

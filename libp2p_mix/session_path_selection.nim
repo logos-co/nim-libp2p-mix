@@ -12,8 +12,7 @@ import ./[path_selection, mix_node, serialization, pool]
 type SessionSelectorParams* = object
   ## All fields are required; these parameters are copied at construction.
   pathLength*: int
-  hopCount*: int
-    ## Number of session candidate sets, separate from caller-fixed hops.
+  hopCount*: int ## Number of session candidate sets, separate from caller-fixed hops.
   candidatesPerHop*: int
 
 type SessionProfile* {.pure.} = enum
@@ -94,7 +93,9 @@ proc validateInputs(
   ok()
 
 proc new*(
-    T: typedesc[SessionPathSelector], nodePool: MixNodePool, rng: Rng,
+    T: typedesc[SessionPathSelector],
+    nodePool: MixNodePool,
+    rng: Rng,
     params: SessionSelectorParams,
 ): Result[T, string] =
   ## Initialize once from currently usable pool nodes. State stays private
@@ -104,13 +105,18 @@ proc new*(
     return err("unsupported session hop count")
   if params.candidatesPerHop < 1:
     return err("session candidate count must be positive")
-  let candidates = resolveCandidates(nodePool, nodePool.peerIds(), default(HashSet[PeerId]))
-  let state = ?sampleSessionState(candidates, rng, params.hopCount, params.candidatesPerHop)
+  let candidates =
+    resolveCandidates(nodePool, nodePool.peerIds(), default(HashSet[PeerId]))
+  let state =
+    ?sampleSessionState(candidates, rng, params.hopCount, params.candidatesPerHop)
   ok(T(nodePool: nodePool, rng: rng, state: state, length: params.pathLength))
 
 proc new*(
-    T: typedesc[SessionPathSelector], nodePool: MixNodePool, rng: Rng,
-    candidateSets: openArray[seq[PeerId]], pathLength: int = DefaultPathLength,
+    T: typedesc[SessionPathSelector],
+    nodePool: MixNodePool,
+    rng: Rng,
+    candidateSets: openArray[seq[PeerId]],
+    pathLength: int = DefaultPathLength,
 ): Result[T, string] =
   ## Advanced construction: preserve supplied identities, grouping and order.
   ## Metadata is resolved when selecting paths, so unavailable IDs are allowed.
@@ -144,7 +150,8 @@ method samplePath*(
 
   for index, ids in selector.state.candidateSets:
     let candidates = resolveCandidates(
-      selector.nodePool, ids,
+      selector.nodePool,
+      ids,
       request.constraints.excludedAt(positions[index], excludedIds),
     )
     if candidates.len == 0:
@@ -157,7 +164,8 @@ method samplePath*(
   for index in sessionHops ..< positions.len:
     let position = positions[index]
     let candidates = resolveCandidates(
-      selector.nodePool, candidateIds,
+      selector.nodePool,
+      candidateIds,
       request.constraints.excludedAt(position, excludedIds),
     )
     let node = (?pickRandomNodes(selector.rng, candidates, 1))[0]

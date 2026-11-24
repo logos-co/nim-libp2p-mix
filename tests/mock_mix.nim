@@ -35,7 +35,10 @@ type MockMixProtocol* = ref object of MixProtocol
   receivedPacketCount*: int
 
 method buildSurb*(
-    mock: MockMixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId,
+    mock: MockMixProtocol,
+    id: SURBIdentifier,
+    destPeerId: PeerId,
+    exitPeerId: PeerId,
     selector: PathSelector = nil,
 ): Result[SurbBuild, string] {.gcsafe, raises: [].} =
   # No forced paths configured or all sets consumed: use the supplied/default selector.

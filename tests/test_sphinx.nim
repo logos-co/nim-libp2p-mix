@@ -20,9 +20,9 @@ proc addPadding(message: openArray[byte], size: int): seq[byte] =
     result.add(newSeq[byte](paddingLength)) # Pad with zeros
 
 # Helper function to create dummy data
-proc createDummyData(length: int = DefaultPathLength): (
-  Message, seq[FieldElement], seq[FieldElement], seq[Delay], seq[Hop], Hop
-) =
+proc createDummyData(
+    length: int = DefaultPathLength
+): (Message, seq[FieldElement], seq[FieldElement], seq[Delay], seq[Hop], Hop) =
   var
     privateKeys, publicKeys: seq[FieldElement]
     delays: seq[Delay]
@@ -33,8 +33,14 @@ proc createDummyData(length: int = DefaultPathLength): (
     publicKeys.add(publicKey)
     delays.add(NoDelay)
     hops.add(Hop.init(newSeq[byte](AddrSize)))
-  (newSeq[byte](MessageSize), privateKeys, publicKeys, delays, hops,
-   Hop.init(newSeq[byte](AddrSize)))
+  (
+    newSeq[byte](MessageSize),
+    privateKeys,
+    publicKeys,
+    delays,
+    hops,
+    Hop.init(newSeq[byte](AddrSize)),
+  )
 
 template randomI(): SURBIdentifier =
   rng().generate(SURBIdentifier)
@@ -48,6 +54,7 @@ proc decryptBetaAtExit(packet: SphinxPacket, privateKey: FieldElement): seq[byte
   )
   proc headerKey(label: string): seq[byte] =
     kdf(@(label.toOpenArrayByte(0, label.high)) & secret)
+
   aes_ctr(headerKey("aes_key"), headerKey("iv"), beta)
 
 # Unit tests for sphinx.nim
@@ -62,7 +69,8 @@ suite "Sphinx Tests":
 
   test "all supported path lengths retain packet size and deliver forward payloads":
     for length in MinPathLength .. MaxPathLength:
-      var (message, privateKeys, publicKeys, delays, hops, dest) = createDummyData(length)
+      var (message, privateKeys, publicKeys, delays, hops, dest) =
+        createDummyData(length)
       for i in 0 ..< message.len:
         message[i] = byte(i mod 251)
       var packet = wrapInSphinxPacket(message, publicKeys, delays, hops, dest).get()
@@ -82,7 +90,8 @@ suite "Sphinx Tests":
       var (message, privateKeys, publicKeys, delays, hops, _) = createDummyData(length)
       for i in 0 ..< message.len:
         message[i] = byte(i mod 251)
-      let created = createSURB(publicKeys, delays, hops, randomI(), rng()).expectMove("create SURB")
+      let created =
+        createSURB(publicKeys, delays, hops, randomI(), rng()).expectMove("create SURB")
       check created.surb.serializeSurb().get().len == SurbSize
       let surb = deserializeSurb(created.surb.serializeSurb().get()).get()
       var packet = useSURB(surb, message)
@@ -101,13 +110,18 @@ suite "Sphinx Tests":
 
   test "terminal headers keep a fixed marker and randomize unused capacity":
     for length in MinPathLength .. MaxPathLength:
-      let (message, privateKeys, publicKeys, delays, hops, dest) = createDummyData(length)
+      let (message, privateKeys, publicKeys, delays, hops, dest) =
+        createDummyData(length)
       for isReply in [false, true]:
         var previousPadding: seq[byte]
         for sample in 0 .. 1:
           var packet =
             if isReply:
-              useSURB(createSURB(publicKeys, delays, hops, randomI(), rng()).expectMove("create SURB").surb, message)
+              useSURB(
+                createSURB(publicKeys, delays, hops, randomI(), rng())
+                  .expectMove("create SURB").surb,
+                message,
+              )
             else:
               wrapInSphinxPacket(message, publicKeys, delays, hops, dest).get()
           for position in 0 ..< length - 1:
