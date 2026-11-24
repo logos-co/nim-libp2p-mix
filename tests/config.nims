@@ -15,4 +15,6 @@ import ../config.nims
 --d:
   libp2p_mplex_metrics
 --d:
+  libp2p_yamux_metrics
+--d:
   unittestPrintTime
