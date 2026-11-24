@@ -80,8 +80,10 @@ type
     switch*: Switch
     relayPool: MixNodePool
     defaultPathSelector*: PathSelector
-      ## Cover's shared selector. Sends and SURB creation with no selector
-      ## use a fresh default-length random selector instead.
+      ## Shared by sends and SURB creation when no selector is supplied.
+      ## Initially random with DefaultPathLength; session selectors stay caller-owned.
+    coverPathSelector*: PathSelector
+      ## Separate shared selector matching the cover strategy's configured length.
     tagManager: TagManager
     exitLayer: ExitLayer
     rng: Rng
@@ -129,10 +131,9 @@ func nodePool*(mixProto: MixProtocol): MixNodePool =
 proc resolvePathSelector(
     mixProto: MixProtocol, selector: PathSelector
 ): PathSelector =
-  ## Sends and SURB creation default to a fresh random selector.
-  ## The shared defaultPathSelector is reserved for cover traffic.
+  ## Explicit selectors override the shared default for normal traffic.
   if selector.isNil:
-    RandomPathSelector.new(mixProto.nodePool, mixProto.rng)
+    mixProto.defaultPathSelector
   else:
     selector
 
@@ -1081,6 +1082,8 @@ method buildSurb*(
     base, gcsafe, raises: []
 .} =
   let activeSelector = mixProto.resolvePathSelector(selector)
+  if activeSelector.isNil:
+    return err("missing selector or pool")
   let pathLength = activeSelector.pathLength
   ?validatePathLength(pathLength)
   let request = PathRequest(
@@ -1346,8 +1349,8 @@ proc createSurb*(
 ): Result[SurbBuild, string] =
   ## Create a reply block that returns to this Mix node. The destination is
   ## excluded from the independently selected return path. Use a caller-owned
-  ## selector for related sends and SURBs; nil creates a default-length random
-  ## selector. Its length includes this node as the return endpoint.
+  ## selector for related sends and SURBs; nil uses defaultPathSelector.
+  ## Its length includes this node as the return endpoint.
   if destination.kind != MixNode:
     return err("SURBs require exit == destination")
 
@@ -1381,6 +1384,8 @@ proc sendLocal(
   ## send (or `Opt.none` when `numSurbs == 0`), so the caller can release them
   ## promptly when its connection closes.
   let activeSelector = mixProto.resolvePathSelector(selector)
+  if activeSelector.isNil:
+    return err("missing selector or pool")
   let pathLength = activeSelector.pathLength
   ?validatePathLength(pathLength)
   mix_messages_recvd.inc(labelValues = ["Entry"])
@@ -1591,7 +1596,7 @@ proc anonymizeLocalProtocolSend*(
   ## Legacy request/reply send. New message-oriented consumers should use
   ## `send`, supplying and owning their SURBs separately.
   ## The same selector and its length apply to the forward packet and new SURBs.
-  ## nil creates a default-length random selector.
+  ## nil uses defaultPathSelector.
   await mixProto.sendInternal(
     incoming, move(msg), codec, destination, numSurbs, true,
     selector = selector,
@@ -1624,7 +1629,7 @@ proc send*(
   ## Send one opaque payload to a service at a Mix destination. This operation
   ## creates no reply credentials and applies no legacy SURB envelope.
   ## A supplied selector owns the path length, including the destination exit.
-  ## nil creates a default-length random selector.
+  ## nil uses defaultPathSelector.
   if service.len == 0:
     return err("Mix service must not be empty")
 
@@ -1721,16 +1726,20 @@ proc buildCoverPacket*(
     mixProto: MixProtocol, epoch: uint64
 ): Future[Result[CoverPacketBuild, string]] {.async: (raises: [CancelledError]).} =
   ## Build a cover Sphinx packet with a loop path (self = exit node),
-  ## random payload. Use the shared default so a future strategy can apply
+  ## random payload. Use coverPathSelector so a future strategy can apply
   ## pool eligibility/liveness policy without changing this builder.
-  if not mixProto.defaultPathSelector.isNil and
-      mixProto.defaultPathSelector.pathLength != DefaultPathLength:
-    return err("cover selector must use default path length")
+  var pathLength = DefaultPathLength
+  mixProto.coverTraffic.withValue(ct):
+    pathLength = ct.pathLength
+  ?validatePathLength(pathLength)
+  if not mixProto.coverPathSelector.isNil and
+      mixProto.coverPathSelector.pathLength != pathLength:
+    return err("cover selector path length does not match cover configuration")
   let request = PathRequest(
     purpose: PathPurpose.Cover,
-    constraints: ?mixProto.pathConstraints(PathPurpose.Cover, DefaultPathLength),
+    constraints: ?mixProto.pathConstraints(PathPurpose.Cover, pathLength),
   )
-  let path = mixProto.defaultPathSelector.selectPath(request).valueOr:
+  let path = mixProto.coverPathSelector.selectPath(request).valueOr:
     return err(error)
   let (publicKeys, delays, hops) = mixProto.preparePath(path).valueOr:
     return err(error)
@@ -1966,6 +1975,12 @@ proc init*(
   mixProto.rng = switch.rng
   mixProto.relayPool = MixNodePool.new(switch.peerStore, hopAddressPolicy, maxRecordAge)
   mixProto.defaultPathSelector = RandomPathSelector.new(mixProto.nodePool, mixProto.rng)
+  var coverPathLength = DefaultPathLength
+  coverTraffic.withValue(ct):
+    coverPathLength = ct.pathLength
+  mixProto.coverPathSelector = RandomPathSelector.new(
+    mixProto.nodePool, mixProto.rng, coverPathLength
+  )
   mixProto.tagManager = tagManager
   mixProto.keyRing = keyRing
   mixProto.surbStore = store

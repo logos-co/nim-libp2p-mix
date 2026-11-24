@@ -169,7 +169,8 @@ is not the only traffic class departing exactly on its emission schedule.
 
 ```nim
 let ct = ConstantRateCoverTraffic.new(
-  totalSlots = 10, epochDuration = 10.seconds, useInternalEpochTimer = true
+  totalSlots = 10, epochDuration = 10.seconds, useInternalEpochTimer = true,
+  pathLength = 3, # Default; supported lengths are 3–6, including the origin.
 )
 
 # Optional: custom means (hop mean vs independent sender-hold mean)

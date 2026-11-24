@@ -9,6 +9,7 @@ import libp2p/[multiaddress, peerstore, peerid]
 import libp2p/crypto/secp
 import libp2p_mix
 import libp2p_mix/[serialization, tag_manager, surb_store, mix_protocol, multiaddr]
+import libp2p_mix/[cover_traffic, sphinx]
 import ./utils
 import ./tools/[unittest, crypto, lifecycle]
 
@@ -523,12 +524,15 @@ suite "Mix path selection integration":
       tagManager = TagManager.new(autoStart = false),
       surbStore = SurbStore.new(autoStart = false),
     )
+    check mix.coverPathSelector of RandomPathSelector
+    check mix.coverPathSelector.nodePool == mix.nodePool
     check mix.defaultPathSelector of RandomPathSelector
     check mix.defaultPathSelector.nodePool == mix.nodePool
+    check mix.defaultPathSelector != mix.coverPathSelector
     mix.nodePool.add(nodes[0 .. 3])
     shared = RecordingSelector(nodePool: mix.nodePool)
     session = RecordingSelector(nodePool: mix.nodePool)
-    mix.defaultPathSelector = shared
+    mix.coverPathSelector = shared
 
   test "both send overloads fix the destination at the selector's last hop":
     for length in MinPathLength .. MaxPathLength:
@@ -549,7 +553,7 @@ suite "Mix path selection integration":
         check request.constraints.fixedHops.getOrDefault(length - 1) == destination
         check request.constraints.excludedNodeIds == [nodes[0].peerId, destination.peerId].toHashSet
     check shared.requests.len == 0
-    check mix.defaultPathSelector == shared
+    check mix.coverPathSelector == shared
     check mix.nodePool.get(nodes[4].peerId).isNone
 
   test "createSurb fixes the local endpoint at the selector's last hop":
@@ -568,12 +572,12 @@ suite "Mix path selection integration":
       check request.constraints.fixedHops.getOrDefault(length - 1) == local
       check request.constraints.excludedNodeIds == [local.peerId, nodes[4].peerId].toHashSet
     check shared.requests.len == 0
-    check mix.defaultPathSelector == shared
+    check mix.coverPathSelector == shared
 
-  test "omitted selectors use random selection while cover retains its shared default":
+  test "normal default random selection and cover selection remain separate":
     for node in nodes[1 .. 3]:
       require mix.nodePool.remove(node.peerId)
-    # No usable relays: fail before network I/O, without consulting the shared selector.
+    # No usable relays: the normal default fails without consulting the cover selector.
     check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte])).error ==
       "not enough usable mix nodes"
     check mix.createSurb(MixDestination.exitNode(nodes[4].peerId)).error ==
@@ -597,11 +601,53 @@ suite "Mix path selection integration":
     check cover.purpose == PathPurpose.Cover
     check cover.constraints.fixedHops.getOrDefault(DefaultPathLength - 1) == nodes[0]
     check cover.constraints.excludedNodeIds == [nodes[0].peerId].toHashSet
-    # Cover length policy remains three hops even with a custom shared selector.
+    # A custom selector must match the cover configuration (three by default).
     shared = RecordingSelector(nodePool: mix.nodePool, length: 4)
-    mix.defaultPathSelector = shared
-    check (waitFor mix.buildCoverPacket(0)).error == "cover selector must use default path length"
+    mix.coverPathSelector = shared
+    check (waitFor mix.buildCoverPacket(0)).error ==
+      "cover selector path length does not match cover configuration"
     check shared.requests.len == 0
+
+  test "omitted selectors reuse the normal default while explicit choices override it":
+    let normal = RecordingSelector(nodePool: mix.nodePool, length: 4)
+    mix.defaultPathSelector = normal
+    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte])).error == "test selector invoked"
+    check (waitFor mix.send(
+      MixDestination.exitNode(nodes[3].peerId), "/test/1.0.0", @[1.byte]
+    )).error == "test selector invoked"
+    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId)).error == "test selector invoked"
+    check (waitFor mix.anonymizeLocalProtocolSend(
+      newAsyncQueue[seq[byte]](), @[1.byte], "/test/1.0.0",
+      MixDestination.exitNode(nodes[3].peerId), 0,
+    )).error == "test selector invoked"
+    require normal.requests.len == 4
+    for request in normal.requests:
+      check request.constraints.fixedHops.hasKey(3)
+    check shared.requests.len == 0
+    check (waitFor mix.buildCoverPacket(0)).error == "test selector invoked"
+    require shared.requests.len == 1
+    check shared.requests[0].constraints.fixedHops.hasKey(2)
+
+    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte], selector = session)).error ==
+      "test selector invoked"
+    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId), selector = session).error ==
+      "test selector invoked"
+    check session.requests.len == 2
+    for node in nodes[1 .. 3]:
+      require mix.nodePool.remove(node.peerId)
+    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte], pathLength = 3)).error ==
+      "not enough usable mix nodes"
+    check (waitFor mix.send(
+      MixDestination.exitNode(nodes[0].peerId), "/test/1.0.0", @[1.byte], pathLength = 3
+    )).error == "not enough usable mix nodes"
+    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId), pathLength = 3).error ==
+      "not enough usable mix nodes"
+    check normal.requests.len == 4
+    check mix.defaultPathSelector == normal
+    check mix.coverPathSelector == shared
+    mix.defaultPathSelector = nil
+    check (waitFor mix.send(nodes[4], "/test/1.0.0", @[1.byte])).error == "missing selector or pool"
+    check mix.createSurb(MixDestination.exitNode(nodes[4].peerId)).error == "missing selector or pool"
 
   test "selector and explicit length cannot be supplied together":
     check not compiles(mix.send(nodes[4], "/test/1.0.0", @[1.byte], session, pathLength = 4))
@@ -624,7 +670,7 @@ suite "Mix path selection integration":
       let firstHop = bytesToMultiAddr(reply.surb.hop.get()).get()
       check firstHop[0] == nodes[length - 1].peerId
     check shared.requests.len == 0
-    check mix.defaultPathSelector == shared
+    check mix.coverPathSelector == shared
 
   test "unsupported lengths fail before sampling or registering reply credentials":
     for length in [low(int), -1, 0, MinPathLength - 1, MaxPathLength + 1, high(int)]:
@@ -672,6 +718,52 @@ suite "Mix path selection integration":
       check mix.surbCredsLen == 0
     check shared.requests.len == 0
 
+suite "Configured cover paths":
+  test "cover configuration builds loops of the configured length and rejects mismatched selectors":
+    for length in MinPathLength .. MaxPathLength:
+      let infos = MixNodeInfo.generateRandomMany(length, rng())
+      let ct = ConstantRateCoverTraffic.new(pathLength = length)
+      let mix = MixProtocol.new(
+        infos[0], createSwitch(infos[0].multiAddr, Opt.some(infos[0].libp2pPrivKey)),
+        tagManager = TagManager.new(autoStart = false),
+        surbStore = SurbStore.new(autoStart = false),
+        coverTraffic = Opt.some(CoverTraffic(ct)),
+      )
+      mix.nodePool.add(infos[1 ..^ 1].mapIt(it.toMixPubInfo()))
+      check mix.coverPathSelector of RandomPathSelector
+      check mix.coverPathSelector.pathLength == length
+      check mix.defaultPathSelector.pathLength == DefaultPathLength
+      check mix.defaultPathSelector != mix.coverPathSelector
+      let built = (waitFor mix.buildCoverPacket(0)).get()
+      check built.packet.len == PacketSize
+      var packet = SphinxPacket.deserialize(built.packet).get()
+      var peer = built.firstHopPeerId
+      var seen: HashSet[PeerId]
+      var tags = TagManager.new(autoStart = false)
+      for position in 0 ..< length:
+        require peer notin seen
+        seen.incl(peer)
+        let matches = infos.filterIt(it.peerId == peer)
+        require matches.len == 1
+        let processed = processSphinxPacket(packet, matches[0].mixPrivKey, tags).get()
+        if position == length - 1:
+          check peer == infos[0].peerId
+          check processed.status == Exit
+        else:
+          require processed.status == Intermediate
+          peer = bytesToMultiAddr(processed.nextHop.get()).get()[0]
+          packet = SphinxPacket.deserialize(processed.serializedSphinxPacket).get()
+
+      # Do not silently change scheduling if the shared selector is replaced.
+      let mismatch = RecordingSelector(
+        nodePool: mix.nodePool,
+        length: (if length == DefaultPathLength: 4 else: DefaultPathLength),
+      )
+      mix.coverPathSelector = mismatch
+      check (waitFor mix.buildCoverPacket(0)).error ==
+        "cover selector path length does not match cover configuration"
+      check mismatch.requests.len == 0
+
 suite "Session selector round trips":
   asyncTeardown:
     checkTrackers()
@@ -691,7 +783,7 @@ suite "Session selector round trips":
     let second = SessionPathSelector.new(sender.nodePool, rng(), @[
       @[relays[2].peerId], @[relays[1].peerId], @[relays[3].peerId]
     ], pathLength = 4).get()
-    let coverSelector = sender.defaultPathSelector
+    let coverSelector = sender.coverPathSelector
     let deliveries = newAsyncQueue[MixDelivery]()
     let replies = newAsyncQueue[RawSurbReply]()
     const service = "/session-path-test/1.0.0"
@@ -728,4 +820,4 @@ suite "Session selector round trips":
     await roundTrip(second, @[4.byte])
     sender.nodePool.add(relays[0])
     await roundTrip(first, @[5.byte])
-    check sender.defaultPathSelector == coverSelector
+    check sender.coverPathSelector == coverSelector
