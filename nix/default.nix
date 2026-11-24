@@ -13,7 +13,7 @@ pkgs.stdenv.mkDerivation {
   inherit src;
 
   nativeBuildInputs = [
-    pkgs.nim-2_2
+    pkgs.nim
     pkgs.git
     pkgs.nimble
   ];

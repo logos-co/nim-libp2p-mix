@@ -9,8 +9,8 @@ license = "MIT"
 skipDirs = @["examples", "tests"]
 entryPoints = @["examples/mix_ping.nim"]
 
-requires "nim >= 2.2.4",
-  "libp2p >= 2.4.0", "chronicles >= 0.11.0", "chronos >= 4.2.2", "metrics",
+requires "nim >= 2.2.6",
+  "libp2p >= 2.5.0", "chronicles >= 0.12.3", "chronos >= 4.2.2", "metrics >= 0.2.2",
   "nimcrypto >= 0.6.0", "stew >= 0.4.2", "results", "unittest2"
 
 import os, strutils

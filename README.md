@@ -309,8 +309,8 @@ escape. Exit-is-destination dispatch is available without a compile-time flag.
 ## Building & running
 
 > You can set up the project and run the tests in either a native or Nix shell.
-> The Nix shell pins Nim v2.2.4 and Nimble v0.22.2. CI tests Nim v2.2.4 and
-> v2.2.10 with Nimble v0.22.2. A native shell can use a newer supported
+> The Nix shell pins Nim v2.2.12 and Nimble v0.22.2. CI tests Nim v2.2.6 (`refc`) and
+> v2.2.14 (`refc` and `orc`). A native shell can use a newer supported
 > toolchain.
 
 To set up the project:

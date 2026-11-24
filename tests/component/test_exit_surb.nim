@@ -88,7 +88,8 @@ suite "Exit SURB hold time":
 
 suite "Exit SURB ownership":
   asyncTest "automatic replies only use unclaimed SURBs":
-    for (claim, writeResponse) in [(false, true), (true, true), (false, false)]:
+    for scenario in [(false, true), (true, true), (false, false)]:
+      let (claim, writeResponse) = scenario
       var replies = 0
       var response: seq[byte]
       let sw = SwitchBuilder.new().withTcpTransport().withMplex().withNoise().build()
