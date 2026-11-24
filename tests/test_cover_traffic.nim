@@ -187,6 +187,23 @@ suite "SlotPool":
       pool.coverClaimed == 1
 
 suite "ConstantRateCoverTraffic cover_rate_fraction":
+  test "configured path length controls scheduling and automatic precompute batches":
+    check ConstantRateCoverTraffic.new().pathLength == DefaultPathLength
+    for length in MinPathLength .. MaxPathLength:
+      let ct = ConstantRateCoverTraffic.new(
+        totalSlots = 1000,
+        epochDuration = 1000.seconds,
+        coverRateFraction = 1.0,
+        pathLength = length,
+      )
+      check CoverTraffic(ct).pathLength == length
+      check ct.emissionInterval == (1 + length).seconds
+      check ct.precomputeBatchSize == (1000 div (1 + length)) div 10
+      check not compiles(ct.pathLength = 4)
+    for length in [low(int), -1, 0, MinPathLength - 1, MaxPathLength + 1, high(int)]:
+      expect AssertionDefect:
+        discard ConstantRateCoverTraffic.new(pathLength = length)
+
   test "emissionInterval follows ((1+L)*P)/(f*R) formula":
     # L=3, P=100s, R=100:
     #   f=1.0 → 400s / 100 = 4s

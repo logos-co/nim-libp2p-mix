@@ -4,21 +4,16 @@
 {.used.}
 
 import chronos, metrics, results, stew/byteutils, sequtils, strutils, tables
+
+import chronos, results, stew/byteutils, sequtils
 import
-  libp2p/[
-    protocols/ping,
-    peerid,
-    peerstore,
-    multiaddress,
-    switch,
-    builders,
-    crypto/crypto,
-    crypto/secp,
-  ]
+  libp2p/
+    [protocols/ping, peerid, multiaddress, switch, builders, crypto/crypto, crypto/secp]
 import libp2p_mix
 import libp2p_mix/mix_metrics
 import libp2p_mix/mix_protocol
 import libp2p_mix/serialization
+
 import libp2p_mix/delay_strategy
 
 import ../tools/[lifecycle, unittest, crypto]
@@ -451,7 +446,7 @@ suite "Mix Protocol - Node Failures":
     )
     check:
       sent.isErr
-      sent.error.startsWith("Not enough mix nodes for a send (available=2,")
+      sent.error == "not enough usable mix nodes"
 
   asyncTest "a send that runs out of usable members counts LOW_MIX_POOL":
     ## The sender's pool holds two usable members and one with no hop address, but a
@@ -509,7 +504,7 @@ suite "Mix Protocol - Node Failures":
     )
     check:
       surb.isErr
-      surb.error.startsWith("Not enough mix nodes for a reply path")
+      surb.error == "not enough usable mix nodes"
       errorCount("Entry/SURB", "LOW_MIX_POOL") == lowPoolBefore + 1
 
   asyncTest "a cover path that runs out of usable members counts LOW_MIX_POOL":
@@ -605,7 +600,7 @@ suite "Mix Protocol - Node Failures":
       await conn.writeLp("test message".toBytes())
     except LPStreamError as exc:
       failure = exc.msg
-    check "Ran out of usable mix nodes" in failure
+    check "not enough usable mix nodes" in failure
 
   proc exitSendFailure(nodes: seq[MixProtocol]): Future[string] {.async.} =
     ## Sends from the first node to the second node as the exit, and returns
@@ -685,7 +680,7 @@ suite "Mix Protocol - Node Failures":
     )
     check:
       sent.isErr
-      sent.error.startsWith("Not enough mix nodes for a send (available=1,")
+      sent.error == "not enough usable mix nodes"
       errorCount("Entry", "LOW_MIX_POOL") == lowPoolBefore + 1
 
   asyncTest "a send to an exit with no address that the policy accepts fails at once":
@@ -693,3 +688,34 @@ suite "Mix Protocol - Node Failures":
 
     check "Destination is not a mix node with a usable address" in
       await exitSendFailure(nodes)
+
+  asyncTest "skip nodes with invalid multiaddresses without modifying the pool":
+    # A Mix-node destination needs two relays plus the fixed destination.
+    let nodes = await setupMixNodes(4)
+    let sender = nodes[0]
+    let invalidPeerId = PeerId.random(rng()).expect("could not generate peerId")
+    let validInfo = sender.nodePool.get(nodes[1].switch.peerInfo.peerId).get()
+    let invalidInfo = MixPubInfo.init(
+      invalidPeerId,
+      MultiAddress.init("/ip4/0.0.0.0").get(),
+      validInfo.mixPubKey,
+      validInfo.libp2pPubKey,
+    )
+    sender.nodePool.add(invalidInfo)
+
+    let nrProto = NoReplyProtocol.new()
+    nodes[1].switch.mount(nrProto)
+    startAndDeferStop(nodes)
+
+    let conn = sender
+      .toConnection(
+        MixDestination.exitNode(nodes[1].switch.peerInfo.peerId), nrProto.codec
+      )
+      .get()
+    let payload = "test message".toBytes()
+    await conn.writeLp(payload)
+    check (await nrProto.receivedMessages.get().wait(5.seconds)).data == payload
+    await conn.close()
+    check sender.nodePool.len == 4
+    check invalidPeerId in sender.nodePool.peerIds()
+    check sender.nodePool.get(invalidPeerId).isNone

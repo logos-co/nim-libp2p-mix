@@ -22,11 +22,11 @@ type MockMixProtocol* = ref object of MixProtocol
   ##     @[nodeA, nodeB, nodeC],   # candidates for SURB 0
   ##     @[nodeD, nodeE, nodeF],   # candidates for SURB 1
   ##   ]
-  ## Each SURB reply path needs exactly 2 intermediary nodes. buildSurb filters
-  ## out the exit node from candidates, so if the exit happens to be one of the candidates,
-  ## there would be too few. Provide 3+ to be safe.
+  ## Each default three-hop SURB reply path needs exactly 2 intermediary nodes.
+  ## buildSurb filters out the exit, so provide at least pathLength candidates
+  ## when the exit might be among them.
   ##
-  ## After the message is sent, mock.actualSurbPeers records which 2 peers were
+  ## After the message is sent, mock.actualSurbPeers records which relays were
   ## selected for each SURB, so tests can target specific nodes.
   actualSurbPeers*: seq[seq[PeerId]]
   ## Incoming raw bytes in handleMixMessages are captured here
@@ -35,21 +35,25 @@ type MockMixProtocol* = ref object of MixProtocol
   receivedPacketCount*: int
 
 method buildSurb*(
-    mock: MockMixProtocol, id: SURBIdentifier, destPeerId: PeerId, exitPeerId: PeerId
+    mock: MockMixProtocol,
+    id: SURBIdentifier,
+    destPeerId: PeerId,
+    exitPeerId: PeerId,
+    selector: PathSelector = nil,
 ): Result[SurbBuild, string] {.gcsafe, raises: [].} =
-  # No forced paths configured or all sets consumed — fall back to random selection
+  # No forced paths configured or all sets consumed: use the supplied/default selector.
   if mock.surbPeerSets.len == 0 or mock.surbCallIndex >= mock.surbPeerSets.len:
-    return procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId)
+    return procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId, selector)
 
   # The exit node is randomly chosen during forward path construction, so it
   # might be one of our candidates. Remove it.
   let candidates = mock.surbPeerSets[mock.surbCallIndex].filterIt(it != exitPeerId)
-  doAssert candidates.len >= 2
-  let peers = candidates[0 .. 1]
+  let pathLength = if selector.isNil: DefaultPathLength else: selector.pathLength
+  doAssert pathLength >= MinPathLength and pathLength <= MaxPathLength
+  doAssert candidates.len >= pathLength - 1
+  let peers = candidates[0 ..< pathLength - 1]
 
-  # buildSurb removes the exit and the destination, and it needs PathLength - 1
-  # other nodes. We keep our 2 desired peers + the exit node, so it draws
-  # exactly our 2.
+  # Keep the desired relays plus the exit, which selection excludes.
   let keepInPool = (peers & exitPeerId).toHashSet()
 
   # `remove` deletes only the mix key, so the mix key is what comes back. A
@@ -61,7 +65,7 @@ method buildSurb*(
       removed.add((peerId, mixKeys[peerId]))
       discard mock.nodePool.remove(peerId)
 
-  let surb = procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId)
+  let surb = procCall buildSurb(MixProtocol(mock), id, destPeerId, exitPeerId, selector)
 
   for (peerId, mixPubKey) in removed:
     mixKeys[peerId] = mixPubKey

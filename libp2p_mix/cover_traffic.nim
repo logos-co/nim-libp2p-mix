@@ -13,7 +13,7 @@ import std/[deques, sequtils, tables]
 import chronicles, chronos, results, metrics
 import libp2p/[multiaddress, peerid]
 import libp2p/utils/heartbeat
-import ./delay, ./mix_metrics, ./sphinx
+import ./delay, ./mix_metrics, ./serialization
 export delay
 
 logScope:
@@ -167,6 +167,10 @@ type
     reclaimProofToken: ReclaimProofTokenProc
     sampleSendDelay: SampleSendDelayProc
 
+method pathLength*(ct: CoverTraffic): int {.base, gcsafe, raises: [].} =
+  ## Existing strategies use three hops unless they configure another length.
+  DefaultPathLength
+
 method start*(ct: CoverTraffic) {.base, async: (raises: [CancelledError]).} =
   raiseAssert "start must be implemented by concrete cover traffic types"
 
@@ -240,6 +244,7 @@ type ConstantRateCoverTraffic* = ref object of CoverTraffic
   ## `scaledSlots = max(1, floor(f * R))`, giving `((1 + L) * P) / scaledSlots`
   ## seconds (with a 1 ms lower bound), where f is the `cover_rate_fraction`.
   ## RECOMMENDED as the default strategy (Mix Cover Traffic spec §7.1).
+  length: int
   emissionInterval: Duration
   epochDuration: Duration
   coverRateFraction: float
@@ -260,6 +265,9 @@ type ConstantRateCoverTraffic* = ref object of CoverTraffic
 
 const MaxPendingCoverEmissions = 32
 
+method pathLength*(ct: ConstantRateCoverTraffic): int {.gcsafe, raises: [].} =
+  ct.length
+
 proc new*(
     T: typedesc[ConstantRateCoverTraffic],
     totalSlots: int = 100,
@@ -268,6 +276,7 @@ proc new*(
     enablePrecomputation: bool = false,
     precomputeBatchSize: int = 0,
     useInternalEpochTimer: bool = true,
+    pathLength: int = DefaultPathLength,
 ): T =
   ## Parameters:
   ##   totalSlots: R (rate limit budget per epoch)
@@ -278,6 +287,9 @@ proc new*(
   ##   enablePrecomputation: whether to pre-build cover packets in batches
   ##   precomputeBatchSize: packets per batch (0 = auto: f * R / (1+L) / 10)
   ##   useInternalEpochTimer: false when SpamProtection provides OnEpochChange
+  ##   pathLength: total loop hops including the origin; fixed at construction
+  doAssert pathLength >= MinPathLength and pathLength <= MaxPathLength,
+    "unsupported cover path length"
   doAssert totalSlots > 0, "totalSlots (R) must be positive"
   doAssert epochDuration > Duration.default, "epochDuration (P) must be positive"
   doAssert coverRateFraction > 0.0 and coverRateFraction <= 1.0,
@@ -292,13 +304,13 @@ proc new*(
   # Approximates the continuous rate ((1 + L) * P) / (f * R); differs when
   # floor(f * R) < 1 or when f * R is non-integer.
   let emissionInterval =
-    max(1.milliseconds, epochDuration * (1 + PathLength) div scaledSlots)
+    max(1.milliseconds, epochDuration * (1 + pathLength) div scaledSlots)
 
   # Expected cover emissions per epoch at equilibrium: scaledSlots / (1 + L),
   # clamped to at least 1 packet. The remaining slots in R are consumed by
   # forwarding and local origination. Approximates (f * R) / (1 + L) with
   # integer floor applied at each step.
-  let precomputeTarget = max(1, scaledSlots div (1 + PathLength))
+  let precomputeTarget = max(1, scaledSlots div (1 + pathLength))
 
   # Default batch size = 10% of precomputeTarget (at least 1), so pre-computation
   # spreads across ~10 batches per epoch.
@@ -309,6 +321,7 @@ proc new*(
       max(1, precomputeTarget div 10)
 
   T(
+    length: pathLength,
     slotPool: SlotPool.new(totalSlots),
     emissionInterval: emissionInterval,
     epochDuration: epochDuration,

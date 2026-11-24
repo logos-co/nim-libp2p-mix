@@ -208,7 +208,7 @@ suite "mix_message_tests":
     )
     check:
       sent.isErr
-      sent.error.startsWith("Not enough mix nodes for a send")
+      sent.error == "not enough usable mix nodes"
       entryErrors("INVALID_SIZE") == invalidBefore
       entryErrors("LOW_MIX_POOL") == lowPoolBefore + 1
 
